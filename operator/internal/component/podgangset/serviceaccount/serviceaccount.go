@@ -14,6 +14,8 @@
 // limitations under the License.
 // */
 
+// Package serviceaccount provides a component operator for managing Kubernetes ServiceAccount resources
+// associated with PodGangSet instances.
 package serviceaccount
 
 import (
@@ -36,12 +38,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// Error codes for ServiceAccount operations.
 const (
-	errGetServiceAccount    v1alpha1.ErrorCode = "ERR_GET_SERVICEACCOUNT"
-	errSyncServiceAccount   v1alpha1.ErrorCode = "ERR_SYNC_SERVICEACCOUNT"
+	// errGetServiceAccount indicates an error occurred while retrieving a ServiceAccount.
+	errGetServiceAccount v1alpha1.ErrorCode = "ERR_GET_SERVICEACCOUNT"
+	// errSyncServiceAccount indicates an error occurred while synchronizing a ServiceAccount.
+	errSyncServiceAccount v1alpha1.ErrorCode = "ERR_SYNC_SERVICEACCOUNT"
+	// errDeleteServiceAccount indicates an error occurred while deleting a ServiceAccount.
 	errDeleteServiceAccount v1alpha1.ErrorCode = "ERR_DELETE_SERVICEACCOUNT"
 )
 
+// _resource implements the component.Operator interface for ServiceAccount resources.
 type _resource struct {
 	client client.Client
 	scheme *runtime.Scheme
@@ -59,6 +66,8 @@ func New(client client.Client, scheme *runtime.Scheme) component.Operator[v1alph
 func (r _resource) GetExistingResourceNames(ctx context.Context, _ logr.Logger, pgsObjMeta metav1.ObjectMeta) ([]string, error) {
 	saNames := make([]string, 0, 1)
 	objectKey := getObjectKey(pgsObjMeta)
+
+	// Check if ServiceAccount exists and is controlled by this PodGangSet
 	objMeta := &metav1.PartialObjectMetadata{}
 	objMeta.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("ServiceAccount"))
 	if err := r.client.Get(ctx, objectKey, objMeta); err != nil {
@@ -82,6 +91,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *v1alpha1.P
 	objectKey := getObjectKey(pgs.ObjectMeta)
 	sa := emptyServiceAccount(objectKey)
 
+	// Create or update the ServiceAccount using server-side apply
 	logger.Info("Running CreateOrUpdate ServiceAccount", "objectKey", objectKey)
 	opResult, err := controllerutil.CreateOrPatch(ctx, r.client, sa, func() error {
 		return r.buildResource(pgs, sa)
@@ -97,6 +107,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *v1alpha1.P
 	return nil
 }
 
+// Delete removes the ServiceAccount resource associated with the given PodGangSet.
 func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjMeta metav1.ObjectMeta) error {
 	objectKey := getObjectKey(pgsObjMeta)
 	logger.Info("Triggering delete of ServiceAccount", "objectKey", objectKey)
@@ -115,7 +126,9 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjMeta me
 	return nil
 }
 
+// buildResource configures the ServiceAccount with appropriate labels, ownership, and settings.
 func (r _resource) buildResource(pgs *v1alpha1.PodGangSet, sa *corev1.ServiceAccount) error {
+	// Set labels for resource identification and management
 	sa.Labels = getLabels(pgs.ObjectMeta)
 	if err := controllerutil.SetControllerReference(pgs, sa, r.scheme); err != nil {
 		return groveerr.WrapError(err,
@@ -124,10 +137,13 @@ func (r _resource) buildResource(pgs *v1alpha1.PodGangSet, sa *corev1.ServiceAcc
 			fmt.Sprintf("Error setting controller reference for ServiceAccount: %v", client.ObjectKeyFromObject(sa)),
 		)
 	}
+
+	// Enable automatic mounting of service account token
 	sa.AutomountServiceAccountToken = ptr.To(true)
 	return nil
 }
 
+// getLabels generates the appropriate labels for the ServiceAccount resource.
 func getLabels(pgsObjMeta metav1.ObjectMeta) map[string]string {
 	roleLabels := map[string]string{
 		v1alpha1.LabelComponentKey: component.NamePodServiceAccount,
@@ -139,6 +155,7 @@ func getLabels(pgsObjMeta metav1.ObjectMeta) map[string]string {
 	)
 }
 
+// getObjectKey generates the Kubernetes object key for the ServiceAccount.
 func getObjectKey(pgsObjMeta metav1.ObjectMeta) client.ObjectKey {
 	return client.ObjectKey{
 		Name:      v1alpha1.GeneratePodServiceAccountName(pgsObjMeta.Name),
@@ -146,6 +163,7 @@ func getObjectKey(pgsObjMeta metav1.ObjectMeta) client.ObjectKey {
 	}
 }
 
+// emptyServiceAccount creates a new ServiceAccount with basic metadata.
 func emptyServiceAccount(objKey client.ObjectKey) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{

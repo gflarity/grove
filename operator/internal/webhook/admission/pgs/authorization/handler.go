@@ -30,6 +30,8 @@ type Handler struct {
 }
 
 // Handle handles requests and admits them if they are authorized.
+// Currently, this is a placeholder implementation that allows all requests.
+// In a production environment, this would implement proper authorization logic.
 func (h *Handler) Handle(_ context.Context, _ admission.Request) admission.Response {
-	return admission.Response{}
+	return admission.Allowed("authorization not implemented - allowing all requests")
 }

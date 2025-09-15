@@ -43,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// Error codes used throughout the PodClique component for consistent error handling.
 const (
 	errCodeListPodClique              grovecorev1alpha1.ErrorCode = "ERR_LIST_PODCLIQUE"
 	errCodeMissingStartupType         grovecorev1alpha1.ErrorCode = "ERR_UNDEFINED_STARTUP_TYPE"
@@ -57,6 +58,9 @@ const (
 	errCodeCreatePodClique            grovecorev1alpha1.ErrorCode = "ERR_CREATE_PODCLIQUE"
 )
 
+// _resource implements the component.Operator interface for managing PodClique resources
+// within a PodCliqueScalingGroup. It handles the lifecycle operations including creation,
+// deletion, and synchronization of PodCliques based on scaling group specifications.
 type _resource struct {
 	client        client.Client
 	scheme        *runtime.Scheme
@@ -92,7 +96,9 @@ func (r _resource) GetExistingResourceNames(ctx context.Context, logger logr.Log
 
 // Sync synchronizes all resources that the PodClique Operator manages.
 func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) error {
+	// Calculate total expected PodCliques: replicas × clique names
 	expectedPCLQs := int(pcsg.Spec.Replicas) * len(pcsg.Spec.CliqueNames)
+	// Get the parent PodGangSet to access template specifications
 	pgs, err := componentutils.GetOwnerPodGangSet(ctx, r.client, pcsg.ObjectMeta)
 	if err != nil {
 		return groveerr.WrapError(err,
@@ -108,15 +114,16 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcsg *grovecore
 	}
 	// If there are excess PodCliques than expected, delete the ones that are no longer expected but existing.
 	// This can happen when PCSG replicas have been scaled-in.
+	// Clean up excess PodCliques when scaling down
 	if err = r.triggerDeletionOfExcessPCLQs(ctx, logger, pgs, pcsg, existingPCLQs, expectedPCLQs); err != nil {
 		return err
 	}
-	// Identify PCSG replicas for which MinAvailable is breached for even a single constituent PCLQ. For such a PCSG replica terminate all PCLQs for that replica.
+	// Handle MinAvailable violations by terminating affected replica groups
 	shouldRequeue, err := r.triggerDeletionOfMinAvailableBreachedPCSGReplicas(ctx, logger, pgs, pcsg)
 	if err != nil {
 		return err
 	}
-	// Create or update the expected PodCliques as per the PodCliqueScalingGroup configurations defined in the PodGangSet.
+	// Create missing PodCliques to match desired state
 	existingPCLQFQNs := lo.Map(existingPCLQs, func(pclq grovecorev1alpha1.PodClique, _ int) string { return pclq.Name })
 	if err = r.createExpectedPCLQs(ctx, logger, pgs, pcsg, existingPCLQFQNs, expectedPCLQs); err != nil {
 		return err
@@ -132,6 +139,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pcsg *grovecore
 	return nil
 }
 
+// getExistingPCLQs retrieves all PodCliques currently owned by the given PodCliqueScalingGroup.
 func (r _resource) getExistingPCLQs(ctx context.Context, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) ([]grovecorev1alpha1.PodClique, error) {
 	existingPCLQs, err := componentutils.GetPCLQsByOwner(ctx, r.client, grovecorev1alpha1.PodCliqueScalingGroupKind, client.ObjectKeyFromObject(pcsg), getPodCliqueSelectorLabels(pcsg.ObjectMeta))
 	if err != nil {
@@ -144,12 +152,14 @@ func (r _resource) getExistingPCLQs(ctx context.Context, pcsg *grovecorev1alpha1
 	return existingPCLQs, nil
 }
 
+// triggerDeletionOfExcessPCLQs removes PodCliques that exceed the expected count,
+// typically occurring during scale-down operations.
 func (r _resource) triggerDeletionOfExcessPCLQs(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, existingPCLQs []grovecorev1alpha1.PodClique, numExpectedPCLQs int) error {
-	// Check if the number of existing PodCliques is greater than expected, if so, we need to delete the extra ones.
+	// Calculate excess PodCliques that need deletion
 	diff := len(existingPCLQs) - numExpectedPCLQs
 	if diff > 0 {
 		logger.Info("Found more PodCliques than expected, triggering deletion of excess PodCliques", "expected", numExpectedPCLQs, "existing", len(existingPCLQs), "diff", diff)
-		// collect the names of the extra PodCliques to delete
+		// Identify replica indexes of PodCliques to delete
 		deletionCandidatePodGangNames := getExcessPCSGReplicaIndexesToDelete(pcsg, existingPCLQs)
 		reason := fmt.Sprintf("Delete excess PodCliques associated to PodGangs %v for PodCliqueScalingGroup %v", deletionCandidatePodGangNames, client.ObjectKeyFromObject(pcsg))
 		deletionTasks := r.createDeleteTasks(logger, pgs, pcsg.Name, deletionCandidatePodGangNames, reason)
@@ -158,6 +168,8 @@ func (r _resource) triggerDeletionOfExcessPCLQs(ctx context.Context, logger logr
 	return nil
 }
 
+// triggerDeletionOfMinAvailableBreachedPCSGReplicas handles deletion of PCSG replicas
+// where MinAvailable constraints have been violated beyond the termination delay.
 func (r _resource) triggerDeletionOfMinAvailableBreachedPCSGReplicas(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) (shouldRequeue bool, err error) {
 	terminationDelay := pgs.Spec.Template.TerminationDelay.Duration
 	pcsgReplicaIndexesToDelete, pcsgReplicaIndexesRequiringRequeue, err := r.findPCSGReplicasToDelete(ctx, pcsg, terminationDelay, logger)
@@ -165,8 +177,7 @@ func (r _resource) triggerDeletionOfMinAvailableBreachedPCSGReplicas(ctx context
 		return
 	}
 	numMinAvailableBreachedPCSGReplicas := len(pcsgReplicaIndexesToDelete) + len(pcsgReplicaIndexesRequiringRequeue)
-	// If all the PCSG *replicas* are having MinAvailableBreached condition set to true, then that means that now PCSG.Status.Condition will have
-	// MinAvailableBreached set to true. At this point of time, it is now the responsibility of PGS reconciler to ensure that it deletes the PGS replica.
+	// Delegate to PGS reconciler when all replicas are breached
 	if numMinAvailableBreachedPCSGReplicas == int(pcsg.Spec.Replicas) {
 		logger.Info("For each PCSG replica, MinAvailableBreached is true, delegating the responsibility to PGS reconciler to trigger the deletion of PGS replica.")
 		return
@@ -187,9 +198,13 @@ func (r _resource) triggerDeletionOfMinAvailableBreachedPCSGReplicas(ctx context
 	return
 }
 
+// createExpectedPCLQs creates any missing PodCliques to match the desired replica count
+// and clique configuration specified in the PodCliqueScalingGroup.
 func (r _resource) createExpectedPCLQs(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, existingPCLQNames []string, numExpectedPCLQs int) error {
+	// Build creation tasks for missing PodCliques
 	tasks := make([]utils.Task, 0, numExpectedPCLQs)
 	for pcsgReplicaIndex := range pcsg.Spec.Replicas {
+		// Generate FQNs for PodCliques in this replica that match configured clique names
 		pclqFQNs := lo.FilterMap(pgs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, _ int) (string, bool) {
 			pclqFQN := grovecorev1alpha1.GeneratePodCliqueName(grovecorev1alpha1.ResourceNameReplica{
 				Name:    pcsg.Name,
@@ -198,6 +213,7 @@ func (r _resource) createExpectedPCLQs(ctx context.Context, logger logr.Logger, 
 			return pclqFQN, slices.Contains(pcsg.Spec.CliqueNames, pclqTemplateSpec.Name)
 		})
 
+		// Create tasks for PodCliques that don't already exist
 		for _, pclqFQN := range pclqFQNs {
 			if slices.Contains(existingPCLQNames, pclqFQN) {
 				continue
@@ -225,6 +241,8 @@ func (r _resource) createExpectedPCLQs(ctx context.Context, logger logr.Logger, 
 	return nil
 }
 
+// findPCSGReplicasToDelete identifies PCSG replicas that have violated MinAvailable constraints
+// and determines which should be terminated immediately vs. requeued for later processing.
 func (r _resource) findPCSGReplicasToDelete(ctx context.Context, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, terminationDelay time.Duration, logger logr.Logger) (pcsgReplicaIndexesToTerminate []string, pcsgReplicaIndexToRequeue []string, err error) {
 	existingPCLQs, err := componentutils.GetPCLQsByOwner(ctx, r.client, grovecorev1alpha1.PodCliqueScalingGroupKind, client.ObjectKeyFromObject(pcsg), getPodCliqueSelectorLabels(pcsg.ObjectMeta))
 	if err != nil {
@@ -236,9 +254,9 @@ func (r _resource) findPCSGReplicasToDelete(ctx context.Context, pcsg *grovecore
 		return
 	}
 	now := time.Now()
-	// group existing PCLQs by PCSG replica index. These are PCLQs that belong to once replica of PCSG.
+	// Group PodCliques by their PCSG replica index for batch processing
 	pcsgReplicaIndexPCLQs := componentutils.GroupPCLQsByPCSGReplicaIndex(existingPCLQs)
-	// For each PCSG replica check if minAvailable for any constituent PCLQ has been violated. Those PCSG replicas should be marked for termination.
+	// Check each replica group for MinAvailable violations. Those PCSG replicas should be marked for termination.
 	for pcsgReplicaIndex, pclqs := range pcsgReplicaIndexPCLQs {
 		pclqNames, minWaitFor := componentutils.GetMinAvailableBreachedPCLQInfo(pclqs, terminationDelay, now)
 		if len(pclqNames) > 0 {
@@ -253,6 +271,7 @@ func (r _resource) findPCSGReplicasToDelete(ctx context.Context, pcsg *grovecore
 	return
 }
 
+// triggerDeletionOfPodCliques executes deletion tasks concurrently and handles any errors.
 func (r _resource) triggerDeletionOfPodCliques(ctx context.Context, logger logr.Logger, pcsgObjectKey client.ObjectKey, deletionTasks []utils.Task) error {
 	if runResult := utils.RunConcurrently(ctx, logger, deletionTasks); runResult.HasErrors() {
 		return groveerr.WrapError(runResult.GetAggregatedError(),
@@ -265,6 +284,7 @@ func (r _resource) triggerDeletionOfPodCliques(ctx context.Context, logger logr.
 	return nil
 }
 
+// createDeleteTasks builds a list of deletion tasks for the specified PCSG replica indexes.
 func (r _resource) createDeleteTasks(logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, pcsgName string, pcsgReplicaIndexesToDelete []string, reason string) []utils.Task {
 	deletionTasks := make([]utils.Task, 0, len(pcsgReplicaIndexesToDelete))
 	for _, pcsgReplicaIndex := range pcsgReplicaIndexesToDelete {
@@ -288,6 +308,8 @@ func (r _resource) createDeleteTasks(logger logr.Logger, pgs *grovecorev1alpha1.
 	return deletionTasks
 }
 
+// getLabelsToDeletePCSGReplicaIndexPCLQs returns the label selector for deleting
+// all PodCliques belonging to a specific PCSG replica index.
 func getLabelsToDeletePCSGReplicaIndexPCLQs(pgsName, pcsgName, pcsgReplicaIndex string) map[string]string {
 	return lo.Assign(
 		k8sutils.GetDefaultLabelsForPodGangSetManagedResources(pgsName),
@@ -299,8 +321,12 @@ func getLabelsToDeletePCSGReplicaIndexPCLQs(pgsName, pcsgName, pcsgReplicaIndex 
 	)
 }
 
+// getExcessPCSGReplicaIndexesToDelete identifies which PCSG replica indexes have
+// PodCliques that are no longer expected and should be deleted.
 func getExcessPCSGReplicaIndexesToDelete(pcsg *grovecorev1alpha1.PodCliqueScalingGroup, existingPCLQs []grovecorev1alpha1.PodClique) []string {
+	// Get list of expected PodClique names based on current PCSG spec
 	expectedPCLQNames := getExpectedPodCliqueFQNs(pcsg)
+	// Find existing PodCliques that are no longer expected
 	return lo.FilterMap(existingPCLQs, func(existingPCLQ grovecorev1alpha1.PodClique, _ int) (string, bool) {
 		if slices.Contains(expectedPCLQNames, existingPCLQ.Name) {
 			return "", false
@@ -316,6 +342,7 @@ func getExcessPCSGReplicaIndexesToDelete(pcsg *grovecorev1alpha1.PodCliqueScalin
 // Delete deletes all resources that the PodClique Operator manages.
 func (r _resource) Delete(ctx context.Context, logger logr.Logger, pcsgObjectMeta metav1.ObjectMeta) error {
 	logger.Info("Triggering deletion of PodCliques managed by PodCliqueScalingGroup")
+	// Get all PodClique names currently managed by this PCSG
 	existingPCLQNames, err := r.GetExistingResourceNames(ctx, logger, pcsgObjectMeta)
 	if err != nil {
 		return groveerr.WrapError(err,
@@ -324,6 +351,7 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pcsgObjectMet
 			fmt.Sprintf("Unable to fetch existing PodClique names for PodCliqueScalingGroup: %v", k8sutils.GetObjectKeyFromObjectMeta(pcsgObjectMeta)),
 		)
 	}
+	// Build deletion tasks for each existing PodClique
 	deleteTasks := make([]utils.Task, 0, len(existingPCLQNames))
 	for _, pclqName := range existingPCLQNames {
 		pclqObjectKey := client.ObjectKey{Name: pclqName, Namespace: pcsgObjectMeta.Namespace}
@@ -355,8 +383,11 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pcsgObjectMet
 	return nil
 }
 
+// getPCSGTemplateNumPods calculates the total number of pods across all cliques
+// in the PCSG template by summing replicas from matching PodClique templates.
 func (r _resource) getPCSGTemplateNumPods(pgs *grovecorev1alpha1.PodGangSet, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) int {
 	var pcsgTemplateNumPods int
+	// Create lookup map for PodClique templates by name
 	pcMap := make(map[string]*grovecorev1alpha1.PodCliqueTemplateSpec, len(pgs.Spec.Template.Cliques))
 	for _, pclqTemplateSpec := range pgs.Spec.Template.Cliques {
 		pcMap[pclqTemplateSpec.Name] = pclqTemplateSpec
@@ -371,8 +402,11 @@ func (r _resource) getPCSGTemplateNumPods(pgs *grovecorev1alpha1.PodGangSet, pcs
 	return pcsgTemplateNumPods
 }
 
+// doCreate handles the creation of a single PodClique resource, including building
+// its specification and establishing ownership relationships.
 func (r _resource) doCreate(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pcsgReplicaIndex int, pclqObjectKey client.ObjectKey) error {
 	logger.Info("Running CreateOrUpdate PodClique", "pclqObjectKey", pclqObjectKey)
+	// Initialize empty PodClique with basic metadata
 	pclq := emptyPodClique(pclqObjectKey)
 	pcsgObjKey := client.ObjectKeyFromObject(pclq)
 	if err := r.buildResource(logger, pgs, pcsg, pcsgReplicaIndex, pclq); err != nil {
@@ -395,9 +429,12 @@ func (r _resource) doCreate(ctx context.Context, logger logr.Logger, pgs *grovec
 	return nil
 }
 
+// buildResource populates a PodClique resource with the appropriate specification,
+// labels, annotations, and dependency relationships based on the template.
 func (r _resource) buildResource(logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pcsgReplicaIndex int, pclq *grovecorev1alpha1.PodClique) error {
 	var err error
 	pclqObjectKey, pgsObjectKey := client.ObjectKeyFromObject(pclq), client.ObjectKeyFromObject(pgs)
+	// Find the matching PodClique template specification
 	pclqTemplateSpec, foundAtIndex, ok := lo.FindIndexOf(pgs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
 		return strings.HasSuffix(pclq.Name, pclqTemplateSpec.Name)
 	})
@@ -408,8 +445,7 @@ func (r _resource) buildResource(logger logr.Logger, pgs *grovecorev1alpha1.PodG
 			fmt.Sprintf("Error building PodClique resource, PodCliqueTemplateSpec for PodClique: %v not found in PodGangSet: %v", pclqObjectKey, pgsObjectKey),
 		)
 	}
-	// Set PodClique.ObjectMeta
-	// ------------------------------------
+	// Establish ownership relationship with PCSG
 	if err = controllerutil.SetControllerReference(pcsg, pclq, r.scheme); err != nil {
 		return groveerr.WrapError(err,
 			errCodeSetPodCliqueOwnerReference,
@@ -423,15 +459,18 @@ func (r _resource) buildResource(logger logr.Logger, pgs *grovecorev1alpha1.PodG
 		return err
 	}
 
+	// Generate PodGang name for this PodClique
 	podGangName := grovecorev1alpha1.GeneratePodGangNameForPodCliqueOwnedByPCSG(pgs, pgsReplicaIndex, pcsg, pcsgReplicaIndex)
 
+	// Set metadata from template and generated values
 	pclq.Labels = getLabels(pgs, pgsReplicaIndex, pcsg, pcsgReplicaIndex, pclqObjectKey, pclqTemplateSpec, podGangName)
 	pclq.Annotations = pclqTemplateSpec.Annotations
-	// set PodCliqueSpec
-	// ------------------------------------
+	// Copy base specification from template
 	pclq.Spec = pclqTemplateSpec.Spec
+	// Add PCSG-specific environment variables to containers
 	pcsgTemplateNumPods := r.getPCSGTemplateNumPods(pgs, pcsg)
 	r.addEnvironmentVariablesToPodContainerSpecs(pclq, pcsgTemplateNumPods)
+	// Resolve startup dependencies based on template ordering
 	dependentPCLQNames, err := identifyFullyQualifiedStartupDependencyNames(pgs, pgsReplicaIndex, pcsg, pcsgReplicaIndex, pclq, foundAtIndex)
 	if err != nil {
 		return err
@@ -440,7 +479,10 @@ func (r _resource) buildResource(logger logr.Logger, pgs *grovecorev1alpha1.PodG
 	return nil
 }
 
+// addEnvironmentVariablesToPodContainerSpecs injects PCSG-specific environment variables
+// into all containers and init containers in the PodClique specification.
 func (r _resource) addEnvironmentVariablesToPodContainerSpecs(pclq *grovecorev1alpha1.PodClique, pcsgTemplateNumPods int) {
+	// Define PCSG-specific environment variables
 	pcsgEnvVars := []corev1.EnvVar{
 		{
 			Name: grovecorev1alpha1.EnvVarPCSGName,
@@ -468,6 +510,8 @@ func (r _resource) addEnvironmentVariablesToPodContainerSpecs(pclq *grovecorev1a
 	componentutils.AddEnvVarsToContainers(pclqObjPodSpec.InitContainers, pcsgEnvVars)
 }
 
+// getExpectedPodCliqueFQNs generates the fully qualified names for all PodCliques
+// that should exist based on the current PCSG specification.
 func getExpectedPodCliqueFQNs(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) []string {
 	expectedPCLQFQNs := make([]string, 0, int(pcsg.Spec.Replicas)*len(pcsg.Spec.CliqueNames))
 	for pcsgReplicaIndex := range pcsg.Spec.Replicas {
@@ -482,6 +526,7 @@ func getExpectedPodCliqueFQNs(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) []s
 	return expectedPCLQFQNs
 }
 
+// getPGSReplicaFromPCSG extracts the PodGangSet replica index from the PCSG's labels.
 func getPGSReplicaFromPCSG(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) (int, error) {
 	pgsReplicaIndex, ok := pcsg.GetLabels()[grovecorev1alpha1.LabelPodGangSetReplicaIndex]
 	if !ok {
@@ -498,11 +543,12 @@ func getPGSReplicaFromPCSG(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) (int, 
 	return pgsReplica, nil
 }
 
+// identifyFullyQualifiedStartupDependencyNames resolves the startup dependencies
+// for a PodClique based on the configured startup type (in-order or explicit).
 func identifyFullyQualifiedStartupDependencyNames(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pcsgReplicaIndex int, pclq *grovecorev1alpha1.PodClique, foundAtIndex int) ([]string, error) {
 	cliqueStartupType := pgs.Spec.Template.StartupType
+	// Validate startup type is configured (should be set by defaulting webhook)
 	if cliqueStartupType == nil {
-		// Ideally this should never happen as the defaulting webhook should set it v1alpha1.CliqueStartupTypeInOrder as the default value.
-		// If it is still nil, then by not returning an error we break the API contract. It is a bug that should be fixed.
 		return nil, groveerr.New(errCodeMissingStartupType, component.OperationSync, fmt.Sprintf("PodClique: %v has nil StartupType", client.ObjectKeyFromObject(pclq)))
 	}
 	switch *cliqueStartupType {
@@ -515,19 +561,22 @@ func identifyFullyQualifiedStartupDependencyNames(pgs *grovecorev1alpha1.PodGang
 	}
 }
 
+// getInOrderStartupDependencies calculates startup dependencies for in-order startup type,
+// where PodCliques start in the order they are defined in the template.
 func getInOrderStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pcsgReplicaIndex, foundAtIndex int) []string {
+	// First clique has no dependencies
 	if foundAtIndex == 0 {
 		return nil
 	}
+	// Get the name of the previous clique in the template order
 	parentCliqueName := pgs.Spec.Template.Cliques[foundAtIndex-1].Name
 
-	// Current pcsgReplicaIndex belongs to the base PodGang
+	// Handle base PodGang dependencies differently
 	if pcsgReplicaIndex < int(*pcsg.Spec.MinAvailable) {
 		return componentutils.GenerateDependencyNamesForBasePodGang(pgs, pgsReplicaIndex, parentCliqueName)
 	}
 
-	// Startup ordering is only enforced within a PodGang.
-	// PodCliques that belong to the base PodGang are not considered for startsAfter in scaled PodGangs.
+	// Skip dependencies on cliques not in this PCSG (scaled PodGangs only depend on their own cliques)
 	if !slices.Contains(pcsg.Spec.CliqueNames, parentCliqueName) {
 		return nil
 	}
@@ -537,9 +586,11 @@ func getInOrderStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplica
 	}
 }
 
+// getExplicitStartupDependencies resolves startup dependencies for explicit startup type,
+// where dependencies are explicitly defined in the PodClique template.
 func getExplicitStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pcsgReplicaIndex int, pclq *grovecorev1alpha1.PodClique) []string {
 	parentCliqueNames := make([]string, 0, len(pclq.Spec.StartsAfter))
-	// Current pcsgReplicaIndex belongs to the base PodGang
+	// Handle base PodGang explicit dependencies
 	if pcsgReplicaIndex < int(*pcsg.Spec.MinAvailable) {
 		for _, dependency := range pclq.Spec.StartsAfter {
 			parentCliqueNames = append(parentCliqueNames, componentutils.GenerateDependencyNamesForBasePodGang(pgs, pgsReplicaIndex, dependency)...)
@@ -547,8 +598,9 @@ func getExplicitStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplic
 		return parentCliqueNames
 	}
 
+	// Process explicit dependencies for scaled PodGangs
 	for _, dependency := range pclq.Spec.StartsAfter {
-		// Startup ordering is only enforced within the scaled PodCliqueScalingGroup's corresponding PodGang.
+		// Only include dependencies within this PCSG
 		if !slices.Contains(pcsg.Spec.CliqueNames, dependency) {
 			continue
 		}
@@ -557,6 +609,8 @@ func getExplicitStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplic
 	return parentCliqueNames
 }
 
+// getPodCliqueSelectorLabels returns the label selector for finding PodCliques
+// managed by a specific PodCliqueScalingGroup.
 func getPodCliqueSelectorLabels(pcsgObjectMeta metav1.ObjectMeta) map[string]string {
 	pgsName := componentutils.GetPodGangSetName(pcsgObjectMeta)
 	return lo.Assign(
@@ -568,6 +622,8 @@ func getPodCliqueSelectorLabels(pcsgObjectMeta metav1.ObjectMeta) map[string]str
 	)
 }
 
+// getLabels constructs the complete set of labels for a PodClique, combining
+// template labels with component-specific labels for tracking and selection.
 func getLabels(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pcsgReplicaIndex int, pclqObjectKey client.ObjectKey, pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, podGangName string) map[string]string {
 	pclqComponentLabels := map[string]string{
 		grovecorev1alpha1.LabelAppNameKey:                        pclqObjectKey.Name,
@@ -578,7 +634,7 @@ func getLabels(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int, pcsg *gro
 		grovecorev1alpha1.LabelPodCliqueScalingGroupReplicaIndex: strconv.Itoa(pcsgReplicaIndex),
 	}
 
-	// Add base-podgang label for scaled PodGang pods (beyond minAvailable)
+	// Add base PodGang label for scaled PodGangs to maintain relationships
 	basePodGangName := grovecorev1alpha1.GenerateBasePodGangName(
 		grovecorev1alpha1.ResourceNameReplica{Name: pgs.Name, Replica: pgsReplicaIndex},
 	)
@@ -594,6 +650,7 @@ func getLabels(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int, pcsg *gro
 	)
 }
 
+// emptyPodClique creates a new PodClique resource with only basic metadata populated.
 func emptyPodClique(objKey client.ObjectKey) *grovecorev1alpha1.PodClique {
 	return &grovecorev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{

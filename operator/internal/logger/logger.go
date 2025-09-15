@@ -14,6 +14,8 @@
 // limitations under the License.
 // */
 
+// Package logger provides utilities for creating and configuring structured loggers
+// using the logr interface backed by Zap logging framework.
 package logger
 
 import (
@@ -28,30 +30,47 @@ import (
 )
 
 // MustNewLogger creates a new logr.Logger backed by Zap and panics on invalid input.
+// The devMode parameter enables development-friendly logging output.
+// The level parameter sets the minimum log level (debug, info, error).
+// The format parameter controls output format (json or text).
 func MustNewLogger(devMode bool, level configv1alpha1.LogLevel, format configv1alpha1.LogFormat) logr.Logger {
+	// Build logger options from configuration parameters
 	opts, err := buildDefaultLoggerOpts(devMode, level, format)
 	utilruntime.Must(err)
 	return logzap.New(opts...)
 }
 
+// buildDefaultLoggerOpts constructs Zap logger options from configuration parameters.
+// Returns a slice of logzap.Opts that configure development mode, log format, and log level.
 func buildDefaultLoggerOpts(devMode bool, level configv1alpha1.LogLevel, format configv1alpha1.LogFormat) ([]logzap.Opts, error) {
 	var opts []logzap.Opts
+
+	// Configure development mode for human-readable output
 	opts = append(opts, logzap.UseDevMode(devMode))
+
+	// Configure log format (JSON or text)
 	formatOpts, err := createLogFormatOpts(format)
 	if err != nil {
 		return nil, err
 	}
 	opts = append(opts, formatOpts)
+
+	// Configure log level filtering
 	levelOpts, err := createLogLevelOpts(level)
 	if err != nil {
 		return nil, err
 	}
 	opts = append(opts, levelOpts)
+
 	return opts, nil
 }
 
+// createLogLevelOpts converts a Grove log level to Zap logger options.
+// Supports debug, info, and error levels with info as the default for empty values.
 func createLogLevelOpts(level configv1alpha1.LogLevel) (logzap.Opts, error) {
 	var zapLevel zapcore.LevelEnabler
+
+	// Map Grove log levels to Zap levels
 	switch level {
 	case configv1alpha1.DebugLevel:
 		zapLevel = zapcore.DebugLevel
@@ -62,16 +81,20 @@ func createLogLevelOpts(level configv1alpha1.LogLevel) (logzap.Opts, error) {
 	default:
 		return nil, fmt.Errorf("invalid log level %q", level)
 	}
+
 	return logzap.Level(zapLevel), nil
 }
 
+// createLogFormatOpts converts a Grove log format to Zap logger options.
+// Supports text (console) and JSON formats with JSON as the default for empty values.
 func createLogFormatOpts(format configv1alpha1.LogFormat) (logzap.Opts, error) {
+	// Configure common encoder settings for consistent timestamp and duration formatting
 	setCommonEncoderConfigOpts := func(encoderConfig *zapcore.EncoderConfig) {
 		encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 		encoderConfig.EncodeDuration = zapcore.StringDurationEncoder
 	}
 
-	// configure zap log format
+	// Map Grove log formats to Zap encoders
 	switch format {
 	case configv1alpha1.LogFormatText:
 		return logzap.ConsoleEncoder(setCommonEncoderConfigOpts), nil

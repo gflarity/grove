@@ -37,19 +37,22 @@ const (
 	ErrValidateUpdatePodGangSet v1alpha1.ErrorCode = "ERR_VALIDATE_UPDATE_PODGANGSET"
 )
 
-// Handler is a handler for validating PodGangSet resources.
+// Handler implements admission.Handler interface for validating PodGangSet resources.
 type Handler struct {
 	logger logr.Logger
 }
 
-// NewHandler creates a new handler for PodGangSet Webhook.
+// NewHandler creates a new validation handler for PodGangSet resources.
+// It initializes the handler with a logger from the provided manager.
 func NewHandler(mgr manager.Manager) *Handler {
 	return &Handler{
 		logger: mgr.GetLogger().WithName("webhook").WithName(Name),
 	}
 }
 
-// ValidateCreate validates a PodGangSet create request.
+// ValidateCreate implements admission.Validator interface.
+// It validates the creation of a new PodGangSet resource.
+// Returns admission warnings and validation errors if any.
 func (h *Handler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	h.logValidatorFunctionInvocation(ctx)
 	pgs, err := castToPodGangSet(obj)
@@ -59,7 +62,9 @@ func (h *Handler) ValidateCreate(ctx context.Context, obj runtime.Object) (admis
 	return newPGSValidator(pgs, admissionv1.Create).validate()
 }
 
-// ValidateUpdate validates a PodGangSet update request.
+// ValidateUpdate implements admission.Validator interface.
+// It validates updates to an existing PodGangSet resource by comparing the new and old versions.
+// Returns admission warnings and validation errors if any.
 func (h *Handler) ValidateUpdate(ctx context.Context, newObj, oldObj runtime.Object) (admission.Warnings, error) {
 	h.logValidatorFunctionInvocation(ctx)
 	newPgs, err := castToPodGangSet(newObj)
@@ -78,11 +83,15 @@ func (h *Handler) ValidateUpdate(ctx context.Context, newObj, oldObj runtime.Obj
 	return warnings, validator.validateUpdate(oldPgs)
 }
 
-// ValidateDelete validates a PodGangSet delete request.
+// ValidateDelete implements admission.Validator interface.
+// Currently, no validation is performed for PodGangSet deletion.
+// Returns nil for both warnings and errors.
 func (h *Handler) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
 	return nil, nil
 }
 
+// castToPodGangSet attempts to convert a runtime.Object to a PodGangSet.
+// Returns an error if the object is not a PodGangSet.
 func castToPodGangSet(obj runtime.Object) (*v1alpha1.PodGangSet, error) {
 	pgs, ok := obj.(*v1alpha1.PodGangSet)
 	if !ok {
@@ -91,6 +100,8 @@ func castToPodGangSet(obj runtime.Object) (*v1alpha1.PodGangSet, error) {
 	return pgs, nil
 }
 
+// logValidatorFunctionInvocation logs details about the validation webhook invocation.
+// It extracts request information from the context and logs the operation details.
 func (h *Handler) logValidatorFunctionInvocation(ctx context.Context) {
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {

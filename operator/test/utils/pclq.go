@@ -31,12 +31,13 @@ import (
 // PodCliqueBuilder is a builder for creating PodClique objects.
 // This should primarily be used for tests.
 type PodCliqueBuilder struct {
-	pgsName         string
-	pgsReplicaIndex int32
-	pclq            *grovecorev1alpha1.PodClique
+	pgsName         string                       // Name of the parent PodGangSet
+	pgsReplicaIndex int32                        // Replica index within the PodGangSet
+	pclq            *grovecorev1alpha1.PodClique // The PodClique being built
 }
 
-// NewPodCliqueBuilder creates a new PodCliqueBuilder.
+// NewPodCliqueBuilder creates a new PodCliqueBuilder for a PodGangSet-managed PodClique.
+// It initializes a builder with default values and standard owner references.
 func NewPodCliqueBuilder(pgsName string, pgsUID types.UID, pclqTemplateName, namespace string, pgsReplicaIndex int32) *PodCliqueBuilder {
 	return &PodCliqueBuilder{
 		pgsName:         pgsName,
@@ -45,7 +46,8 @@ func NewPodCliqueBuilder(pgsName string, pgsUID types.UID, pclqTemplateName, nam
 	}
 }
 
-// NewPCSGPodCliqueBuilder creates a PodClique that belongs to a PodCliqueScalingGroup.
+// NewPCSGPodCliqueBuilder creates a PodClique builder for a PodCliqueScalingGroup-managed PodClique.
+// It sets up appropriate labels and defaults for scaling group membership.
 func NewPCSGPodCliqueBuilder(name, namespace, pgsName, pcsgName string, pgsReplicaIndex, pcsgReplicaIndex int) *PodCliqueBuilder {
 	pclq := &grovecorev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
@@ -74,21 +76,22 @@ func NewPCSGPodCliqueBuilder(name, namespace, pgsName, pcsgName string, pgsRepli
 	}
 }
 
-// WithLabels merges the passed labels with default labels.
-// Passed in labels will overwrite default labels with the same keys.
+// WithLabels merges the provided labels with the default labels.
+// If there are conflicts, the provided labels take precedence over default labels.
 func (b *PodCliqueBuilder) WithLabels(labels map[string]string) *PodCliqueBuilder {
 	b.pclq.Labels = lo.Assign(b.pclq.Labels, labels)
 	return b
 }
 
-// WithReplicas sets the number of replicas for the PodClique.
-// Default is set to 1.
+// WithReplicas sets the desired number of replicas for the PodClique.
+// The default value is 1 if not specified.
 func (b *PodCliqueBuilder) WithReplicas(replicas int32) *PodCliqueBuilder {
 	b.pclq.Spec.Replicas = replicas
 	return b
 }
 
-// WithStartsAfter sets the StartsAfter field for the PodClique.
+// WithStartsAfter specifies the PodClique dependencies that must be ready before this one starts.
+// It takes template names and generates the corresponding PodClique names based on the PodGangSet context.
 func (b *PodCliqueBuilder) WithStartsAfter(pclqTemplateNames []string) *PodCliqueBuilder {
 	pclqDependencies := lo.Map(pclqTemplateNames, func(pclqTemplateName string, _ int) string {
 		return grovecorev1alpha1.GeneratePodCliqueName(grovecorev1alpha1.ResourceNameReplica{Name: b.pgsName, Replica: int(b.pgsReplicaIndex)}, pclqTemplateName)
@@ -97,7 +100,8 @@ func (b *PodCliqueBuilder) WithStartsAfter(pclqTemplateNames []string) *PodCliqu
 	return b
 }
 
-// WithAutoScaleMaxReplicas sets the maximum replicas in ScaleConfig for the PodClique.
+// WithAutoScaleMaxReplicas configures the maximum number of replicas for auto-scaling.
+// This sets up the ScaleConfig with the specified upper bound.
 func (b *PodCliqueBuilder) WithAutoScaleMaxReplicas(maximum int32) *PodCliqueBuilder {
 	b.pclq.Spec.ScaleConfig = &grovecorev1alpha1.AutoScalingConfig{
 		MaxReplicas: maximum,
@@ -105,7 +109,8 @@ func (b *PodCliqueBuilder) WithAutoScaleMaxReplicas(maximum int32) *PodCliqueBui
 	return b
 }
 
-// WithOwnerReference sets the owner reference for the PodClique from individual values.
+// WithOwnerReference sets a custom owner reference for the PodClique.
+// If uid is empty, a test-specific default UID will be used.
 func (b *PodCliqueBuilder) WithOwnerReference(kind, name, uid string) *PodCliqueBuilder {
 	ownerRef := metav1.OwnerReference{
 		Kind: kind,
@@ -119,7 +124,8 @@ func (b *PodCliqueBuilder) WithOwnerReference(kind, name, uid string) *PodClique
 	return b
 }
 
-// WithOptions applies option functions to customize the PodClique.
+// WithOptions applies a series of option functions to customize the PodClique.
+// This allows for flexible configuration using functional options pattern.
 func (b *PodCliqueBuilder) WithOptions(opts ...PCLQOption) *PodCliqueBuilder {
 	for _, opt := range opts {
 		opt(b.pclq)
@@ -127,17 +133,22 @@ func (b *PodCliqueBuilder) WithOptions(opts ...PCLQOption) *PodCliqueBuilder {
 	return b
 }
 
-// Build creates a PodClique object.
+// Build finalizes and returns the constructed PodClique object.
+// It ensures a default PodSpec is set before returning.
 func (b *PodCliqueBuilder) Build() *grovecorev1alpha1.PodClique {
 	_ = b.withDefaultPodSpec()
 	return b.pclq
 }
 
+// withDefaultPodSpec sets a default pod specification for the PodClique.
+// It uses the default PodBuilder to create a basic pod spec.
 func (b *PodCliqueBuilder) withDefaultPodSpec() *PodCliqueBuilder {
 	b.pclq.Spec.PodSpec = *NewPodBuilder().Build()
 	return b
 }
 
+// createDefaultPodCliqueWithoutPodSpec creates a new PodClique with standard metadata and owner references.
+// The PodSpec is intentionally left empty and should be set separately.
 func createDefaultPodCliqueWithoutPodSpec(pgsName string, pgsUID types.UID, pclqTemplateName, namespace string, pgsReplicaIndex int32) *grovecorev1alpha1.PodClique {
 	pclqName := grovecorev1alpha1.GeneratePodCliqueName(grovecorev1alpha1.ResourceNameReplica{Name: pgsName, Replica: int(pgsReplicaIndex)}, pclqTemplateName)
 	return &grovecorev1alpha1.PodClique{
@@ -163,6 +174,8 @@ func createDefaultPodCliqueWithoutPodSpec(pgsName string, pgsUID types.UID, pclq
 	}
 }
 
+// getDefaultLabels returns the standard set of labels for a PodClique resource.
+// It combines PodGangSet managed resource labels with PodClique-specific component labels.
 func getDefaultLabels(pgsName, pclqName string, pgsReplicaIndex int32) map[string]string {
 	pclqComponentLabels := map[string]string{
 		grovecorev1alpha1.LabelAppNameKey:             pclqName,

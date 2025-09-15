@@ -30,13 +30,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// triggerDeletionFlow orchestrates the complete deletion process for a PodGangSet.
+// It executes deletion steps sequentially and handles any errors by recording incomplete deletion status.
 func (r *Reconciler) triggerDeletionFlow(ctx context.Context, logger logr.Logger, pgs *v1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
+	// Define ordered deletion steps to execute sequentially
 	deleteStepFns := []ctrlcommon.ReconcileStepFn[v1alpha1.PodGangSet]{
 		r.recordDeletionStart,
 		r.deletePodGangSetResources,
 		r.verifyNoResourcesAwaitsCleanup,
 		r.removeFinalizer,
 	}
+	// Execute each deletion step, short-circuiting on first error
 	for _, fn := range deleteStepFns {
 		if stepResult := fn(ctx, logger, pgs); ctrlcommon.ShortCircuitReconcileFlow(stepResult) {
 			return r.recordIncompleteDeletion(ctx, logger, pgs, &stepResult)
@@ -46,6 +50,7 @@ func (r *Reconciler) triggerDeletionFlow(ctx context.Context, logger logr.Logger
 	return ctrlcommon.DoNotRequeue()
 }
 
+// recordDeletionStart marks the beginning of a deletion operation in the PodGangSet status.
 func (r *Reconciler) recordDeletionStart(ctx context.Context, logger logr.Logger, pgs *v1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	if err := r.reconcileStatusRecorder.RecordStart(ctx, pgs, v1alpha1.LastOperationTypeDelete); err != nil {
 		errMsg := "failed to record deletion start operation"
@@ -55,9 +60,12 @@ func (r *Reconciler) recordDeletionStart(ctx context.Context, logger logr.Logger
 	return ctrlcommon.ContinueReconcile()
 }
 
+// deletePodGangSetResources concurrently deletes all managed resources owned by the PodGangSet.
 func (r *Reconciler) deletePodGangSetResources(ctx context.Context, logger logr.Logger, pgs *v1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
+	// Get all registered operators and prepare concurrent deletion tasks
 	operators := r.operatorRegistry.GetAllOperators()
 	deleteTasks := make([]utils.Task, 0, len(operators))
+	// Create deletion task for each resource type
 	for kind, operator := range operators {
 		deleteTasks = append(deleteTasks, utils.Task{
 			Name: fmt.Sprintf("delete-%s", kind),
@@ -75,11 +83,14 @@ func (r *Reconciler) deletePodGangSetResources(ctx context.Context, logger logr.
 	return ctrlcommon.ContinueReconcile()
 }
 
+// verifyNoResourcesAwaitsCleanup ensures all managed resources have been successfully cleaned up.
 func (r *Reconciler) verifyNoResourcesAwaitsCleanup(ctx context.Context, logger logr.Logger, pgs *v1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	return ctrlutils.VerifyNoResourceAwaitsCleanup(ctx, logger, r.operatorRegistry, pgs.ObjectMeta)
 }
 
+// removeFinalizer removes the PodGangSet finalizer to allow Kubernetes to complete object deletion.
 func (r *Reconciler) removeFinalizer(ctx context.Context, logger logr.Logger, pgs *v1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
+	// Skip if finalizer is already removed
 	if !controllerutil.ContainsFinalizer(pgs, v1alpha1.FinalizerPodGangSet) {
 		logger.Info("Finalizer not found", "PodGangSet", pgs)
 		return ctrlcommon.ContinueReconcile()
@@ -91,10 +102,11 @@ func (r *Reconciler) removeFinalizer(ctx context.Context, logger logr.Logger, pg
 	return ctrlcommon.ContinueReconcile()
 }
 
+// recordIncompleteDeletion records a failed deletion operation in the PodGangSet status and preserves original errors.
 func (r *Reconciler) recordIncompleteDeletion(ctx context.Context, logger logr.Logger, pgs *v1alpha1.PodGangSet, errResult *ctrlcommon.ReconcileStepResult) ctrlcommon.ReconcileStepResult {
 	if err := r.reconcileStatusRecorder.RecordCompletion(ctx, pgs, v1alpha1.LastOperationTypeDelete, errResult); err != nil {
 		logger.Error(err, "failed to record deletion completion operation", "PodGangSet", pgs)
-		// combine all errors
+		// Combine original deletion errors with status recording error
 		allErrs := append(errResult.GetErrors(), err)
 		return ctrlcommon.ReconcileWithErrors("error recording incomplete reconciliation", allErrs...)
 	}

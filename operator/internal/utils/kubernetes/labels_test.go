@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Test helper functions
+// newTestObjectMetaWithReplicaIndex creates test ObjectMeta with a PodGangSet replica index label.
 func newTestObjectMetaWithReplicaIndex(index string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:      "test-resource",
@@ -37,6 +37,7 @@ func newTestObjectMetaWithReplicaIndex(index string) metav1.ObjectMeta {
 	}
 }
 
+// newTestObjectMetaWithLabels creates test ObjectMeta with the provided labels map.
 func newTestObjectMetaWithLabels(labels map[string]string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:      "test-resource",
@@ -45,6 +46,7 @@ func newTestObjectMetaWithLabels(labels map[string]string) metav1.ObjectMeta {
 	}
 }
 
+// newTestObjectMetaNilLabels creates test ObjectMeta with nil labels for testing edge cases.
 func newTestObjectMetaNilLabels() metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:      "test-resource",
@@ -53,6 +55,7 @@ func newTestObjectMetaNilLabels() metav1.ObjectMeta {
 	}
 }
 
+// newLabelsWithReplicaIndexAndExtras creates a labels map with replica index and additional labels.
 func newLabelsWithReplicaIndexAndExtras(index string, extraLabels map[string]string) map[string]string {
 	labels := map[string]string{
 		grovev1alpha1.LabelPodGangSetReplicaIndex: index,
@@ -63,6 +66,8 @@ func newLabelsWithReplicaIndexAndExtras(index string, extraLabels map[string]str
 	return labels
 }
 
+// TestGetPodGangSetReplicaIndex tests the GetPodGangSetReplicaIndex function with various scenarios
+// including valid indices, missing labels, nil labels, and invalid conversions.
 func TestGetPodGangSetReplicaIndex(t *testing.T) {
 	testCases := []struct {
 		description   string
@@ -115,10 +120,12 @@ func TestGetPodGangSetReplicaIndex(t *testing.T) {
 		},
 	}
 
+	// Execute test cases with table-driven testing approach
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
 			index, err := GetPodGangSetReplicaIndex(tc.objMeta)
 
+			// Verify error expectations
 			if tc.expectedError != nil {
 				assert.Error(t, err)
 				assert.True(t, errors.Is(err, tc.expectedError),
@@ -127,6 +134,7 @@ func TestGetPodGangSetReplicaIndex(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
+			// Verify returned index matches expectation
 			assert.Equal(t, tc.expectedIndex, index)
 		})
 	}

@@ -28,11 +28,13 @@ import (
 )
 
 const (
+	// defaultTerminationDelay is the default delay before terminating pods in a PodGangSet.
 	defaultTerminationDelay = 30 * time.Second
 )
 
 // defaultPodGangSet adds defaults to a PodGangSet.
 func defaultPodGangSet(pgs *grovecorev1alpha1.PodGangSet) {
+	// Set namespace to "default" if not specified
 	if utils.IsEmptyStringType(pgs.Namespace) {
 		pgs.Namespace = "default"
 	}
@@ -41,15 +43,18 @@ func defaultPodGangSet(pgs *grovecorev1alpha1.PodGangSet) {
 
 // defaultPodGangSetSpec adds defaults to the specification of a PodGangSet.
 func defaultPodGangSetSpec(spec *grovecorev1alpha1.PodGangSetSpec) {
-	// default PodGangSetTemplateSpec
+	// Apply defaults to the template specification
 	defaultPodGangSetTemplateSpec(&spec.Template)
 }
 
+// defaultPodGangSetTemplateSpec applies defaults to a PodGangSetTemplateSpec.
+// It configures cliques, scaling groups, termination delay, and headless service settings.
 func defaultPodGangSetTemplateSpec(spec *grovecorev1alpha1.PodGangSetTemplateSpec) {
-	// default PodCliqueTemplateSpecs
+	// Apply defaults to PodClique template specifications
 	spec.Cliques = defaultPodCliqueTemplateSpecs(spec.Cliques)
-	// default PodCliqueScalingGroupConfigs
+	// Apply defaults to PodClique scaling group configurations
 	spec.PodCliqueScalingGroupConfigs = defaultPodCliqueScalingGroupConfigs(spec.PodCliqueScalingGroupConfigs)
+	// Set default termination delay if not specified
 	if spec.TerminationDelay == nil {
 		spec.TerminationDelay = &metav1.Duration{Duration: defaultTerminationDelay}
 	}
@@ -57,6 +62,10 @@ func defaultPodGangSetTemplateSpec(spec *grovecorev1alpha1.PodGangSetTemplateSpe
 	spec.HeadlessServiceConfig = defaultHeadlessServiceConfig(spec.HeadlessServiceConfig)
 }
 
+// defaultHeadlessServiceConfig returns a HeadlessServiceConfig with defaults applied.
+// If the config is nil, returns a new config with PublishNotReadyAddresses set to true.
+// defaultHeadlessServiceConfig ensures a headless service configuration exists with default values.
+// If no config exists, it creates one with publishNotReadyAddresses set to true.
 func defaultHeadlessServiceConfig(headlessServiceConfig *grovecorev1alpha1.HeadlessServiceConfig) *grovecorev1alpha1.HeadlessServiceConfig {
 	if headlessServiceConfig == nil {
 		headlessServiceConfig = &grovecorev1alpha1.HeadlessServiceConfig{
@@ -66,17 +75,23 @@ func defaultHeadlessServiceConfig(headlessServiceConfig *grovecorev1alpha1.Headl
 	return headlessServiceConfig
 }
 
+// defaultPodCliqueTemplateSpecs applies defaults to a slice of PodCliqueTemplateSpecs.
+// It sets default values for replicas, minAvailable, and scaling configuration.
 func defaultPodCliqueTemplateSpecs(cliqueSpecs []*grovecorev1alpha1.PodCliqueTemplateSpec) []*grovecorev1alpha1.PodCliqueTemplateSpec {
 	defaultedCliqueSpecs := make([]*grovecorev1alpha1.PodCliqueTemplateSpec, 0, len(cliqueSpecs))
 	for _, cliqueSpec := range cliqueSpecs {
 		defaultedCliqueSpec := cliqueSpec.DeepCopy()
+		// Apply defaults to the PodSpec
 		defaultedCliqueSpec.Spec.PodSpec = *defaultPodSpec(&cliqueSpec.Spec.PodSpec)
+		// Set default replica count to 1 if not specified
 		if defaultedCliqueSpec.Spec.Replicas == 0 {
 			defaultedCliqueSpec.Spec.Replicas = 1
 		}
+		// Set MinAvailable to match Replicas if not specified
 		if cliqueSpec.Spec.MinAvailable == nil {
 			defaultedCliqueSpec.Spec.MinAvailable = ptr.To(cliqueSpec.Spec.Replicas)
 		}
+		// Set default MinReplicas for scaling configuration
 		if cliqueSpec.Spec.ScaleConfig != nil {
 			if cliqueSpec.Spec.ScaleConfig.MinReplicas == nil {
 				defaultedCliqueSpec.Spec.ScaleConfig.MinReplicas = ptr.To(cliqueSpec.Spec.Replicas)
@@ -87,11 +102,14 @@ func defaultPodCliqueTemplateSpecs(cliqueSpecs []*grovecorev1alpha1.PodCliqueTem
 	return defaultedCliqueSpecs
 }
 
+// defaultPodCliqueScalingGroupConfigs applies defaults to PodCliqueScalingGroupConfigs.
+// It ensures MinReplicas is set based on the Replicas field when ScaleConfig is present.
 func defaultPodCliqueScalingGroupConfigs(scalingGroupConfigs []grovecorev1alpha1.PodCliqueScalingGroupConfig) []grovecorev1alpha1.PodCliqueScalingGroupConfig {
 	defaultedScalingGroupConfigs := make([]grovecorev1alpha1.PodCliqueScalingGroupConfig, 0, len(scalingGroupConfigs))
 	for _, scalingGroupConfig := range scalingGroupConfigs {
 		defaultedScalingGroupConfig := scalingGroupConfig.DeepCopy()
 		// Replicas is already set by kubebuilder default (API server runs before defaulting webhook)
+		// Set default MinReplicas for scaling configuration
 		if scalingGroupConfig.ScaleConfig != nil {
 			if scalingGroupConfig.ScaleConfig.MinReplicas == nil {
 				defaultedScalingGroupConfig.ScaleConfig.MinReplicas = ptr.To(*defaultedScalingGroupConfig.Replicas)
@@ -102,12 +120,14 @@ func defaultPodCliqueScalingGroupConfigs(scalingGroupConfigs []grovecorev1alpha1
 	return defaultedScalingGroupConfigs
 }
 
-// defaultPodSpec adds defaults to PodSpec.
+// defaultPodSpec adds defaults to PodSpec and returns a copy with defaults applied.
 func defaultPodSpec(spec *corev1.PodSpec) *corev1.PodSpec {
 	defaultedPodSpec := spec.DeepCopy()
+	// Set default restart policy to Always if not specified
 	if utils.IsEmptyStringType(defaultedPodSpec.RestartPolicy) {
 		defaultedPodSpec.RestartPolicy = corev1.RestartPolicyAlways
 	}
+	// Set default termination grace period to 30 seconds if not specified
 	if defaultedPodSpec.TerminationGracePeriodSeconds == nil {
 		defaultedPodSpec.TerminationGracePeriodSeconds = ptr.To[int64](30)
 	}

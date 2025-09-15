@@ -14,6 +14,10 @@
 // limitations under the License.
 // */
 
+// Package role provides a component operator for managing RBAC Role resources
+// associated with PodGangSet objects. It handles creation, synchronization,
+// and deletion of Kubernetes Role resources that grant necessary permissions
+// for pod operations.
 package role
 
 import (
@@ -36,12 +40,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// Error codes for role operations.
 const (
+	// errCodeGetRole indicates an error occurred while retrieving a Role resource.
 	errCodeGetRole grovecorev1alpha1.ErrorCode = "ERR_GET_ROLE"
-	errSyncRole    grovecorev1alpha1.ErrorCode = "ERR_SYNC_ROLE"
-	errDeleteRole  grovecorev1alpha1.ErrorCode = "ERR_DELETE_ROLE"
+	// errSyncRole indicates an error occurred while synchronizing a Role resource.
+	errSyncRole grovecorev1alpha1.ErrorCode = "ERR_SYNC_ROLE"
+	// errDeleteRole indicates an error occurred while deleting a Role resource.
+	errDeleteRole grovecorev1alpha1.ErrorCode = "ERR_DELETE_ROLE"
 )
 
+// _resource implements the component.Operator interface for managing Role resources.
+// It encapsulates the Kubernetes client and runtime scheme needed for RBAC operations.
 type _resource struct {
 	client client.Client
 	scheme *runtime.Scheme
@@ -86,6 +96,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev
 			fmt.Sprintf("Error getting existing Role names for PodGangSet: %v", client.ObjectKeyFromObject(pgs)),
 		)
 	}
+	// Skip creation if Role already exists
 	if len(existingRoleNames) > 0 {
 		logger.Info("Role already exists, skipping creation", "existingRole", existingRoleNames[0])
 		return nil
@@ -111,6 +122,8 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev
 	return nil
 }
 
+// Delete removes the Role resource associated with the given PodGangSet.
+// It performs a graceful deletion, treating "not found" errors as no-ops.
 func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjMeta metav1.ObjectMeta) error {
 	objectKey := getObjectKey(pgsObjMeta)
 	logger.Info("Triggering delete of Role", "objectKey", objectKey)
@@ -129,6 +142,8 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjMeta me
 	return nil
 }
 
+// buildResource configures the Role resource with appropriate labels, owner references,
+// and RBAC rules. It grants permissions to get, list, and watch pods and pod status.
 func (r _resource) buildResource(pgs *grovecorev1alpha1.PodGangSet, role *rbacv1.Role) error {
 	role.Labels = getLabels(pgs.ObjectMeta)
 	if err := controllerutil.SetControllerReference(pgs, role, r.scheme); err != nil {
@@ -138,6 +153,7 @@ func (r _resource) buildResource(pgs *grovecorev1alpha1.PodGangSet, role *rbacv1
 			fmt.Sprintf("Error setting controller reference for role: %v", client.ObjectKeyFromObject(role)),
 		)
 	}
+	// Configure RBAC rules for pod operations
 	role.Rules = []rbacv1.PolicyRule{
 		{
 			APIGroups: []string{""},
@@ -148,7 +164,10 @@ func (r _resource) buildResource(pgs *grovecorev1alpha1.PodGangSet, role *rbacv1
 	return nil
 }
 
+// getLabels generates the appropriate labels for the Role resource based on
+// the PodGangSet metadata, including component and app name labels.
 func getLabels(pgsObjMeta metav1.ObjectMeta) map[string]string {
+	// Create role-specific labels
 	roleLabels := map[string]string{
 		grovecorev1alpha1.LabelComponentKey: component.NamePodRole,
 		grovecorev1alpha1.LabelAppNameKey:   strings.ReplaceAll(grovecorev1alpha1.GeneratePodRoleName(pgsObjMeta.Name), ":", "-"),
@@ -159,6 +178,8 @@ func getLabels(pgsObjMeta metav1.ObjectMeta) map[string]string {
 	)
 }
 
+// getObjectKey constructs the Kubernetes object key for the Role resource
+// using the generated pod role name and namespace from the PodGangSet.
 func getObjectKey(pgsObjMeta metav1.ObjectMeta) client.ObjectKey {
 	return client.ObjectKey{
 		Name:      grovecorev1alpha1.GeneratePodRoleName(pgsObjMeta.Name),
@@ -166,6 +187,8 @@ func getObjectKey(pgsObjMeta metav1.ObjectMeta) client.ObjectKey {
 	}
 }
 
+// emptyRole creates a minimal Role resource with only the name and namespace set.
+// This is used as a template for creation and deletion operations.
 func emptyRole(objKey client.ObjectKey) *rbacv1.Role {
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{

@@ -14,6 +14,9 @@
 // limitations under the License.
 // */
 
+// Package validation provides validation logic for PodGangSet resources.
+// It implements admission webhook validation for PodGangSet creation and updates,
+// ensuring configuration correctness and enforcing Grove's constraints.
 package validation
 
 import (
@@ -35,16 +38,23 @@ import (
 )
 
 const (
+	// maxCombinedResourceNameLength is the maximum allowed length for combined resource names
+	// used in pod naming. This includes PodGangSet, PodCliqueScalingGroup, and PodClique names.
 	maxCombinedResourceNameLength = 45
 )
 
+// allowedStartupTypes defines the valid startup types for PodGangSet cliques
 var allowedStartupTypes = sets.New(grovecorev1alpha1.CliqueStartupTypeInOrder, grovecorev1alpha1.CliqueStartupTypeAnyOrder, grovecorev1alpha1.CliqueStartupTypeExplicit)
 
+// pgsValidator handles validation of PodGangSet resources during admission
 type pgsValidator struct {
+	// operation is the admission operation being performed (Create/Update)
 	operation admissionv1.Operation
-	pgs       *grovecorev1alpha1.PodGangSet
+	// pgs is the PodGangSet being validated
+	pgs *grovecorev1alpha1.PodGangSet
 }
 
+// newPGSValidator creates a new validator for PodGangSet resources
 func newPGSValidator(pgs *grovecorev1alpha1.PodGangSet, operation admissionv1.Operation) *pgsValidator {
 	return &pgsValidator{
 		operation: operation,
@@ -54,7 +64,8 @@ func newPGSValidator(pgs *grovecorev1alpha1.PodGangSet, operation admissionv1.Op
 
 // ---------------------------- validate create of PodGangSet -----------------------------------------------
 
-// validate validates the PodGangSet object.
+// validate performs comprehensive validation of the PodGangSet object.
+// It returns a list of warnings and any validation errors encountered.
 func (v *pgsValidator) validate() ([]string, error) {
 	allErrs := field.ErrorList{}
 
@@ -69,7 +80,8 @@ func (v *pgsValidator) validate() ([]string, error) {
 	return warnings, allErrs.ToAggregate()
 }
 
-// validatePodGangSetSpec validates the specification of a PodGangSet object.
+// validatePodGangSetSpec validates the PodGangSet specification.
+// It checks replicas, template spec, and returns any warnings or validation errors.
 func (v *pgsValidator) validatePodGangSetSpec(fldPath *field.Path) ([]string, field.ErrorList) {
 	allErrs := field.ErrorList{}
 
@@ -82,6 +94,8 @@ func (v *pgsValidator) validatePodGangSetSpec(fldPath *field.Path) ([]string, fi
 	return warnings, allErrs
 }
 
+// validatePodGangTemplateSpec validates the PodGangSet template specification.
+// It checks startup type, cliques, scheduling policy, scaling groups, and termination delay.
 func (v *pgsValidator) validatePodGangTemplateSpec(fldPath *field.Path) ([]string, field.ErrorList) {
 	allErrs := field.ErrorList{}
 
@@ -98,6 +112,8 @@ func (v *pgsValidator) validatePodGangTemplateSpec(fldPath *field.Path) ([]strin
 	return warnings, allErrs
 }
 
+// validatePodCliqueTemplates validates all PodClique templates in the PodGangSet.
+// It ensures unique names, roles, consistent scheduler names, and valid dependencies.
 func (v *pgsValidator) validatePodCliqueTemplates(fldPath *field.Path) ([]string, field.ErrorList) {
 	allErrs := field.ErrorList{}
 
@@ -107,9 +123,13 @@ func (v *pgsValidator) validatePodCliqueTemplates(fldPath *field.Path) ([]string
 		allErrs = append(allErrs, field.Required(fldPath, "at least one PodClique must be defined"))
 	}
 
-	// Get all clique names that belong to scaling groups
+	// Get all clique names that belong to scaling groups for validation
 	scalingGroupCliqueNames := v.getScalingGroupCliqueNames()
 
+	// Collect clique metadata for uniqueness validation
+	// - Names must be unique across all cliques
+	// - Role names must be unique for proper role assignment
+	// - Scheduler names must be consistent across all cliques
 	cliqueNames := make([]string, 0, len(cliqueTemplateSpecs))
 	cliqueRoles := make([]string, 0, len(cliqueTemplateSpecs))
 	schedulerNames := make([]string, 0, len(cliqueTemplateSpecs))
@@ -146,6 +166,8 @@ func (v *pgsValidator) validatePodCliqueTemplates(fldPath *field.Path) ([]string
 	return warnings, allErrs
 }
 
+// validatePodCliqueNameConstraints validates naming constraints for a PodClique.
+// It checks DNS subdomain compliance and validates pod name constraints for standalone cliques.
 func (v *pgsValidator) validatePodCliqueNameConstraints(fldPath *field.Path, cliqueTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, scalingGroupCliqueNames sets.Set[string]) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if err := apivalidation.NameIsDNSSubdomain(cliqueTemplateSpec.Name, false); err != nil {
@@ -161,6 +183,8 @@ func (v *pgsValidator) validatePodCliqueNameConstraints(fldPath *field.Path, cli
 	return allErrs
 }
 
+// validateStandalonePodClique validates a PodClique that is not part of any scaling group.
+// It ensures the pod name constraints are met for the standalone clique.
 func validateStandalonePodClique(fldPath *field.Path, v *pgsValidator, cliqueTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if err := validatePodNameConstraints(v.pgs.Name, "", cliqueTemplateSpec.Name); err != nil {
@@ -171,6 +195,8 @@ func validateStandalonePodClique(fldPath *field.Path, v *pgsValidator, cliqueTem
 	return allErrs
 }
 
+// validatePodGangSchedulingPolicyConfig validates the scheduling policy configuration.
+// It checks network pack group configurations if they are present.
 func (v *pgsValidator) validatePodGangSchedulingPolicyConfig(schedulingPolicyConfig *grovecorev1alpha1.SchedulingPolicyConfig, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if schedulingPolicyConfig == nil {
@@ -182,12 +208,20 @@ func (v *pgsValidator) validatePodGangSchedulingPolicyConfig(schedulingPolicyCon
 	return allErrs
 }
 
+// validatePodCliqueScalingGroupConfigs validates scaling group configurations.
+// It checks for unique names, valid clique references, replicas, and scaling constraints.
 func (v *pgsValidator) validatePodCliqueScalingGroupConfigs(fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
+	// Extract all clique names from the PodGangSet for reference
 	allPodGangSetCliqueNames := lo.Map(v.pgs.Spec.Template.Cliques, func(cliqueTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, _ int) string {
 		return cliqueTemplateSpec.Name
 	})
+
+	// Initialize collections for scaling group validation
+	// - Track scaling group names for uniqueness
+	// - Track clique names across groups to prevent overlap
+	// - Use consistent field path for name validation errors
 	pclqScalingGroupNames := make([]string, 0, len(v.pgs.Spec.Template.PodCliqueScalingGroupConfigs))
 	var cliqueNamesAcrossAllScalingGroups []string
 	groupNameFiledPath := fldPath.Child("name")
@@ -248,6 +282,8 @@ func (v *pgsValidator) validatePodCliqueScalingGroupConfigs(fldPath *field.Path)
 	return allErrs
 }
 
+// validateTerminationDelay validates the termination delay configuration.
+// It ensures the delay is set and has a positive duration.
 func (v *pgsValidator) validateTerminationDelay(fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -279,6 +315,8 @@ func (v *pgsValidator) validatePodCliqueTemplateSpec(cliqueTemplateSpec *groveco
 	return warnings, allErrs
 }
 
+// validateCliqueDependencies validates dependencies between PodCliques.
+// It checks for unknown clique references and circular dependencies in the startup order.
 func validateCliqueDependencies(cliques []*grovecorev1alpha1.PodCliqueTemplateSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -304,6 +342,8 @@ func validateCliqueDependencies(cliques []*grovecorev1alpha1.PodCliqueTemplateSp
 	return allErrs
 }
 
+// validateNetworkPackGroupConfigs validates network pack group configurations.
+// It ensures no duplicate cliques and proper scaling group inclusion.
 func (v *pgsValidator) validateNetworkPackGroupConfigs(fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, v.checkNetworkPackGroupConfigsForDuplicates(fldPath)...)
@@ -311,6 +351,8 @@ func (v *pgsValidator) validateNetworkPackGroupConfigs(fldPath *field.Path) fiel
 	return allErrs
 }
 
+// checkNetworkPackGroupConfigsForDuplicates ensures no PodClique belongs to multiple network pack groups.
+// It validates uniqueness of clique names across all network pack group configurations.
 func (v *pgsValidator) checkNetworkPackGroupConfigsForDuplicates(fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -326,6 +368,9 @@ func (v *pgsValidator) checkNetworkPackGroupConfigsForDuplicates(fldPath *field.
 	return allErrs
 }
 
+// checkNetworkPackGroupConfigsForPartialPCSGInclusions validates network pack group configurations
+// to ensure they don't partially include PodCliques from a PodCliqueScalingGroup.
+// If a network pack group includes any clique from a scaling group, it must include all cliques from that group.
 func (v *pgsValidator) checkNetworkPackGroupConfigsForPartialPCSGInclusions(fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	pcsgConfigs := v.pgs.Spec.Template.PodCliqueScalingGroupConfigs
@@ -358,7 +403,11 @@ func (v *pgsValidator) getScalingGroupCliqueNames() sets.Set[string] {
 	return scalingGroupCliqueNames
 }
 
-// checks if the PodClique names specified in PodCliqueScalingGroupConfig refer to a defined clique in the PodGangSet.
+// validateScalingGroupPodCliqueNames validates PodClique names in a PodCliqueScalingGroup.
+// It ensures that:
+// - All referenced cliques exist in the PodGangSet
+// - Pod name constraints are met for each clique in the scaling group
+// - No unknown clique names are referenced
 func (v *pgsValidator) validateScalingGroupPodCliqueNames(pcsgName string, allPclqNames, pclqNameInScalingGrp []string, fldPath, pcsgNameFieldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -446,6 +495,11 @@ func validateScaleConfig(scaleConfig *grovecorev1alpha1.AutoScalingConfig, minAv
 	return allErrs
 }
 
+// validatePodSpec validates the pod specification for a PodClique.
+// It checks for:
+// - Restart policy settings (warns if set, as it will be overridden)
+// - Topology spread constraints (must not be set on create)
+// - Node name and selector restrictions
 func (v *pgsValidator) validatePodSpec(spec corev1.PodSpec, fldPath *field.Path) ([]string, field.ErrorList) {
 	allErrs := field.ErrorList{}
 	var warnings []string
@@ -472,7 +526,9 @@ func (v *pgsValidator) validatePodSpec(spec corev1.PodSpec, fldPath *field.Path)
 
 // ---------------------------- validate update of PodGangSet -----------------------------------------------
 
-// validateUpdate validates the update to a PodGangSet object. It compares the old and new PodGangSet objects and validates that the changes done are allowed/valid.
+// validateUpdate validates updates to a PodGangSet object.
+// It ensures that immutable fields are not modified and that changes to mutable fields are valid.
+// The validation includes checking replica spread constraints, priority class names, and template updates.
 func (v *pgsValidator) validateUpdate(oldPgs *grovecorev1alpha1.PodGangSet) error {
 	allErrs := field.ErrorList{}
 	fldPath := field.NewPath("spec")
@@ -482,12 +538,16 @@ func (v *pgsValidator) validateUpdate(oldPgs *grovecorev1alpha1.PodGangSet) erro
 	return allErrs.ToAggregate()
 }
 
+// validatePodGangSetSpecUpdate validates changes to the PodGangSet specification during updates.
+// It ensures that template changes are valid and allowed.
 func validatePodGangSetSpecUpdate(newSpec, oldSpec *grovecorev1alpha1.PodGangSetSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validatePodGangTemplateSpecUpdate(&newSpec.Template, &oldSpec.Template, fldPath.Child("template"))...)
 	return allErrs
 }
 
+// validatePodGangTemplateSpecUpdate validates changes to the PodGangSet template specification.
+// It ensures that clique composition, startup type, and scheduling policy changes are valid.
 func validatePodGangTemplateSpecUpdate(newSpec, oldSpec *grovecorev1alpha1.PodGangSetTemplateSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -504,6 +564,11 @@ func validatePodGangSchedulingPolicyConfigUpdate(newConfig, oldConfig *grovecore
 	return allErrs
 }
 
+// validatePodCliqueUpdate validates changes to PodClique configurations during updates.
+// It ensures that:
+// - Clique composition remains unchanged
+// - No new cliques are added or removed
+// - Only allowed fields within existing cliques are modified
 func validatePodCliqueUpdate(newCliques, oldCliques []*grovecorev1alpha1.PodCliqueTemplateSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -529,15 +594,23 @@ func validatePodCliqueUpdate(newCliques, oldCliques []*grovecorev1alpha1.PodCliq
 	return allErrs
 }
 
+// validatePodSpecUpdate validates changes to pod specifications during updates.
+// It enforces Kubernetes pod update restrictions, allowing changes only to:
+// - Container images
+// - Active deadline seconds
+// - Tolerations (additions only)
+// - Termination grace period (special case for negative values)
 func validatePodSpecUpdate(newSpec, oldSpec *corev1.PodSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	// spec: Forbidden: pod updates may not change fields other than:
-	//  `spec.containers[*].image`,
-	//  `spec.initContainers[*].image`,
-	//  `spec.activeDeadlineSeconds`,
-	//  `spec.tolerations` (only additions to existing tolerations),
-	//  `spec.terminationGracePeriodSeconds` (allow it to be set to 1 if it was previously negative)
+	// Validate pod spec changes according to Kubernetes update restrictions
+	// Only the following fields can be modified:
+	// 1. Container and init container images
+	// 2. Active deadline seconds
+	// 3. Tolerations (additions only, existing tolerations must be preserved)
+	// 4. Termination grace period (can be set to 1 if previously negative)
+	//
+	// First check tolerations - ensure no existing tolerations are removed or modified
 	if len(newSpec.Tolerations) < len(oldSpec.Tolerations) || !reflect.DeepEqual(oldSpec.Tolerations, newSpec.Tolerations[:len(oldSpec.Tolerations)]) {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("tolerations"), "not allowed to change immutable pod fields"))
 	}
@@ -547,16 +620,22 @@ func validatePodSpecUpdate(newSpec, oldSpec *corev1.PodSpec, fldPath *field.Path
 			allErrs = append(allErrs, field.Forbidden(fldPath.Child("terminationGracePeriodSeconds"), "value can only be set to 1 if previously negative"))
 		}
 	}
-	// hide mutable fields
+	// Create deep copies and mask out mutable fields for immutability check
+	// This allows us to compare the remaining fields that must not change
 	spec1 := newSpec.DeepCopy()
 	spec2 := oldSpec.DeepCopy()
 
+	// Clear all mutable fields to compare only immutable ones:
+	// - Container and init container images
 	clearContainerImages(spec1.Containers)
 	clearContainerImages(spec2.Containers)
 	clearContainerImages(spec1.InitContainers)
 	clearContainerImages(spec2.InitContainers)
+	// - Active deadline seconds
 	spec1.ActiveDeadlineSeconds, spec2.ActiveDeadlineSeconds = nil, nil
+	// - Tolerations
 	spec1.Tolerations, spec2.Tolerations = []corev1.Toleration{}, []corev1.Toleration{}
+	// - Termination grace period
 	spec1.TerminationGracePeriodSeconds, spec2.TerminationGracePeriodSeconds = nil, nil
 
 	allErrs = append(allErrs, apivalidation.ValidateImmutableField(spec1, spec2, fldPath)...)
@@ -564,6 +643,8 @@ func validatePodSpecUpdate(newSpec, oldSpec *corev1.PodSpec, fldPath *field.Path
 	return allErrs
 }
 
+// clearContainerImages clears image fields from container specs.
+// This is used during validation to ignore image changes when comparing pod specs.
 func clearContainerImages(containers []corev1.Container) {
 	for i := range containers {
 		containers[i].Image = ""
@@ -571,18 +652,17 @@ func clearContainerImages(containers []corev1.Container) {
 }
 
 // validatePodNameConstraints validates Grove pod name component constraints.
-// This function validates the constraints for component names that will be used
-// to construct pod names.
+// It ensures that the combined length of resource names used in pod naming does not exceed
+// the maximum allowed length.
 //
-// Pod names that belong to a PCSG follow the format:
-// <pgs-name>-<pgs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
-//
-// Pod names that do not belong to a PCSG follow the format:
-// <pgs-name>-<pgs-index>-<pclq-name>-<random>
+// Pod name formats:
+//   - PCSG pods: <pgs-name>-<pgs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
+//   - Non-PCSG pods: <pgs-name>-<pgs-index>-<pclq-name>-<random>
 //
 // Constraints:
-// - Random string + hyphens: 10 chars for PCSG pods, 8 chars for non-PCSG pods
-// - Max sum of all resource name characters: 45 chars
+//   - Random suffix length: 10 chars (PCSG pods), 8 chars (non-PCSG pods)
+//   - Combined resource name length: ≤ 45 chars
+//   - Resource names include: PodGangSet, PodCliqueScalingGroup, PodClique names
 func validatePodNameConstraints(pgsName, pcsgName, pclqName string) error {
 	// Check resource name constraints
 	resourceNameLength := len(pgsName) + len(pclqName)

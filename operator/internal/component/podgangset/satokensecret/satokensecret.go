@@ -14,6 +14,9 @@
 // limitations under the License.
 // */
 
+// Package satokensecret manages ServiceAccount token secrets for PodGangSet resources.
+// It creates and manages Kubernetes secrets that contain ServiceAccount tokens
+// required by init containers in PodGangSet pods.
 package satokensecret
 
 import (
@@ -35,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// Error codes for ServiceAccount token secret operations.
 const (
 	errCodeGetSecret              grovecorev1alpha1.ErrorCode = "ERR_GET_SECRET"
 	errCodeSetControllerReference grovecorev1alpha1.ErrorCode = "ERR_SET_CONTROLLER_REFERENCE"
@@ -42,12 +46,16 @@ const (
 	errCodeDeleteSecret           grovecorev1alpha1.ErrorCode = "ERR_DELETE_SECRET"
 )
 
+// _resource implements the component.Operator interface for managing
+// ServiceAccount token secrets associated with PodGangSet resources.
 type _resource struct {
 	client client.Client
 	scheme *runtime.Scheme
 }
 
-// New creates an instance of Secret component operator.
+// New creates a new ServiceAccount token secret component operator.
+// It returns a component.Operator that manages secrets containing ServiceAccount tokens
+// for PodGangSet resources.
 func New(client client.Client, scheme *runtime.Scheme) component.Operator[grovecorev1alpha1.PodGangSet] {
 	return &_resource{
 		client: client,
@@ -55,9 +63,14 @@ func New(client client.Client, scheme *runtime.Scheme) component.Operator[grovec
 	}
 }
 
+// GetExistingResourceNames returns the names of existing ServiceAccount token secrets
+// that are controlled by the given PodGangSet. It returns an empty slice if no
+// controlled secrets are found.
 func (r _resource) GetExistingResourceNames(ctx context.Context, _ logr.Logger, pgsObjMeta metav1.ObjectMeta) ([]string, error) {
 	secretNames := make([]string, 0, 1)
 	objKey := getObjectKey(pgsObjMeta)
+
+	// Check if the expected secret already exists
 	partialObjMeta, err := k8sutils.GetExistingPartialObjectMetadata(ctx, r.client, corev1.SchemeGroupVersion.WithKind("Secret"), objKey)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -69,14 +82,20 @@ func (r _resource) GetExistingResourceNames(ctx context.Context, _ logr.Logger, 
 			fmt.Sprintf("Error getting Secret: %v for PodGangSet: %v", objKey, k8sutils.GetObjectKeyFromObjectMeta(pgsObjMeta)),
 		)
 	}
+
+	// Only include secrets that are controlled by this PodGangSet
 	if metav1.IsControlledBy(partialObjMeta, &pgsObjMeta) {
 		secretNames = append(secretNames, partialObjMeta.Name)
 	}
 	return secretNames, nil
 }
 
+// Sync creates a ServiceAccount token secret for the given PodGangSet if one doesn't already exist.
+// The secret is configured with the appropriate ServiceAccount reference and controller ownership.
 func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) error {
 	pgsObjKey := client.ObjectKeyFromObject(pgs)
+
+	// Check if a secret already exists for this PodGangSet
 	existingSecretNames, err := r.GetExistingResourceNames(ctx, logger, pgs.ObjectMeta)
 	if err != nil {
 		return groveerr.WrapError(err,
@@ -89,11 +108,15 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev
 		logger.Info("Secret already exists, skipping creation", "existingSecret", existingSecretNames[0])
 		return nil
 	}
+
+	// Create and configure the new secret
 	objKey := getObjectKey(pgs.ObjectMeta)
 	secret := emptySecret(objKey)
 	if err = r.buildResource(pgs, secret); err != nil {
 		return err
 	}
+
+	// Create the secret in Kubernetes
 	if err = client.IgnoreAlreadyExists(r.client.Create(ctx, secret)); err != nil {
 		return groveerr.WrapError(err,
 			errCodeCreateSecret,
@@ -105,6 +128,8 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev
 	return nil
 }
 
+// Delete removes the ServiceAccount token secret associated with the given PodGangSet.
+// It gracefully handles the case where the secret doesn't exist.
 func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjMeta metav1.ObjectMeta) error {
 	objectKey := getObjectKey(pgsObjMeta)
 	logger.Info("Triggering delete of Secret", "objectKey", objectKey)
@@ -123,8 +148,13 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjMeta me
 	return nil
 }
 
+// buildResource configures the given secret with the necessary metadata, labels, and annotations
+// to function as a ServiceAccount token secret for the PodGangSet.
 func (r _resource) buildResource(pgs *grovecorev1alpha1.PodGangSet, secret *corev1.Secret) error {
+	// Set standard labels for the secret
 	secret.Labels = getLabels(pgs.Name, secret.Name)
+
+	// Establish controller ownership relationship
 	if err := controllerutil.SetControllerReference(pgs, secret, r.scheme); err != nil {
 		return groveerr.WrapError(err,
 			errCodeSetControllerReference,
@@ -132,6 +162,8 @@ func (r _resource) buildResource(pgs *grovecorev1alpha1.PodGangSet, secret *core
 			fmt.Sprintf("Error setting controller reference for satokensecret: %v", client.ObjectKeyFromObject(secret)),
 		)
 	}
+
+	// Configure as ServiceAccount token secret with appropriate annotation
 	secret.Type = corev1.SecretTypeServiceAccountToken
 	secret.Annotations = map[string]string{
 		corev1.ServiceAccountNameKey: grovecorev1alpha1.GeneratePodServiceAccountName(pgs.Name),
@@ -139,6 +171,8 @@ func (r _resource) buildResource(pgs *grovecorev1alpha1.PodGangSet, secret *core
 	return nil
 }
 
+// getLabels returns the standard labels for a ServiceAccount token secret,
+// combining default PodGangSet labels with component-specific labels.
 func getLabels(pgsName, secretName string) map[string]string {
 	secretLabels := map[string]string{
 		grovecorev1alpha1.LabelComponentKey: component.NameServiceAccountTokenSecret,
@@ -150,6 +184,8 @@ func getLabels(pgsName, secretName string) map[string]string {
 	)
 }
 
+// getObjectKey generates the Kubernetes object key for the ServiceAccount token secret
+// associated with the given PodGangSet metadata.
 func getObjectKey(pgsObjMeta metav1.ObjectMeta) client.ObjectKey {
 	return client.ObjectKey{
 		Name:      grovecorev1alpha1.GenerateInitContainerSATokenSecretName(pgsObjMeta.Name),
@@ -157,6 +193,8 @@ func getObjectKey(pgsObjMeta metav1.ObjectMeta) client.ObjectKey {
 	}
 }
 
+// emptySecret creates a new Secret object with only the basic metadata populated.
+// This is used as a template for both creation and deletion operations.
 func emptySecret(objKey client.ObjectKey) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

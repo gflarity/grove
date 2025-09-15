@@ -28,7 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Test helper functions
+// newOwnerReference creates a test OwnerReference with the specified kind, name, and controller status.
+// Used as a helper function to create consistent owner references for testing.
 func newOwnerReference(kind, name string, isController bool) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion: "grove.io/v1alpha1",
@@ -39,39 +40,43 @@ func newOwnerReference(kind, name string, isController bool) metav1.OwnerReferen
 	}
 }
 
+// TestHasExpectedOwner tests the HasExpectedOwner function which validates that a resource
+// has exactly one owner reference matching the expected owner kind.
 func TestHasExpectedOwner(t *testing.T) {
 	testCases := []struct {
-		description       string
+		// The expected owner kind to match against
 		expectedOwnerKind string
-		ownerRefs         []metav1.OwnerReference
-		expected          bool
+		// The owner references to check
+		ownerRefs []metav1.OwnerReference
+		// Whether the function should return true
+		expected bool
 	}{
 		{
-			description:       "should return true when single owner matches expected kind",
+			// Single owner reference matches the expected kind
 			expectedOwnerKind: "PodGangSet",
 			ownerRefs:         []metav1.OwnerReference{newOwnerReference("PodGangSet", "test-pgs", true)},
 			expected:          true,
 		},
 		{
-			description:       "should return false when single owner does not match expected kind",
+			// Single owner reference does not match the expected kind
 			expectedOwnerKind: "PodGangSet",
 			ownerRefs:         []metav1.OwnerReference{newOwnerReference("PodCliqueScalingGroup", "test-pcsg", true)},
 			expected:          false,
 		},
 		{
-			description:       "should return false when no owner references exist",
+			// Empty owner references slice should return false
 			expectedOwnerKind: "PodGangSet",
 			ownerRefs:         []metav1.OwnerReference{},
 			expected:          false,
 		},
 		{
-			description:       "should return false when owner references is nil",
+			// Nil owner references should return false
 			expectedOwnerKind: "PodGangSet",
 			ownerRefs:         nil,
 			expected:          false,
 		},
 		{
-			description:       "should return false when multiple owner references exist",
+			// Multiple owner references should return false (expects exactly one)
 			expectedOwnerKind: "PodGangSet",
 			ownerRefs: []metav1.OwnerReference{
 				newOwnerReference("PodGangSet", "test-pgs", true),
@@ -81,36 +86,47 @@ func TestHasExpectedOwner(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.description, func(t *testing.T) {
+	for i, tc := range testCases {
+		testName := "matching_owner"
+		if len(tc.ownerRefs) == 0 {
+			testName = "no_owners"
+		} else if len(tc.ownerRefs) > 1 {
+			testName = "multiple_owners"
+		} else if tc.ownerRefs[0].Kind != tc.expectedOwnerKind {
+			testName = "wrong_owner_kind"
+		}
+		t.Run(testName, func(t *testing.T) {
 			result := HasExpectedOwner(tc.expectedOwnerKind, tc.ownerRefs)
-			assert.Equal(t, tc.expected, result)
+			assert.Equal(t, tc.expected, result, "test case %d failed", i)
 		})
 	}
 }
 
+// TestIsManagedByGrove tests the IsManagedByGrove function which checks if a resource
+// is managed by Grove by inspecting its labels for the standard managed-by label.
 func TestIsManagedByGrove(t *testing.T) {
 	testCases := []struct {
-		description string
-		labels      map[string]string
-		expected    bool
+		// The labels map to check for Grove management
+		labels map[string]string
+		// Whether the function should return true
+		expected bool
 	}{
 		{
-			description: "should return true when managed-by label has correct value",
+			// Correct managed-by label value should return true
 			labels: map[string]string{
 				grovecorev1alpha1.LabelManagedByKey: grovecorev1alpha1.LabelManagedByValue,
 			},
 			expected: true,
 		},
 		{
-			description: "should return false when managed-by label has incorrect value",
+			// Incorrect managed-by label value should return false
 			labels: map[string]string{
 				grovecorev1alpha1.LabelManagedByKey: "other-operator",
 			},
 			expected: false,
 		},
 		{
-			description: "should return false when managed-by label is missing",
+			// Missing managed-by label should return false
 			labels: map[string]string{
 				"app":     "test-app",
 				"version": "v1.0",
@@ -118,29 +134,41 @@ func TestIsManagedByGrove(t *testing.T) {
 			expected: false,
 		},
 		{
-			description: "should return false when labels map is nil",
-			labels:      nil,
-			expected:    false,
+			// Nil labels map should return false
+			labels:   nil,
+			expected: false,
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.description, func(t *testing.T) {
+	for i, tc := range testCases {
+		testName := "managed_by_grove"
+		if tc.labels == nil {
+			testName = "nil_labels"
+		} else if val, ok := tc.labels[grovecorev1alpha1.LabelManagedByKey]; !ok {
+			testName = "missing_managed_by_label"
+		} else if val != grovecorev1alpha1.LabelManagedByValue {
+			testName = "incorrect_managed_by_value"
+		}
+		t.Run(testName, func(t *testing.T) {
 			result := IsManagedByGrove(tc.labels)
-			assert.Equal(t, tc.expected, result)
+			assert.Equal(t, tc.expected, result, "test case %d failed", i)
 		})
 	}
 }
 
+// TestIsManagedPodClique tests the IsManagedPodClique function which validates that a PodClique
+// is both managed by Grove and has the expected owner kind.
 func TestIsManagedPodClique(t *testing.T) {
 	testCases := []struct {
-		description        string
-		obj                client.Object
+		// The client object to check (should be a PodClique for positive cases)
+		obj client.Object
+		// The expected owner kinds to validate against
 		expectedOwnerKinds []string
-		expected           bool
+		// Whether the function should return true
+		expected bool
 	}{
 		{
-			description: "should return true when PodClique is managed by Grove with correct owner",
+			// PodClique managed by Grove with correct owner should return true
 			obj: &grovecorev1alpha1.PodClique{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "managed-pclq",
@@ -157,7 +185,7 @@ func TestIsManagedPodClique(t *testing.T) {
 			expected:           true,
 		},
 		{
-			description: "should return false when PodClique is not managed by Grove",
+			// PodClique not managed by Grove should return false
 			obj: &grovecorev1alpha1.PodClique{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "unmanaged-pclq",
@@ -174,7 +202,7 @@ func TestIsManagedPodClique(t *testing.T) {
 			expected:           false,
 		},
 		{
-			description: "should return false when PodClique has wrong owner kind",
+			// PodClique with wrong owner kind should return false
 			obj: &grovecorev1alpha1.PodClique{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "wrong-owner-pclq",
@@ -191,7 +219,7 @@ func TestIsManagedPodClique(t *testing.T) {
 			expected:           false,
 		},
 		{
-			description: "should return false when object is not a PodClique",
+			// Non-PodClique object should return false
 			obj: &grovecorev1alpha1.PodGangSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-pgs",
@@ -208,7 +236,7 @@ func TestIsManagedPodClique(t *testing.T) {
 			expected:           false,
 		},
 		{
-			description: "should return false when PodClique has no labels",
+			// PodClique with no labels should return false
 			obj: &grovecorev1alpha1.PodClique{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "no-labels-pclq",
@@ -224,10 +252,33 @@ func TestIsManagedPodClique(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.description, func(t *testing.T) {
+	for i, tc := range testCases {
+		testName := "managed_podclique_correct_owner"
+		if _, ok := tc.obj.(*grovecorev1alpha1.PodClique); !ok {
+			testName = "non_podclique_object"
+		} else if tc.obj.GetLabels() == nil || tc.obj.GetLabels()[grovecorev1alpha1.LabelManagedByKey] != grovecorev1alpha1.LabelManagedByValue {
+			testName = "not_managed_by_grove"
+		} else if len(tc.obj.GetOwnerReferences()) == 0 {
+			testName = "no_owner_references"
+		} else if len(tc.obj.GetOwnerReferences()) > 1 {
+			testName = "multiple_owner_references"
+		} else {
+			// Check if owner kind matches expected
+			ownerKind := tc.obj.GetOwnerReferences()[0].Kind
+			found := false
+			for _, expectedKind := range tc.expectedOwnerKinds {
+				if ownerKind == expectedKind {
+					found = true
+					break
+				}
+			}
+			if !found {
+				testName = "wrong_owner_kind"
+			}
+		}
+		t.Run(testName, func(t *testing.T) {
 			result := IsManagedPodClique(tc.obj, tc.expectedOwnerKinds...)
-			assert.Equal(t, tc.expected, result)
+			assert.Equal(t, tc.expected, result, "test case %d failed", i)
 		})
 	}
 }

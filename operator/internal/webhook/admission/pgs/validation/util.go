@@ -14,6 +14,7 @@
 // limitations under the License.
 // */
 
+// Package validation provides utility functions for validating PodGangSet fields.
 package validation
 
 import (
@@ -27,6 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
+// validateEnumType checks if a pointer value is non-nil and belongs to a set of allowed values.
+// Returns field.ErrorList containing validation errors, if any.
 func validateEnumType[T comparable](value *T, allowedValues sets.Set[T], fldPath *field.Path) field.ErrorList {
 	allErrs := validateNonNilField(value, fldPath)
 	if len(allErrs) != 0 {
@@ -38,6 +41,8 @@ func validateEnumType[T comparable](value *T, allowedValues sets.Set[T], fldPath
 	return allErrs
 }
 
+// validateNonNilField ensures a pointer value is not nil.
+// Returns field.ErrorList containing a required field error if the value is nil.
 func validateNonNilField[T any](value *T, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if value == nil {
@@ -46,6 +51,8 @@ func validateNonNilField[T any](value *T, fldPath *field.Path) field.ErrorList {
 	return allErrs
 }
 
+// validateNonEmptyStringField checks if a string value is non-empty.
+// Returns field.ErrorList containing a required field error if the string is empty.
 func validateNonEmptyStringField(value string, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if utils.IsEmptyStringType(value) {
@@ -54,6 +61,8 @@ func validateNonEmptyStringField(value string, fldPath *field.Path) field.ErrorL
 	return allErrs
 }
 
+// sliceMustHaveUniqueElements validates that a string slice contains no duplicate elements.
+// Returns field.ErrorList containing an invalid field error if duplicates are found, with the provided message.
 func sliceMustHaveUniqueElements(s []string, fldPath *field.Path, msg string) field.ErrorList {
 	allErrs := field.ErrorList{}
 	duplicates := lo.FindDuplicates(s)

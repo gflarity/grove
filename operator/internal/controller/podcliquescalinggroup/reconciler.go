@@ -33,14 +33,22 @@ import (
 )
 
 // Reconciler reconciles PodCliqueScalingGroup objects.
+// It manages the lifecycle of PodCliqueScalingGroup resources by coordinating
+// the creation, update, and deletion of dependent resources through an operator registry.
 type Reconciler struct {
-	config                  groveconfigv1alpha1.PodCliqueScalingGroupControllerConfiguration
-	client                  client.Client
+	// config holds the controller-specific configuration settings
+	config groveconfigv1alpha1.PodCliqueScalingGroupControllerConfiguration
+	// client provides access to the Kubernetes API server
+	client client.Client
+	// reconcileStatusRecorder handles status updates and event recording
 	reconcileStatusRecorder ctrlcommon.ReconcileStatusRecorder
-	operatorRegistry        component.OperatorRegistry[grovecorev1alpha1.PodCliqueScalingGroup]
+	// operatorRegistry manages the lifecycle of dependent resources
+	operatorRegistry component.OperatorRegistry[grovecorev1alpha1.PodCliqueScalingGroup]
 }
 
-// NewReconciler creates a new instance of the PodClique Reconciler.
+// NewReconciler creates a new instance of the PodCliqueScalingGroup Reconciler.
+// It initializes the reconciler with the provided manager and controller configuration,
+// setting up the necessary clients, event recorders, and operator registry.
 func NewReconciler(mgr ctrl.Manager, controllerCfg groveconfigv1alpha1.PodCliqueScalingGroupControllerConfiguration) *Reconciler {
 	eventRecorder := mgr.GetEventRecorderFor(controllerName)
 	return &Reconciler{
@@ -52,34 +60,46 @@ func NewReconciler(mgr ctrl.Manager, controllerCfg groveconfigv1alpha1.PodClique
 }
 
 // Reconcile reconciles a PodCliqueScalingGroup resource.
+// It implements the main reconciliation logic, handling both creation/update and deletion flows.
+// The method processes the resource through three main phases:
+// 1. Resource retrieval and validation
+// 2. Deletion or specification reconciliation based on deletion timestamp
+// 3. Status reconciliation and result evaluation
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// Create a logger instance for this reconciliation cycle
 	logger := ctrllogger.FromContext(ctx).WithName(controllerName)
 
+	// Retrieve the PodCliqueScalingGroup resource from the cluster
 	pcsg := &grovecorev1alpha1.PodCliqueScalingGroup{}
 	if result := ctrlutils.GetPodCliqueScalingGroup(ctx, r.client, logger, req.NamespacedName, pcsg); ctrlcommon.ShortCircuitReconcileFlow(result) {
 		return result.Result()
 	}
 
-	// Check if the deletion timestamp has not been set, do not handle if it is
+	// Determine reconciliation flow based on deletion timestamp
 	var deletionOrSpecReconcileFlowResult ctrlcommon.ReconcileStepResult
 	if !pcsg.DeletionTimestamp.IsZero() {
+		// Resource is being deleted - check for finalizer and trigger deletion flow
 		if !controllerutil.ContainsFinalizer(pcsg, grovecorev1alpha1.FinalizerPodCliqueScalingGroup) {
 			return ctrlcommon.DoNotRequeue().Result()
 		}
 		dLog := logger.WithValues("operation", "delete")
 		deletionOrSpecReconcileFlowResult = r.triggerDeletionFlow(ctx, dLog, pcsg)
 	} else {
+		// Resource is active - reconcile the specification
 		specLog := logger.WithValues("operation", "specReconcile")
 		deletionOrSpecReconcileFlowResult = r.reconcileSpec(ctx, specLog, pcsg)
 	}
 
+	// Reconcile the resource status regardless of deletion or spec reconciliation outcome
 	if statusReconcileResult := r.reconcileStatus(ctx, logger, pcsg); ctrlcommon.ShortCircuitReconcileFlow(statusReconcileResult) {
 		return statusReconcileResult.Result()
 	}
 
+	// Check if deletion or spec reconciliation requires early return
 	if ctrlcommon.ShortCircuitReconcileFlow(deletionOrSpecReconcileFlowResult) {
 		return deletionOrSpecReconcileFlowResult.Result()
 	}
 
+	// All reconciliation steps completed successfully - no requeue needed
 	return ctrlcommon.DoNotRequeue().Result()
 }

@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// Error codes for PodGang component operations.
 const (
 	errCodeListPodGangs            grovecorev1alpha1.ErrorCode = "ERR_LIST_PODGANGS"
 	errCodeDeletePodGangs          grovecorev1alpha1.ErrorCode = "ERR_DELETE_PODGANGS"
@@ -47,6 +48,8 @@ const (
 	errCodeCreateOrPatchPodGang    grovecorev1alpha1.ErrorCode = "ERR_CREATE_OR_PATCH_PODGANG"
 )
 
+// _resource implements the component.Operator interface for managing PodGang resources.
+// It provides CRUD operations for PodGang resources associated with a PodGangSet.
 type _resource struct {
 	client        client.Client
 	scheme        *runtime.Scheme
@@ -62,6 +65,8 @@ func New(client client.Client, scheme *runtime.Scheme, eventRecorder record.Even
 	}
 }
 
+// GetExistingResourceNames retrieves the names of all existing PodGang resources
+// that are owned by the specified PodGangSet.
 func (r _resource) GetExistingResourceNames(ctx context.Context, logger logr.Logger, pgsObjMeta metav1.ObjectMeta) ([]string, error) {
 	logger.Info("Looking for existing PodGang resources created per replica of PodGangSet")
 	objMetaList := &metav1.PartialObjectMetadataList{}
@@ -80,12 +85,17 @@ func (r _resource) GetExistingResourceNames(ctx context.Context, logger logr.Log
 	return k8sutils.FilterMapOwnedResourceNames(pgsObjMeta, objMetaList.Items), nil
 }
 
+// Sync ensures that the desired PodGang resources exist and are up-to-date
+// based on the PodGangSet specification. It creates, updates, or deletes
+// PodGang resources as needed to match the desired state.
 func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) error {
 	logger.Info("Syncing PodGang resources")
+	// Prepare sync context with current and desired state
 	sc, err := r.prepareSyncFlow(ctx, logger, pgs)
 	if err != nil {
 		return err
 	}
+	// Execute the sync flow to reconcile state
 	result := r.runSyncFlow(sc)
 	if result.hasErrors() {
 		return result.getAggregatedError()
@@ -99,6 +109,8 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev
 	return nil
 }
 
+// Delete removes all PodGang resources owned by the specified PodGangSet.
+// This is typically called during PodGangSet deletion or cleanup operations.
 func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjectMeta metav1.ObjectMeta) error {
 	logger.Info("Triggering deletion of PodGangs")
 	if err := r.client.DeleteAllOf(ctx,
@@ -115,8 +127,12 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjectMeta
 	return nil
 }
 
+// buildResource configures a PodGang resource with the appropriate labels,
+// controller reference, and specification based on the PodGangSet and podGangInfo.
 func (r _resource) buildResource(pgs *grovecorev1alpha1.PodGangSet, pgInfo podGangInfo, pg *groveschedulerv1alpha1.PodGang) error {
+	// Set standard labels for PodGang resource
 	pg.Labels = getLabels(pgs.Name)
+	// Establish owner reference to PodGangSet for garbage collection
 	if err := controllerutil.SetControllerReference(pgs, pg, r.scheme); err != nil {
 		return groveerr.WrapError(
 			err,
@@ -125,11 +141,14 @@ func (r _resource) buildResource(pgs *grovecorev1alpha1.PodGangSet, pgInfo podGa
 			fmt.Sprintf("failed to set the controller reference on PodGang %s to PodGangSet %v", pgInfo.fqn, client.ObjectKeyFromObject(pgs)),
 		)
 	}
+	// Configure PodGang specification from PodGangSet template
 	pg.Spec.PodGroups = createPodGroupsForPodGang(pg.Namespace, pgInfo)
 	pg.Spec.PriorityClassName = pgs.Spec.Template.PriorityClassName
 	return nil
 }
 
+// getPodGangSelectorLabels returns the label selector used to identify
+// PodGang resources owned by a specific PodGangSet.
 func getPodGangSelectorLabels(pgsObjMeta metav1.ObjectMeta) map[string]string {
 	return lo.Assign(
 		k8sutils.GetDefaultLabelsForPodGangSetManagedResources(pgsObjMeta.Name),
@@ -138,6 +157,8 @@ func getPodGangSelectorLabels(pgsObjMeta metav1.ObjectMeta) map[string]string {
 		})
 }
 
+// emptyPodGang creates a new PodGang resource with only the namespace and name set.
+// This is used as a template for create-or-update operations.
 func emptyPodGang(objKey client.ObjectKey) *groveschedulerv1alpha1.PodGang {
 	return &groveschedulerv1alpha1.PodGang{
 		ObjectMeta: metav1.ObjectMeta{
@@ -147,6 +168,8 @@ func emptyPodGang(objKey client.ObjectKey) *groveschedulerv1alpha1.PodGang {
 	}
 }
 
+// getLabels returns the standard labels applied to PodGang resources
+// managed by a PodGangSet with the given name.
 func getLabels(pgsName string) map[string]string {
 	return lo.Assign(
 		k8sutils.GetDefaultLabelsForPodGangSetManagedResources(pgsName),

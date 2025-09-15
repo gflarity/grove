@@ -20,23 +20,28 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// PodSpecBuilder is a builder for creating Pod objects.
+// PodSpecBuilder provides a fluent interface for constructing Kubernetes PodSpec objects.
+// It encapsulates the creation of PodSpecs with sensible defaults for testing purposes.
 type PodSpecBuilder struct {
 	podSpec *corev1.PodSpec
 }
 
-// NewPodBuilder creates a new PodSpecBuilder.
+// NewPodBuilder initializes a new PodSpecBuilder with default configuration.
+// The default configuration includes a simple alpine container that sleeps.
 func NewPodBuilder() *PodSpecBuilder {
 	return &PodSpecBuilder{
 		podSpec: createDefaultPodSpec(),
 	}
 }
 
-// Build returns the constructed PodSpec.
+// Build returns the final constructed PodSpec object.
+// This method should be called after all desired modifications are made.
 func (b *PodSpecBuilder) Build() *corev1.PodSpec {
 	return b.podSpec
 }
 
+// createDefaultPodSpec creates a basic PodSpec with a single alpine container
+// configured to sleep for 2 minutes. The pod uses RestartPolicyAlways.
 func createDefaultPodSpec() *corev1.PodSpec {
 	return &corev1.PodSpec{
 		Containers: []corev1.Container{

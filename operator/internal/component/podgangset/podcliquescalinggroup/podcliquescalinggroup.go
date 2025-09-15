@@ -14,6 +14,9 @@
 // limitations under the License.
 // */
 
+// Package podcliquescalinggroup provides a component operator for managing PodCliqueScalingGroup resources
+// within PodGangSet controllers. It handles the lifecycle of PodCliqueScalingGroup resources including
+// creation, synchronization, and deletion based on PodGangSet specifications.
 package podcliquescalinggroup
 
 import (
@@ -39,14 +42,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// Error codes for PodCliqueScalingGroup operations
 const (
-	errListPodCliqueScalingGroup       grovecorev1alpha1.ErrorCode = "ERR_GET_POD_CLIQUE_SCALING_GROUPS"
-	errSyncPodCliqueScalingGroup       grovecorev1alpha1.ErrorCode = "ERR_SYNC_POD_CLIQUE_SCALING_GROUP"
-	errDeletePodCliqueScalingGroup     grovecorev1alpha1.ErrorCode = "ERR_DELETE_POD_CLIQUE_SCALING_GROUP"
-	errCodeBuildPodCliqueScalingGroup  grovecorev1alpha1.ErrorCode = "ERR_BUILD_PODCLIQUESCALINGGROUP"
+	// errListPodCliqueScalingGroup indicates failure to list existing PodCliqueScalingGroup resources
+	errListPodCliqueScalingGroup grovecorev1alpha1.ErrorCode = "ERR_GET_POD_CLIQUE_SCALING_GROUPS"
+	// errSyncPodCliqueScalingGroup indicates failure during synchronization of PodCliqueScalingGroup resources
+	errSyncPodCliqueScalingGroup grovecorev1alpha1.ErrorCode = "ERR_SYNC_POD_CLIQUE_SCALING_GROUP"
+	// errDeletePodCliqueScalingGroup indicates failure to delete PodCliqueScalingGroup resources
+	errDeletePodCliqueScalingGroup grovecorev1alpha1.ErrorCode = "ERR_DELETE_POD_CLIQUE_SCALING_GROUP"
+	// errCodeBuildPodCliqueScalingGroup indicates failure to build PodCliqueScalingGroup resource specification
+	errCodeBuildPodCliqueScalingGroup grovecorev1alpha1.ErrorCode = "ERR_BUILD_PODCLIQUESCALINGGROUP"
+	// errCodeCreatePodCliqueScalingGroup indicates failure to create PodCliqueScalingGroup resource in cluster
 	errCodeCreatePodCliqueScalingGroup grovecorev1alpha1.ErrorCode = "ERR_CREATE_PODCLIQUESCALINGGROUP"
 )
 
+// _resource implements the component.Operator interface for PodCliqueScalingGroup resources.
+// It manages the lifecycle of PodCliqueScalingGroup resources owned by PodGangSet instances.
 type _resource struct {
 	client        client.Client
 	scheme        *runtime.Scheme
@@ -82,6 +93,7 @@ func (r _resource) GetExistingResourceNames(ctx context.Context, _ logr.Logger, 
 
 // Sync synchronizes all resources that the PodCliqueScalingGroup Operator manages.
 func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) error {
+	// Get existing PodCliqueScalingGroup resources managed by this PodGangSet
 	existingPCSGNames, err := r.GetExistingResourceNames(ctx, logger, pgs.ObjectMeta)
 	if err != nil {
 		return groveerr.WrapError(err,
@@ -91,12 +103,15 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev
 		)
 	}
 
+	// Prepare tasks for creating/updating PodCliqueScalingGroup resources
 	tasks := make([]utils.Task, 0, int(pgs.Spec.Replicas)*len(pgs.Spec.Template.PodCliqueScalingGroupConfigs))
 	expectedPCSGNames := make([]string, 0, 20)
+	// Create tasks for each PodGangSet replica and PodCliqueScalingGroup configuration
 	for pgsReplica := range pgs.Spec.Replicas {
 		for _, pcsgConfig := range pgs.Spec.Template.PodCliqueScalingGroupConfigs {
 			pcsgName := grovecorev1alpha1.GeneratePodCliqueScalingGroupName(grovecorev1alpha1.ResourceNameReplica{Name: pgs.Name, Replica: int(pgsReplica)}, pcsgConfig.Name)
 			expectedPCSGNames = append(expectedPCSGNames, pcsgName)
+			// Skip if PodCliqueScalingGroup already exists
 			if slices.Contains(existingPCSGNames, pcsgName) {
 				continue
 			}
@@ -114,6 +129,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev
 		}
 	}
 
+	// Identify and schedule deletion of excess PodCliqueScalingGroup resources
 	excessPCSGNames := lo.Filter(existingPCSGNames, func(existingPCSGName string, _ int) bool {
 		return !slices.Contains(expectedPCSGNames, existingPCSGName)
 	})
@@ -131,6 +147,7 @@ func (r _resource) Sync(ctx context.Context, logger logr.Logger, pgs *grovecorev
 		tasks = append(tasks, deleteTask)
 	}
 
+	// Execute all create and delete tasks concurrently
 	if runResult := utils.RunConcurrently(ctx, logger, tasks); runResult.HasErrors() {
 		return groveerr.WrapError(runResult.GetAggregatedError(),
 			errSyncPodCliqueScalingGroup,
@@ -159,10 +176,13 @@ func (r _resource) Delete(ctx context.Context, logger logr.Logger, pgsObjMeta me
 	return nil
 }
 
+// doCreate creates a new PodCliqueScalingGroup resource for the given PodGangSet replica and configuration.
 func (r _resource) doCreate(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, pgsReplica int, pcsgObjectKey client.ObjectKey, pcsgConfig grovecorev1alpha1.PodCliqueScalingGroupConfig) error {
 	logger.Info("Create PodCliqueScalingGroup", "objectKey", pcsgObjectKey)
+	// Create empty PodCliqueScalingGroup resource with basic metadata
 	pclqScalingGrp := emptyPodCliqueScalingGroup(pcsgObjectKey)
 
+	// Build the complete resource specification
 	if err := r.buildResource(pclqScalingGrp, pgs, pgsReplica, pcsgConfig); err != nil {
 		return groveerr.WrapError(err,
 			errCodeBuildPodCliqueScalingGroup,
@@ -171,6 +191,7 @@ func (r _resource) doCreate(ctx context.Context, logger logr.Logger, pgs *grovec
 		)
 	}
 
+	// Create the resource in the cluster, ignoring already exists errors
 	if err := client.IgnoreAlreadyExists(r.client.Create(ctx, pclqScalingGrp)); err != nil {
 		r.eventRecorder.Eventf(pgs, corev1.EventTypeWarning, groveevents.ReasonPodCliqueScalingGroupCreationFailed, "Error creating PodCliqueScalingGroup %v: %v", pcsgObjectKey, err)
 		return groveerr.WrapError(err,
@@ -185,6 +206,7 @@ func (r _resource) doCreate(ctx context.Context, logger logr.Logger, pgs *grovec
 	return nil
 }
 
+// doDelete deletes a specific PodCliqueScalingGroup resource.
 func (r _resource) doDelete(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, pcsgObjectKey client.ObjectKey) error {
 	logger.Info("Delete PodCliqueScalingGroup", "objectKey", pcsgObjectKey)
 	pcsg := emptyPodCliqueScalingGroup(pcsgObjectKey)
@@ -201,7 +223,10 @@ func (r _resource) doDelete(ctx context.Context, logger logr.Logger, pgs *grovec
 	return nil
 }
 
+// buildResource populates the PodCliqueScalingGroup resource with the appropriate specification
+// based on the PodGangSet configuration and replica index.
 func (r _resource) buildResource(pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pgs *grovecorev1alpha1.PodGangSet, pgsReplica int, pcsgConfig grovecorev1alpha1.PodCliqueScalingGroupConfig) error {
+	// Set PodGangSet as the controller owner of this PodCliqueScalingGroup
 	if err := controllerutil.SetControllerReference(pgs, pcsg, r.scheme); err != nil {
 		return groveerr.WrapError(err,
 			errSyncPodCliqueScalingGroup,
@@ -209,13 +234,17 @@ func (r _resource) buildResource(pcsg *grovecorev1alpha1.PodCliqueScalingGroup, 
 			fmt.Sprintf("Error setting controller reference for PodCliqueScalingGroup: %v", client.ObjectKeyFromObject(pcsg)),
 		)
 	}
+	// Configure the PodCliqueScalingGroup specification from the template
 	pcsg.Spec.Replicas = *pcsgConfig.Replicas
 	pcsg.Spec.MinAvailable = pcsgConfig.MinAvailable
 	pcsg.Spec.CliqueNames = pcsgConfig.CliqueNames
+	// Apply appropriate labels for resource identification and management
 	pcsg.Labels = getLabels(pgs.Name, pgsReplica, client.ObjectKeyFromObject(pcsg))
 	return nil
 }
 
+// getLabels generates the appropriate labels for a PodCliqueScalingGroup resource
+// based on its parent PodGangSet and replica index.
 func getLabels(pgsName string, pgsReplica int, pclqScalingGroupObjKey client.ObjectKey) map[string]string {
 	componentLabels := map[string]string{
 		grovecorev1alpha1.LabelAppNameKey:             pclqScalingGroupObjKey.Name,
@@ -228,6 +257,8 @@ func getLabels(pgsName string, pgsReplica int, pclqScalingGroupObjKey client.Obj
 	)
 }
 
+// getPodCliqueScalingGroupSelectorLabels returns the label selector used to identify
+// PodCliqueScalingGroup resources managed by a specific PodGangSet.
 func getPodCliqueScalingGroupSelectorLabels(pgsObjMeta metav1.ObjectMeta) map[string]string {
 	return lo.Assign(
 		k8sutils.GetDefaultLabelsForPodGangSetManagedResources(pgsObjMeta.Name),
@@ -237,6 +268,8 @@ func getPodCliqueScalingGroupSelectorLabels(pgsObjMeta metav1.ObjectMeta) map[st
 	)
 }
 
+// emptyPodCliqueScalingGroup creates a new PodCliqueScalingGroup resource with only
+// the basic ObjectMeta populated from the provided object key.
 func emptyPodCliqueScalingGroup(objKey client.ObjectKey) *grovecorev1alpha1.PodCliqueScalingGroup {
 	return &grovecorev1alpha1.PodCliqueScalingGroup{
 		ObjectMeta: metav1.ObjectMeta{

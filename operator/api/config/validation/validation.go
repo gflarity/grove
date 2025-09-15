@@ -14,6 +14,7 @@
 // limitations under the License.
 // */
 
+// Package validation provides validation functions for the Grove operator configuration.
 package validation
 
 import (
@@ -34,6 +35,7 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	return allErrs
 }
 
+// validateLogConfiguration validates the logging configuration settings.
 func validateLogConfiguration(config *configv1alpha1.OperatorConfiguration) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if len(strings.TrimSpace(string(config.LogLevel))) > 0 && !sets.New(configv1alpha1.AllLogLevels...).Has(config.LogLevel) {
@@ -45,6 +47,7 @@ func validateLogConfiguration(config *configv1alpha1.OperatorConfiguration) fiel
 	return allErrs
 }
 
+// validateControllerConfiguration validates the controller configuration settings.
 func validateControllerConfiguration(controllerCfg configv1alpha1.ControllerConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validatePodGangSetControllerConfiguration(controllerCfg.PodGangSet, fldPath.Child("podGangSet"))...)
@@ -52,18 +55,21 @@ func validateControllerConfiguration(controllerCfg configv1alpha1.ControllerConf
 	return allErrs
 }
 
+// validatePodGangSetControllerConfiguration validates the PodGangSet controller configuration.
 func validatePodGangSetControllerConfiguration(pgsCfg configv1alpha1.PodGangSetControllerConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validateConcurrentSyncs(pgsCfg.ConcurrentSyncs, fldPath)...)
 	return allErrs
 }
 
+// validatePodCliqueScalingGroupConfiguration validates the PodCliqueScalingGroup controller configuration.
 func validatePodCliqueScalingGroupConfiguration(pcsgCfg configv1alpha1.PodCliqueScalingGroupControllerConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validateConcurrentSyncs(pcsgCfg.ConcurrentSyncs, fldPath)...)
 	return allErrs
 }
 
+// validateConcurrentSyncs validates that the concurrent syncs value is greater than 0.
 func validateConcurrentSyncs(concurrentSyncs *int, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if ptr.Deref(concurrentSyncs, 0) <= 0 {

@@ -20,11 +20,9 @@ import (
 	"context"
 
 	grovecorev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
+	groveclientscheme "github.com/NVIDIA/grove/operator/internal/client"
 
 	"github.com/go-logr/logr"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -35,16 +33,11 @@ import (
 
 // SetupFakeClient creates a fake Kubernetes client with Grove CRDs and status subresources.
 func SetupFakeClient(objects ...client.Object) client.WithWatch {
-	scheme := runtime.NewScheme()
-	utilruntime.Must(grovecorev1alpha1.AddToScheme(scheme))
-	utilruntime.Must(v1.AddToScheme(scheme))
-
 	return fake.NewClientBuilder().
-		WithScheme(scheme).
+		WithScheme(groveclientscheme.Scheme).
 		WithStatusSubresource(&grovecorev1alpha1.PodGangSet{}).
 		WithStatusSubresource(&grovecorev1alpha1.PodCliqueScalingGroup{}).
 		WithStatusSubresource(&grovecorev1alpha1.PodClique{}).
-		WithStatusSubresource(&v1.Pod{}).
 		WithObjects(objects...).
 		Build()
 }

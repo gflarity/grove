@@ -30,12 +30,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// triggerDeletionFlow orchestrates the complete deletion process for a PodCliqueScalingGroup.
+// It executes deletion steps sequentially: resource cleanup, verification, and finalizer removal.
 func (r *Reconciler) triggerDeletionFlow(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) ctrlcommon.ReconcileStepResult {
+	// Define the ordered deletion steps
 	deleteStepFns := []ctrlcommon.ReconcileStepFn[grovecorev1alpha1.PodCliqueScalingGroup]{
 		r.deletePodCliqueScalingGroupResources,
 		r.verifyNoResourcesAwaitsCleanup,
 		r.removeFinalizer,
 	}
+	// Execute each deletion step, short-circuiting on errors
 	for _, fn := range deleteStepFns {
 		if stepResult := fn(ctx, logger, pcsg); ctrlcommon.ShortCircuitReconcileFlow(stepResult) {
 			return stepResult
@@ -45,9 +49,14 @@ func (r *Reconciler) triggerDeletionFlow(ctx context.Context, logger logr.Logger
 	return ctrlcommon.DoNotRequeue()
 }
 
+// deletePodCliqueScalingGroupResources concurrently deletes all managed resources for the PodCliqueScalingGroup.
+// It creates deletion tasks for each operator type and executes them in parallel.
 func (r *Reconciler) deletePodCliqueScalingGroupResources(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) ctrlcommon.ReconcileStepResult {
+	// Get all registered operators for resource deletion
 	operators := r.operatorRegistry.GetAllOperators()
 	deleteTasks := make([]utils.Task, 0, len(operators))
+
+	// Create deletion tasks for each operator
 	for kind, operator := range operators {
 		deleteTasks = append(deleteTasks, utils.Task{
 			Name: fmt.Sprintf("delete-%s", kind),
@@ -56,6 +65,8 @@ func (r *Reconciler) deletePodCliqueScalingGroupResources(ctx context.Context, l
 			},
 		})
 	}
+
+	// Execute all deletion tasks concurrently
 	logger.Info("Triggering delete of PodCliqueScalingGroup resources")
 	if runResult := utils.RunConcurrently(ctx, logger, deleteTasks); runResult.HasErrors() {
 		deletionErr := runResult.GetAggregatedError()
@@ -65,15 +76,22 @@ func (r *Reconciler) deletePodCliqueScalingGroupResources(ctx context.Context, l
 	return ctrlcommon.ContinueReconcile()
 }
 
+// verifyNoResourcesAwaitsCleanup ensures all managed resources have been properly cleaned up.
+// It delegates to the controller utils to perform the verification check.
 func (r *Reconciler) verifyNoResourcesAwaitsCleanup(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) ctrlcommon.ReconcileStepResult {
 	return ctrlutils.VerifyNoResourceAwaitsCleanup(ctx, logger, r.operatorRegistry, pcsg.ObjectMeta)
 }
 
+// removeFinalizer removes the PodCliqueScalingGroup finalizer to allow deletion completion.
+// It checks for finalizer presence before attempting removal and patches the resource.
 func (r *Reconciler) removeFinalizer(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) ctrlcommon.ReconcileStepResult {
+	// Check if finalizer exists before attempting removal
 	if !controllerutil.ContainsFinalizer(pcsg, grovecorev1alpha1.FinalizerPodCliqueScalingGroup) {
 		logger.Info("Finalizer not found", "PodCliqueScalingGroup", pcsg)
 		return ctrlcommon.DoNotRequeue()
 	}
+
+	// Remove the finalizer and patch the resource
 	logger.Info("Removing finalizer", "PodCliqueScalingGroup", pcsg, "finalizerName", grovecorev1alpha1.FinalizerPodCliqueScalingGroup)
 	if err := ctrlutils.RemoveAndPatchFinalizer(ctx, r.client, pcsg, grovecorev1alpha1.FinalizerPodCliqueScalingGroup); err != nil {
 		return ctrlcommon.ReconcileWithErrors("error removing finalizer", fmt.Errorf("failed to remove finalizer: %s from PodCliqueScalingGroup: %v: %w", grovecorev1alpha1.FinalizerPodCliqueScalingGroup, client.ObjectKeyFromObject(pcsg), err))

@@ -110,6 +110,17 @@ func ReconcileAfter(duration time.Duration, description string) ReconcileStepRes
 	}
 }
 
+// Requeue returns a ReconcileStepResult that immediately re-queues the reconciliation.
+func Requeue(description string) ReconcileStepResult {
+	return ReconcileStepResult{
+		result: ctrl.Result{
+			Requeue: true,
+		},
+		continueReconcile: false,
+		description:       description,
+	}
+}
+
 // ShortCircuitReconcileFlow returns true if the reconcile flow should be short-circuited and not continue.
 func ShortCircuitReconcileFlow(result ReconcileStepResult) bool {
 	return !result.continueReconcile

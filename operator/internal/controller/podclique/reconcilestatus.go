@@ -34,15 +34,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// reconcileStatus updates the PodClique status based on current pod states and conditions.
 func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	pgsName := componentutils.GetPodGangSetName(pclq.ObjectMeta)
 
+	// Get all pods belonging to this PodClique
 	existingPods, err := componentutils.GetPCLQPods(ctx, r.client, pgsName, pclq)
 	if err != nil {
 		logger.Error(err, "failed to list pods for PodClique")
 		return ctrlcommon.ReconcileWithErrors(fmt.Sprintf("failed to list pods for PodClique: %q", client.ObjectKeyFromObject(pclq)), err)
 	}
 
+	// Categorize pods by their condition types (ready, scheduled, etc.)
 	podCategories := k8sutils.CategorizePodsByConditionType(logger, existingPods)
 
 	// mutate PodClique Status Replicas, ReadyReplicas, ScheduleGatedReplicas and UpdatedReplicas.
@@ -71,6 +74,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 	return ctrlcommon.ContinueReconcile()
 }
 
+// mutateStatusReplicaCounts updates the PodClique status with current replica counts.
 func mutateStatusReplicaCounts(pclq *grovecorev1alpha1.PodClique, podCategories map[corev1.PodConditionType][]*corev1.Pod, numExistingPods int) {
 	// mutate the PCLQ status with current number of schedule gated, ready pods and updated pods.
 	numNonTerminatingPods := int32(numExistingPods - len(podCategories[k8sutils.TerminatingPod]))
@@ -82,10 +86,12 @@ func mutateStatusReplicaCounts(pclq *grovecorev1alpha1.PodClique, podCategories 
 	pclq.Status.UpdatedReplicas = numNonTerminatingPods
 }
 
+// mutateSelector sets the label selector in PodClique status for autoscaler use.
 func mutateSelector(pgsName string, pclq *grovecorev1alpha1.PodClique) error {
 	if pclq.Spec.ScaleConfig == nil {
 		return nil
 	}
+	// Build labels combining PodGangSet and PodClique labels
 	labels := lo.Assign(
 		k8sutils.GetDefaultLabelsForPodGangSetManagedResources(pgsName),
 		map[string]string{
@@ -100,6 +106,7 @@ func mutateSelector(pgsName string, pclq *grovecorev1alpha1.PodClique) error {
 	return nil
 }
 
+// mutateMinAvailableBreachedCondition updates the MinAvailableBreached condition if it has changed.
 func mutateMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, numNotReadyPodsWithContainersInError, numPodsStartedButNotReady int) {
 	newCondition := computeMinAvailableBreachedCondition(pclq, numNotReadyPodsWithContainersInError, numPodsStartedButNotReady)
 	if k8sutils.HasConditionChanged(pclq.Status.Conditions, newCondition) {
@@ -107,6 +114,7 @@ func mutateMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, numN
 	}
 }
 
+// computeMinAvailableBreachedCondition determines the MinAvailableBreached condition based on pod states.
 func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, numPodsHavingAtleastOneContainerWithNonZeroExitCode, numPodsStartedButNotReady int) metav1.Condition {
 	// dereferencing is considered safe as MinAvailable will always be set by the defaulting webhook. If this changes in the future,
 	// make sure that you check for nil explicitly.
@@ -126,6 +134,7 @@ func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, num
 		}
 	}
 
+	// Calculate pods that are ready or in process of starting (exclude failed pods)
 	readyOrStartingPods := scheduledReplicas - numPodsHavingAtleastOneContainerWithNonZeroExitCode - numPodsStartedButNotReady
 	// pclq.Status.ReadyReplicas do not account for Pods which are not yet ready and are in the process of starting/initializing.
 	// This allows sufficient time specially for pods that have long-running init containers or slow-to-start main containers.
@@ -149,6 +158,7 @@ func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, num
 	}
 }
 
+// mutatePodCliqueScheduledCondition updates the PodCliqueScheduled condition if it has changed.
 func mutatePodCliqueScheduledCondition(pclq *grovecorev1alpha1.PodClique) {
 	newCondition := computePodCliqueScheduledCondition(pclq)
 	if k8sutils.HasConditionChanged(pclq.Status.Conditions, newCondition) {
@@ -156,6 +166,7 @@ func mutatePodCliqueScheduledCondition(pclq *grovecorev1alpha1.PodClique) {
 	}
 }
 
+// computePodCliqueScheduledCondition determines the PodCliqueScheduled condition based on scheduled replicas.
 func computePodCliqueScheduledCondition(pclq *grovecorev1alpha1.PodClique) metav1.Condition {
 	now := metav1.Now()
 	if pclq.Status.ScheduledReplicas < *pclq.Spec.MinAvailable {

@@ -14,6 +14,9 @@
 // limitations under the License.
 // */
 
+// Package opts provides command-line options and configuration management for the Grove operator.
+// It handles parsing configuration files, validating operator settings, and integrating with
+// the Kubernetes configuration scheme.
 package opts
 
 import (
@@ -29,29 +32,37 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
+// configDecoder is a runtime decoder for parsing operator configuration files.
 var configDecoder runtime.Decoder
 
+// init initializes the configuration decoder by setting up the runtime scheme
+// and creating a universal decoder for operator configuration objects.
 func init() {
 	configScheme := runtime.NewScheme()
 	utilruntime.Must(configv1alpha1.AddToScheme(configScheme))
 	configDecoder = serializer.NewCodecFactory(configScheme).UniversalDecoder()
 }
 
-// CLIOptions provides convenience abstraction to initialize and validate OperatorConfiguration from CLI flags.
+// CLIOptions provides a convenient abstraction for initializing and validating
+// OperatorConfiguration from command-line flags and configuration files.
 type CLIOptions struct {
+	// configFile is the path to the operator configuration file.
 	configFile string
-	// Config is the operator configuration initialized from the CLI flags.
+	// Config is the parsed operator configuration loaded from the configuration file.
 	Config *configv1alpha1.OperatorConfiguration
 }
 
-// NewCLIOptions creates a new CLIOptions and adds the required CLI flags to the flag.flagSet.
+// NewCLIOptions creates a new CLIOptions instance and registers the required
+// command-line flags with the provided flag set.
 func NewCLIOptions(fs *pflag.FlagSet) *CLIOptions {
 	cliOpts := &CLIOptions{}
 	cliOpts.addFlags(fs)
 	return cliOpts
 }
 
-// Complete reads the configuration file and decodes it into an OperatorConfiguration.
+// Complete reads the configuration file specified by the --config flag and
+// decodes it into an OperatorConfiguration object. This method must be called
+// after the command-line flags have been parsed.
 func (o *CLIOptions) Complete() error {
 	if len(o.configFile) == 0 {
 		return fmt.Errorf("missing config file")
@@ -67,7 +78,8 @@ func (o *CLIOptions) Complete() error {
 	return nil
 }
 
-// Validate validates the created OperatorConfiguration.
+// Validate performs validation on the loaded OperatorConfiguration using the
+// operator's validation rules. This method should be called after Complete().
 func (o *CLIOptions) Validate() error {
 	if errs := operatorvalidation.ValidateOperatorConfiguration(o.Config); errs != nil {
 		return errs.ToAggregate()
@@ -75,6 +87,7 @@ func (o *CLIOptions) Validate() error {
 	return nil
 }
 
+// addFlags registers the command-line flags with the provided flag set.
 func (o *CLIOptions) addFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.configFile, "config", o.configFile, "Path to configuration file.")
 }

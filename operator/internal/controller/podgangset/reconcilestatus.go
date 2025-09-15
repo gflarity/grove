@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// reconcileStatus updates the status fields of a PodGangSet by calculating
+// available replicas and persisting the updated status to the Kubernetes API.
 func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	// Calculate available replicas using PCSG-inspired approach
 	err := r.mutateReplicas(ctx, logger, pgs)
@@ -45,6 +47,8 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pg
 	return ctrlcommon.ContinueReconcile()
 }
 
+// mutateReplicas updates the replica-related status fields in the PodGangSet.
+// It sets the total replicas to match the spec and calculates available replicas.
 func (r *Reconciler) mutateReplicas(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) error {
 	// Set basic replica count
 	pgs.Status.Replicas = pgs.Spec.Replicas
@@ -80,6 +84,7 @@ func (r *Reconciler) computeAvailableReplicas(ctx context.Context, logger logr.L
 	standalonePCLQsByReplica := componentutils.GroupPCLQsByPGSReplicaIndex(standalonePCLQs)
 	pcsgsByReplica := componentutils.GroupPCSGsByPGSReplicaIndex(pcsgs)
 
+	// Check availability for each replica
 	for replicaIndex := 0; replicaIndex < int(pgs.Spec.Replicas); replicaIndex++ {
 		replicaIndexStr := strconv.Itoa(replicaIndex)
 		replicaStandalonePCLQs := standalonePCLQsByReplica[replicaIndexStr]
@@ -97,6 +102,8 @@ func (r *Reconciler) computeAvailableReplicas(ctx context.Context, logger logr.L
 	return availableReplicas, nil
 }
 
+// computeExpectedResourceCounts calculates the expected number of resources per replica
+// for a PodGangSet. Returns the count of standalone PodCliques and PodCliqueScalingGroups.
 func (r *Reconciler) computeExpectedResourceCounts(pgs *grovecorev1alpha1.PodGangSet) (expectedStandalonePCLQs, expectedPCSGs int) {
 	// Count expected PCSGs - this is the number of unique scaling group configs
 	expectedPCSGs = len(pgs.Spec.Template.PodCliqueScalingGroupConfigs)
@@ -114,6 +121,9 @@ func (r *Reconciler) computeExpectedResourceCounts(pgs *grovecorev1alpha1.PodGan
 	return expectedStandalonePCLQs, expectedPCSGs
 }
 
+// isPGSReplicaAvailable determines if a specific PodGangSet replica is available
+// by checking that all its required PodCliqueScalingGroups and standalone PodCliques
+// are present and meet their availability requirements.
 func (r *Reconciler) isPGSReplicaAvailable(logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, replicaIndex int, replicaPCSGs []grovecorev1alpha1.PodCliqueScalingGroup, standalonePCLQs []grovecorev1alpha1.PodClique, expectedPCSGs int, expectedStandalonePCLQs int) bool {
 	if !r.checkPGSReplicaStandalonePCLQsAvailability(logger, pgs, expectedStandalonePCLQs, replicaIndex, standalonePCLQs) {
 		logger.Info("PGS replica is not available due to insufficient standalone PodCliques",
@@ -133,6 +143,8 @@ func (r *Reconciler) isPGSReplicaAvailable(logger logr.Logger, pgs *grovecorev1a
 	return true
 }
 
+// checkPGSReplicaStandalonePCLQsAvailability verifies that a PodGangSet replica
+// has all required standalone PodCliques and that each meets its MinAvailable requirement.
 func (r *Reconciler) checkPGSReplicaStandalonePCLQsAvailability(logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, expectedStandalonePCLQs, replicaIndex int, pclqs []grovecorev1alpha1.PodClique) bool {
 	nonTerminatedPCLQs := lo.Filter(pclqs, func(pclq grovecorev1alpha1.PodClique, _ int) bool {
 		return !k8sutils.IsResourceTerminating(pclq.ObjectMeta)
@@ -153,6 +165,8 @@ func (r *Reconciler) checkPGSReplicaStandalonePCLQsAvailability(logger logr.Logg
 	return isAvailable
 }
 
+// checkPGSCReplicaPCSGsAvailability verifies that a PodGangSet replica
+// has all required PodCliqueScalingGroups and that each meets its MinAvailable requirement.
 func (r *Reconciler) checkPGSCReplicaPCSGsAvailability(logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, expectedPCSGs, replicaIndex int, pcsgs []grovecorev1alpha1.PodCliqueScalingGroup) bool {
 	nonTerminatedPCSGs := lo.Filter(pcsgs, func(pcsg grovecorev1alpha1.PodCliqueScalingGroup, _ int) bool {
 		return !k8sutils.IsResourceTerminating(pcsg.ObjectMeta)

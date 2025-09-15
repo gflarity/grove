@@ -33,24 +33,34 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// reconcileStatus updates the status of a PodCliqueScalingGroup by computing
+// replica counts, availability conditions, and selector configuration.
 func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) ctrlcommon.ReconcileStepResult {
+	// Get the owner PodGangSet to access configuration
 	pgs, err := componentutils.GetOwnerPodGangSet(ctx, r.client, pcsg.ObjectMeta)
 	if err != nil {
 		return ctrlcommon.ReconcileWithErrors("failed to get owner PodGangSet", err)
 	}
 
+	// Retrieve all PodCliques managed by this PodCliqueScalingGroup
 	pclqsPerPCSGReplica, err := r.getPodCliquesPerPCSGReplica(ctx, pgs.Name, client.ObjectKeyFromObject(pcsg))
 	if err != nil {
 		return ctrlcommon.ReconcileWithErrors(fmt.Sprintf("failed to list PodCliques for PodCliqueScalingGroup: %q", client.ObjectKeyFromObject(pcsg)), err)
 	}
+
+	// Update replica counts in status
 	mutateReplicas(logger, pcsg, pclqsPerPCSGReplica)
+
+	// Update MinAvailableBreached condition based on current state
 	mutateMinAvailableBreachedCondition(logger, pcsg, pclqsPerPCSGReplica)
 
+	// Update selector for HPA integration if scale config is defined
 	if err = mutateSelector(pgs, pcsg); err != nil {
 		logger.Error(err, "failed to update selector for PodCliqueScalingGroup")
 		return ctrlcommon.ReconcileWithErrors("failed to update selector for PodCliqueScalingGroup", err)
 	}
 
+	// Persist status changes to the cluster
 	if err = r.client.Status().Update(ctx, pcsg); err != nil {
 		return ctrlcommon.ReconcileWithErrors("failed to update the status with label selector and replicas", err)
 	}
@@ -58,9 +68,13 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 	return ctrlcommon.ContinueReconcile()
 }
 
+// mutateReplicas calculates and updates the replica status fields based on
+// the current state of PodCliques across all PodCliqueScalingGroup replicas.
 func mutateReplicas(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) {
 	pcsg.Status.Replicas = pcsg.Spec.Replicas
 	var scheduledReplicas, availableReplicas int32
+
+	// Count scheduled and available replicas across all PCSG replicas
 	for pcsgReplicaIndex, pclqs := range pclqsPerPCSGReplica {
 		isScheduled, isAvailable := computeReplicaStatus(logger, len(pcsg.Spec.CliqueNames), pcsgReplicaIndex, pclqs, *pcsg.Spec.MinAvailable)
 		if isScheduled {
@@ -70,9 +84,11 @@ func mutateReplicas(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScaling
 			availableReplicas++
 		}
 	}
+
 	logger.Info("Mutating PodCliqueScalingGroup replicas",
 		"pcsg", client.ObjectKeyFromObject(pcsg),
 		"scheduledReplicas", scheduledReplicas, "availableReplicas", availableReplicas)
+
 	pcsg.Status.ScheduledReplicas = scheduledReplicas
 	pcsg.Status.AvailableReplicas = availableReplicas
 }
@@ -80,9 +96,13 @@ func mutateReplicas(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScaling
 // computeReplicaStatus processes a single PodCliqueScalingGroup replica and returns whether it is scheduled and available.
 func computeReplicaStatus(logger logr.Logger, expectedPCSGReplicaPCLQSize int, pcsgReplicaIndex string, pclqs []grovecorev1alpha1.PodClique, minAvailable int32) (bool, bool) {
 	var isAvailable, isScheduled bool
+
+	// Filter out terminating PodCliques as they shouldn't count toward availability
 	nonTerminatedPCSGPodCliques := lo.Filter(pclqs, func(pclq grovecorev1alpha1.PodClique, _ int) bool {
 		return !k8sutils.IsResourceTerminating(pclq.ObjectMeta)
 	})
+
+	// Replica is not ready if it doesn't have the expected number of PodCliques
 	if len(nonTerminatedPCSGPodCliques) != expectedPCSGReplicaPCLQSize {
 		logger.V(1).Info("PCSG replica does not have the expected number of PodCliques",
 			"pcsgReplicaIndex", pcsgReplicaIndex,
@@ -90,9 +110,12 @@ func computeReplicaStatus(logger logr.Logger, expectedPCSGReplicaPCLQSize int, p
 			"actualPCSGReplicaPCLQSize", len(nonTerminatedPCSGPodCliques))
 		return false, false
 	}
+
+	// Check if all PodCliques in this replica are scheduled
 	isScheduled = lo.EveryBy(nonTerminatedPCSGPodCliques, func(pclq grovecorev1alpha1.PodClique) bool {
 		return k8sutils.IsConditionTrue(pclq.Status.Conditions, grovecorev1alpha1.ConditionTypePodCliqueScheduled)
 	})
+
 	// A PodClique is considered available if it schedules at least MinAvailable pods.
 	if isScheduled {
 		isAvailable = lo.EveryBy(nonTerminatedPCSGPodCliques, func(pclq grovecorev1alpha1.PodClique) bool {
@@ -102,8 +125,12 @@ func computeReplicaStatus(logger logr.Logger, expectedPCSGReplicaPCLQSize int, p
 	return isScheduled, isAvailable
 }
 
+// mutateMinAvailableBreachedCondition updates the MinAvailableBreached condition
+// based on the current availability state of the PodCliqueScalingGroup.
 func mutateMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) {
 	newCondition := computeMinAvailableBreachedCondition(logger, pcsg, pclqsPerPCSGReplica)
+
+	// Only update the condition if it has changed
 	if k8sutils.HasConditionChanged(pcsg.Status.Conditions, newCondition) {
 		logger.Info("Updating MinAvailableBreached condition for PodCliqueScalingGroup",
 			"pcsg", client.ObjectKeyFromObject(pcsg),
@@ -114,9 +141,13 @@ func mutateMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1al
 	}
 }
 
+// computeMinAvailableBreachedCondition determines the MinAvailableBreached condition
+// status by comparing available replicas against the minimum required threshold.
 func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) metav1.Condition {
 	minAvailable := int(*pcsg.Spec.MinAvailable)
 	scheduledReplicas := int(pcsg.Status.ScheduledReplicas)
+
+	// Check if we have enough scheduled replicas first
 	if scheduledReplicas < minAvailable {
 		return metav1.Condition{
 			Type:    grovecorev1alpha1.ConditionTypeMinAvailableBreached,
@@ -125,8 +156,12 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 			Message: fmt.Sprintf("Insufficient scheduled replicas. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
 		}
 	}
+
+	// Calculate how many replicas have breached their minimum availability
 	minAvailableBreachedReplicas := computeMinAvailableBreachedReplicas(logger, pclqsPerPCSGReplica)
 	availableReplicas := scheduledReplicas - minAvailableBreachedReplicas
+
+	// Check if available replicas meet the minimum threshold
 	if availableReplicas < minAvailable {
 		return metav1.Condition{
 			Type:    grovecorev1alpha1.ConditionTypeMinAvailableBreached,
@@ -135,6 +170,8 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 			Message: fmt.Sprintf("Insufficient PodCliqueScalingGroup ready replicas, expected at least: %d, found: %d", minAvailable, availableReplicas),
 		}
 	}
+
+	// Sufficient replicas are available
 	return metav1.Condition{
 		Type:    grovecorev1alpha1.ConditionTypeMinAvailableBreached,
 		Status:  metav1.ConditionFalse,
@@ -143,21 +180,33 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 	}
 }
 
+// computeMinAvailableBreachedReplicas counts the number of PodCliqueScalingGroup
+// replicas that have at least one PodClique with MinAvailableBreached condition set to true.
 func computeMinAvailableBreachedReplicas(logger logr.Logger, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) int {
 	var breachedReplicas int
+
+	// Check each PCSG replica for MinAvailableBreached condition
 	for pcsgReplicaIndex, pclqs := range pclqsPerPCSGReplica {
+		// A replica is considered breached if any of its PodCliques are breached
 		isMinAvailableBreached := lo.Reduce(pclqs, func(agg bool, pclq grovecorev1alpha1.PodClique, _ int) bool {
 			return agg || k8sutils.IsConditionTrue(pclq.Status.Conditions, grovecorev1alpha1.ConditionTypeMinAvailableBreached)
 		}, false)
+
 		if isMinAvailableBreached {
 			breachedReplicas++
 		}
-		logger.Info("PodCliqueScalingGroup replica has MinAvailableBreached condition set to true", "pcsgReplicaIndex", pcsgReplicaIndex, "isMinAvailableBreached", isMinAvailableBreached)
+
+		logger.Info("PodCliqueScalingGroup replica has MinAvailableBreached condition set to true",
+			"pcsgReplicaIndex", pcsgReplicaIndex,
+			"isMinAvailableBreached", isMinAvailableBreached)
 	}
 	return breachedReplicas
 }
 
+// getPodCliquesPerPCSGReplica retrieves all PodCliques managed by this PodCliqueScalingGroup
+// and groups them by their replica index for status calculation.
 func (r *Reconciler) getPodCliquesPerPCSGReplica(ctx context.Context, pgsName string, pcsgObjKey client.ObjectKey) (map[string][]grovecorev1alpha1.PodClique, error) {
+	// Build selector labels to find PodCliques owned by this PCSG
 	selectorLabels := lo.Assign(
 		k8sutils.GetDefaultLabelsForPodGangSetManagedResources(pgsName),
 		map[string]string{
@@ -165,6 +214,8 @@ func (r *Reconciler) getPodCliquesPerPCSGReplica(ctx context.Context, pgsName st
 			grovecorev1alpha1.LabelComponentKey:          grovecorev1alpha1.LabelComponentPCSGPodCliqueValue,
 		},
 	)
+
+	// Retrieve all PodCliques owned by this PCSG
 	pclqs, err := componentutils.GetPCLQsByOwner(ctx,
 		r.client,
 		grovecorev1alpha1.PodCliqueScalingGroupKind,
@@ -174,15 +225,22 @@ func (r *Reconciler) getPodCliquesPerPCSGReplica(ctx context.Context, pgsName st
 	if err != nil {
 		return nil, err
 	}
+
+	// Group PodCliques by their PCSG replica index
 	pclqsPerPCSGReplica := componentutils.GroupPCLQsByPCSGReplicaIndex(pclqs)
 	return pclqsPerPCSGReplica, nil
 }
 
+// mutateSelector sets the selector field in the PodCliqueScalingGroup status
+// if a ScaleConfig is defined, enabling HPA integration.
 func mutateSelector(pgs *grovecorev1alpha1.PodGangSet, pcsg *grovecorev1alpha1.PodCliqueScalingGroup) error {
+	// Get the PodGangSet replica index for this PCSG
 	pgsReplicaIndex, err := k8sutils.GetPodGangSetReplicaIndex(pcsg.ObjectMeta)
 	if err != nil {
 		return err
 	}
+
+	// Find the matching PCSG configuration in the PodGangSet template
 	matchingPCSGConfig, ok := lo.Find(pgs.Spec.Template.PodCliqueScalingGroupConfigs, func(pcsgConfig grovecorev1alpha1.PodCliqueScalingGroupConfig) bool {
 		pcsgFQN := grovecorev1alpha1.GeneratePodCliqueScalingGroupName(grovecorev1alpha1.ResourceNameReplica{Name: pgs.Name, Replica: pgsReplicaIndex}, pcsgConfig.Name)
 		return pcsgFQN == pcsg.Name
@@ -191,20 +249,26 @@ func mutateSelector(pgs *grovecorev1alpha1.PodGangSet, pcsg *grovecorev1alpha1.P
 		// This should ideally never happen but if you find a PCSG that is not defined in PGS then just ignore it.
 		return nil
 	}
+
 	// No ScaleConfig has been defined of this PCSG, therefore there is no need to add a selector in the status.
 	if matchingPCSGConfig.ScaleConfig == nil {
 		return nil
 	}
+
+	// Build labels for the selector that HPA will use
 	labels := lo.Assign(
 		k8sutils.GetDefaultLabelsForPodGangSetManagedResources(pgs.Name),
 		map[string]string{
 			grovecorev1alpha1.LabelPodCliqueScalingGroup: pcsg.Name,
 		},
 	)
+
+	// Create the label selector and set it in the status
 	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: labels})
 	if err != nil {
 		return fmt.Errorf("%w: failed to create label selector for PodCliqueScalingGroup %v", err, client.ObjectKeyFromObject(pcsg))
 	}
+
 	pcsg.Status.Selector = ptr.To(selector.String())
 	return nil
 }
