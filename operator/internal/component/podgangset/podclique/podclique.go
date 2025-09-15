@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// Error codes for PodClique operations.
 const (
 	errListPodClique               grovecorev1alpha1.ErrorCode = "ERR_LIST_PODCLIQUE"
 	errSyncPodClique               grovecorev1alpha1.ErrorCode = "ERR_SYNC_PODCLIQUE"
@@ -50,6 +51,8 @@ const (
 	errCodeCreateOrUpdatePodClique grovecorev1alpha1.ErrorCode = "ERR_CREATE_OR_UPDATE_PODCLIQUE"
 )
 
+// _resource implements the component.Operator interface for managing PodClique resources
+// within a PodGangSet. It handles creation, synchronization, and deletion of PodCliques.
 type _resource struct {
 	client        client.Client
 	scheme        *runtime.Scheme
@@ -126,6 +129,7 @@ func (r _resource) createOrUpdatePCLQs(ctx context.Context, logger logr.Logger, 
 	expectedPCLQNames, _ := componentutils.GetExpectedPCLQNamesGroupByOwner(pgs)
 	tasks := make([]utils.Task, 0, len(expectedPCLQNames))
 
+	// Create tasks for each PodGangSet replica and expected PodClique
 	for pgsReplica := range pgs.Spec.Replicas {
 		for _, expectedPCLQName := range expectedPCLQNames {
 			pclqObjectKey := client.ObjectKey{
@@ -152,6 +156,7 @@ func (r _resource) createOrUpdatePCLQs(ctx context.Context, logger logr.Logger, 
 	return nil
 }
 
+// triggerDeletionOfPodCliques executes deletion tasks concurrently.
 func (r _resource) triggerDeletionOfPodCliques(ctx context.Context, logger logr.Logger, pgsObjKey client.ObjectKey, deletionTasks []utils.Task) error {
 	if len(deletionTasks) == 0 {
 		return nil
@@ -167,6 +172,7 @@ func (r _resource) triggerDeletionOfPodCliques(ctx context.Context, logger logr.
 	return nil
 }
 
+// createDeleteTasks creates deletion tasks for the specified PodClique names.
 func (r _resource) createDeleteTasks(logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, targetPCLQNames []string) []utils.Task {
 	deletionTasks := make([]utils.Task, 0, len(targetPCLQNames))
 	for _, pclqName := range targetPCLQNames {
@@ -193,6 +199,8 @@ func (r _resource) createDeleteTasks(logger logr.Logger, pgs *grovecorev1alpha1.
 	return deletionTasks
 }
 
+// getPodCliqueNamesToDelete identifies PodCliques that should be deleted based on replica index.
+// PodCliques with replica indices >= pgsReplicas are marked for deletion.
 func getPodCliqueNamesToDelete(pgsName string, pgsReplicas int, existingPCLQNames []string) ([]string, error) {
 	pclqsToDelete := make([]string, 0, len(existingPCLQNames))
 	for _, pclqName := range existingPCLQNames {
@@ -204,6 +212,7 @@ func getPodCliqueNamesToDelete(pgsName string, pgsReplicas int, existingPCLQName
 				fmt.Sprintf("Failed to extract PodGangSet replica index from PodClique name: %s", pclqName),
 			)
 		}
+		// Mark PodCliques with replica index >= current replica count for deletion
 		if extractedPGSReplica >= pgsReplicas {
 			// If the extracted replica index is greater than or equal to the number of replicas in the PodGangSet,
 			// then this PodClique is an extra one that should be deleted.
@@ -276,6 +285,7 @@ func (r _resource) doCreateOrUpdate(ctx context.Context, logger logr.Logger, pgs
 func (r _resource) buildResource(logger logr.Logger, pclq *grovecorev1alpha1.PodClique, pgs *grovecorev1alpha1.PodGangSet, pgsReplica int, pclqExists bool) error {
 	var err error
 	pclqObjectKey, pgsObjectKey := client.ObjectKeyFromObject(pclq), client.ObjectKeyFromObject(pgs)
+	// Find the matching template spec for this PodClique
 	pclqTemplateSpec, foundAtIndex, ok := lo.FindIndexOf(pgs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec) bool {
 		return strings.HasSuffix(pclq.Name, pclqTemplateSpec.Name)
 	})
@@ -286,8 +296,7 @@ func (r _resource) buildResource(logger logr.Logger, pclq *grovecorev1alpha1.Pod
 			fmt.Sprintf("PodCliqueTemplateSpec for PodClique: %v not found in PodGangSet: %v", pclqObjectKey, pgsObjectKey),
 		)
 	}
-	// Set PodClique.ObjectMeta
-	// ------------------------------------
+	// Configure PodClique metadata and ownership
 	if err = controllerutil.SetControllerReference(pgs, pclq, r.scheme); err != nil {
 		return groveerr.WrapError(err,
 			errSyncPodClique,
@@ -315,8 +324,11 @@ func (r _resource) buildResource(logger logr.Logger, pclq *grovecorev1alpha1.Pod
 	return nil
 }
 
+// identifyFullyQualifiedStartupDependencyNames determines startup dependencies for a PodClique
+// based on the PodGangSet's startup type (InOrder or Explicit).
 func identifyFullyQualifiedStartupDependencyNames(pgs *grovecorev1alpha1.PodGangSet, pclq *grovecorev1alpha1.PodClique, pgsReplicaIndex, foundAtIndex int) ([]string, error) {
 	cliqueStartupType := pgs.Spec.Template.StartupType
+	// StartupType should never be nil due to defaulting webhook
 	if cliqueStartupType == nil {
 		// Ideally this should never happen as the defaulting webhook should set it v1alpha1.CliqueStartupTypeInOrder as the default value.
 		// If it is still nil, then by not returning an error we break the API contract. It is a bug that should be fixed.
@@ -332,6 +344,8 @@ func identifyFullyQualifiedStartupDependencyNames(pgs *grovecorev1alpha1.PodGang
 	}
 }
 
+// getInOrderStartupDependencies returns dependencies for in-order startup.
+// Each PodClique depends on the previous one in the template list.
 func getInOrderStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex, foundAtIndex int) []string {
 	if foundAtIndex == 0 {
 		return nil
@@ -340,6 +354,8 @@ func getInOrderStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplica
 	return componentutils.GenerateDependencyNamesForBasePodGang(pgs, pgsReplicaIndex, previousCliqueName)
 }
 
+// getExplicitStartupDependencies returns dependencies for explicit startup.
+// Dependencies are explicitly defined in the PodClique's StartsAfter field.
 func getExplicitStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int, pclq *grovecorev1alpha1.PodClique) []string {
 	dependencies := make([]string, 0, len(pclq.Spec.StartsAfter))
 	for _, dependency := range pclq.Spec.StartsAfter {
@@ -348,6 +364,7 @@ func getExplicitStartupDependencies(pgs *grovecorev1alpha1.PodGangSet, pgsReplic
 	return dependencies
 }
 
+// getPodCliqueSelectorLabels returns the label selector for PodCliques managed by a PodGangSet.
 func getPodCliqueSelectorLabels(pgsObjectMeta metav1.ObjectMeta) map[string]string {
 	return lo.Assign(
 		apicommon.GetDefaultLabelsForPodGangSetManagedResources(pgsObjectMeta.Name),
@@ -357,7 +374,10 @@ func getPodCliqueSelectorLabels(pgsObjectMeta metav1.ObjectMeta) map[string]stri
 	)
 }
 
+// getLabels constructs the complete set of labels for a PodClique resource.
+// It combines template labels, default PodGangSet labels, and component-specific labels.
 func getLabels(pgs *grovecorev1alpha1.PodGangSet, pgsReplica int, pclqObjectKey client.ObjectKey, pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, podGangName string) map[string]string {
+	// Component-specific labels for this PodClique
 	pclqComponentLabels := map[string]string{
 		apicommon.LabelAppNameKey:             pclqObjectKey.Name,
 		apicommon.LabelComponentKey:           apicommon.LabelComponentNamePodGangSetPodClique,
@@ -372,6 +392,7 @@ func getLabels(pgs *grovecorev1alpha1.PodGangSet, pgsReplica int, pclqObjectKey 
 	)
 }
 
+// emptyPodClique creates a minimal PodClique with only ObjectMeta set.
 func emptyPodClique(objKey client.ObjectKey) *grovecorev1alpha1.PodClique {
 	return &grovecorev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{

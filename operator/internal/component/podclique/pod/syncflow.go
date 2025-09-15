@@ -43,7 +43,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// prepareSyncFlow gathers information in preparation for the sync flow to run.
+// prepareSyncFlow gathers all necessary information and context required for the sync flow execution.
+// It collects the PodGangSet, PodGang, existing pods, and expectations to build a complete
+// syncContext for the synchronization process.
 func (r _resource) prepareSyncFlow(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) (*syncContext, error) {
 	var (
 		sc  = &syncContext{ctx: ctx, pclq: pclq}
@@ -104,7 +106,8 @@ func (r _resource) prepareSyncFlow(ctx context.Context, logger logr.Logger, pclq
 	return sc, nil
 }
 
-// getAssociatedPodGangName gets the associated PodGang name from PodClique labels. Returns an error if the label is not found.
+// getAssociatedPodGangName extracts the PodGang name from the PodClique's labels.
+// Returns an error if the required label is missing.
 func (r _resource) getAssociatedPodGangName(pclqObjectMeta metav1.ObjectMeta) (string, error) {
 	podGangName, ok := pclqObjectMeta.GetLabels()[common.LabelPodGang]
 	if !ok {
@@ -116,7 +119,8 @@ func (r _resource) getAssociatedPodGangName(pclqObjectMeta metav1.ObjectMeta) (s
 	return podGangName, nil
 }
 
-// getPodNamesUpdatedInAssociatedPodGang gathers all Pod names that are already updated in PodGroups defined in the PodGang resource.
+// getPodNamesUpdatedInAssociatedPodGang extracts pod names that are already registered
+// in the PodGroup for this PodClique within the associated PodGang resource.
 func (r _resource) getPodNamesUpdatedInAssociatedPodGang(existingPodGang *groveschedulerv1alpha1.PodGang, pclqFQN string) []string {
 	if existingPodGang == nil {
 		return nil
@@ -132,7 +136,9 @@ func (r _resource) getPodNamesUpdatedInAssociatedPodGang(existingPodGang *groves
 	})
 }
 
-// runSyncFlow runs the synchronization flow for this component.
+// runSyncFlow executes the main synchronization logic for the PodClique component.
+// It handles pod creation, deletion, and scheduling gate management based on the
+// difference between desired and actual pod counts.
 func (r _resource) runSyncFlow(logger logr.Logger, sc *syncContext) syncFlowResult {
 	result := syncFlowResult{}
 	diff := r.syncExpectationsAndComputeDifference(logger, sc)
@@ -165,9 +171,9 @@ func (r _resource) runSyncFlow(logger logr.Logger, sc *syncContext) syncFlowResu
 	return result
 }
 
-// syncExpectationsAndComputeDifference synchronizes expectations that are captured against the owning PodClique resource.
-// It takes in the existing pods and adjusts the captured create/delete expectations in the ExpectationStore. Post synchronization
-// it computes the difference of pods using => as-is-pods + pods-expecting-creation - desired-pods - pods-expecting-deletion
+// syncExpectationsAndComputeDifference synchronizes the expectations store with current pod state
+// and calculates the difference between desired and actual pod counts.
+// Formula: existing_pods + create_expectations - desired_replicas - delete_expectations
 func (r _resource) syncExpectationsAndComputeDifference(logger logr.Logger, sc *syncContext) int {
 	terminatingPodUIDs, nonTerminatingPodUIDs := getTerminatingAndNonTerminatingPodUIDs(sc.existingPCLQPods)
 	r.expectationsStore.SyncExpectations(sc.pclqExpectationsStoreKey, nonTerminatingPodUIDs, terminatingPodUIDs)
@@ -185,6 +191,8 @@ func (r _resource) syncExpectationsAndComputeDifference(logger logr.Logger, sc *
 	return diff
 }
 
+// getTerminatingAndNonTerminatingPodUIDs separates pod UIDs into terminating and non-terminating categories.
+// This is used to properly sync expectations with the current pod state.
 func getTerminatingAndNonTerminatingPodUIDs(existingPCLQPods []*corev1.Pod) (terminatingUIDs, nonTerminatingUIDs []types.UID) {
 	nonTerminatingUIDs = make([]types.UID, 0, len(existingPCLQPods))
 	terminatingUIDs = make([]types.UID, 0, len(existingPCLQPods))
@@ -198,12 +206,11 @@ func getTerminatingAndNonTerminatingPodUIDs(existingPCLQPods []*corev1.Pod) (ter
 	return
 }
 
-// deleteExcessPods deletes `diff` number of excess Pods from this PodClique concurrently.
-// It selects the pods using `DeletionSorter`. For details please see `DeletionSorter.Less` method.
-// The deletion of Pods are done in batches of increasing size. This is done to prevent burst of load
-// on the kube-apiserver. It will fail fast in case there is an
+// deleteExcessPods removes excess pods from the PodClique using concurrent deletion with slow start.
+// Pods are selected for deletion using DeletionSorter to prioritize which pods to remove first.
+// Uses batched deletion with increasing batch sizes to prevent API server overload.
 func (r _resource) deleteExcessPods(sc *syncContext, logger logr.Logger, diff int) error {
-	candidatePodsToDelete := selectExcessPodsToDelete(sc, logger)
+	candidatePodsToDelete := selectExcessPodsToDelete(sc, logger, diff)
 	numPodsToSelectForDeletion := min(diff, len(candidatePodsToDelete))
 	selectedPodsToDelete := candidatePodsToDelete[:numPodsToSelectForDeletion]
 
@@ -226,16 +233,23 @@ func (r _resource) deleteExcessPods(sc *syncContext, logger logr.Logger, diff in
 	return nil
 }
 
-func selectExcessPodsToDelete(sc *syncContext, logger logr.Logger) []*corev1.Pod {
+// selectExcessPodsToDelete identifies which pods should be deleted based on the DeletionSorter criteria.
+// Returns a slice of pods sorted by deletion priority, limited to the requested number.
+func selectExcessPodsToDelete(sc *syncContext, logger logr.Logger, diff int) []*corev1.Pod {
 	var candidatePodsToDelete []*corev1.Pod
-	if diff := len(sc.existingPCLQPods) - int(sc.pclq.Spec.Replicas); diff > 0 {
-		logger.Info("found excess pods for PodClique", "numExcessPods", diff)
+	if diff > 0 && len(sc.existingPCLQPods) > 0 {
+		logger.Info("selecting pods for deletion", "requestedDeletions", diff, "availablePods", len(sc.existingPCLQPods))
 		sort.Sort(DeletionSorter(sc.existingPCLQPods))
-		candidatePodsToDelete = append(candidatePodsToDelete, sc.existingPCLQPods[:diff]...)
+		// Select up to 'diff' pods, but not more than available
+		numToSelect := min(diff, len(sc.existingPCLQPods))
+		candidatePodsToDelete = append(candidatePodsToDelete, sc.existingPCLQPods[:numToSelect]...)
 	}
 	return candidatePodsToDelete
 }
 
+// checkAndRemovePodSchedulingGates processes scheduling gates for all pods in the PodClique.
+// It removes gates from pods that are ready to be scheduled based on PodGang readiness.
+// Returns a list of pod names that still have scheduling gates.
 func (r _resource) checkAndRemovePodSchedulingGates(sc *syncContext, logger logr.Logger) ([]string, error) {
 	tasks := make([]utils.Task, 0, len(sc.existingPCLQPods))
 	skippedScheduleGatedPods := make([]string, 0, len(sc.existingPCLQPods))
@@ -345,8 +359,8 @@ func (r _resource) isBasePodGangReady(ctx context.Context, logger logr.Logger, n
 	return true, nil
 }
 
-// checkBasePodGangReadinessForPodClique determines if there's a base PodGang that needs to be checked
-// for readiness, and if so, performs that check once for the entire PodClique.
+// checkBasePodGangReadinessForPodClique determines if this PodClique has a base PodGang dependency
+// and checks its readiness status. Returns readiness state, base PodGang name, and any error.
 func (r _resource) checkBasePodGangReadinessForPodClique(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) (bool, string, error) {
 	// Check if this PodClique has a base PodGang dependency
 	basePodGangName, hasBasePodGangLabel := pclq.GetLabels()[common.LabelBasePodGang]
@@ -363,8 +377,9 @@ func (r _resource) checkBasePodGangReadinessForPodClique(ctx context.Context, lo
 	return ready, basePodGangName, nil
 }
 
-// shouldSkipPodSchedulingGateRemoval implements the core PodGang scheduling gate logic.
-// It returns true if the pod scheduling gate removal should be skipped, false otherwise.
+// shouldSkipPodSchedulingGateRemoval determines whether a pod's scheduling gate should remain in place.
+// Base PodGang pods get their gates removed immediately, while scaled PodGang pods must wait
+// for their base PodGang to be ready first.
 func (r _resource) shouldSkipPodSchedulingGateRemoval(logger logr.Logger, pod *corev1.Pod, basePodGangReady bool, basePodGangName string) bool {
 	if basePodGangName == "" {
 		// BASE PODGANG POD: This PodClique has no base PodGang dependency
@@ -387,12 +402,15 @@ func (r _resource) shouldSkipPodSchedulingGateRemoval(logger logr.Logger, pod *c
 	return true
 }
 
+// hasPodGangSchedulingGate checks if the pod has the PodGang scheduling gate.
 func hasPodGangSchedulingGate(pod *corev1.Pod) bool {
 	return slices.ContainsFunc(pod.Spec.SchedulingGates, func(schedulingGate corev1.PodSchedulingGate) bool {
 		return podGangSchedulingGate == schedulingGate.Name
 	})
 }
 
+// createPods creates the specified number of pods for the PodClique concurrently.
+// It pre-calculates available indices to ensure proper pod naming and avoid conflicts.
 func (r _resource) createPods(ctx context.Context, logger logr.Logger, sc *syncContext, numPods int) (int, error) {
 	// Pre-calculate all needed indices to avoid race conditions
 	availableIndices, err := index.GetAvailableIndices(logger, sc.existingPCLQPods, numPods)
@@ -403,10 +421,10 @@ func (r _resource) createPods(ctx context.Context, logger logr.Logger, sc *syncC
 			fmt.Sprintf("error getting available indices for Pods in PodClique %v", client.ObjectKeyFromObject(sc.pclq)),
 		)
 	}
+	// Create tasks for concurrent pod creation
 	createTasks := make([]utils.Task, 0, numPods)
 	for i := range numPods {
-		// Get the available Pod host name index. This ensures that we fill the holes in the indices if there are any when creating
-		// new pods.
+		// Use available index to fill gaps in pod naming sequence
 		podHostNameIndex := availableIndices[i]
 		createTasks = append(createTasks, r.createPodCreationTask(logger, sc.pgs, sc.pclq, sc.associatedPodGangName, sc.pclqExpectationsStoreKey, i, podHostNameIndex))
 	}
@@ -422,47 +440,62 @@ func (r _resource) createPods(ctx context.Context, logger logr.Logger, sc *syncC
 // Convenience functions, types and methods on these types that are used during sync flow run.
 // ------------------------------------------------------------------------------------------------
 
-// syncContext holds the relevant state required during the sync flow run.
+// syncContext holds all the state and resources required during a sync flow execution.
+// It encapsulates the PodClique, its associated resources, and current pod state.
 type syncContext struct {
-	ctx                           context.Context
-	pgs                           *grovecorev1alpha1.PodGangSet
-	pclq                          *grovecorev1alpha1.PodClique
-	associatedPodGangName         string
-	existingPCLQPods              []*corev1.Pod
+	// ctx is the context for the sync operation
+	ctx context.Context
+	// pgs is the owning PodGangSet for this PodClique
+	pgs *grovecorev1alpha1.PodGangSet
+	// pclq is the PodClique being synchronized
+	pclq *grovecorev1alpha1.PodClique
+	// associatedPodGangName is the name of the PodGang associated with this PodClique
+	associatedPodGangName string
+	// existingPCLQPods are all current pods belonging to this PodClique
+	existingPCLQPods []*corev1.Pod
+	// podNamesUpdatedInPCLQPodGangs are pod names already registered in the PodGang
 	podNamesUpdatedInPCLQPodGangs []string
-	pclqExpectationsStoreKey      string
-	expectedPodTemplateHash       string
+	// pclqExpectationsStoreKey is the key for tracking create/delete expectations
+	pclqExpectationsStoreKey string
+	// expectedPodTemplateHash is the hash of the expected pod template for this PodClique
+	expectedPodTemplateHash string
 }
 
-// syncFlowResult captures the result of a sync flow run.
+// syncFlowResult captures the outcome and state of a sync flow execution.
 type syncFlowResult struct {
-	// scheduleGatedPods are the pods that were created but are still schedule gated.
+	// scheduleGatedPods are pods that still have scheduling gates and cannot be scheduled yet
 	scheduleGatedPods []string
-	// errs are the list of errors during the sync flow run.
+	// errs contains any errors that occurred during the sync flow execution
 	errs []error
 }
 
+// getAggregatedError combines all errors from the sync flow into a single error.
 func (sfr *syncFlowResult) getAggregatedError() error {
 	return errors.Join(sfr.errs...)
 }
 
+// hasPendingScheduleGatedPods returns true if there are pods still waiting with scheduling gates.
 func (sfr *syncFlowResult) hasPendingScheduleGatedPods() bool {
 	return len(sfr.scheduleGatedPods) > 0
 }
 
+// recordError adds an error to the sync flow result.
 func (sfr *syncFlowResult) recordError(err error) {
 	sfr.errs = append(sfr.errs, err)
 }
 
+// recordPendingScheduleGatedPods adds pod names to the list of pods with pending scheduling gates.
 func (sfr *syncFlowResult) recordPendingScheduleGatedPods(podNames []string) {
 	sfr.scheduleGatedPods = append(sfr.scheduleGatedPods, podNames...)
 }
 
+// hasErrors returns true if any errors occurred during the sync flow.
 func (sfr *syncFlowResult) hasErrors() bool {
 	return len(sfr.errs) > 0
 }
 
-// getPodCliqueExpectationsStoreKey creates the PodClique key against which expectations will be stored in the ExpectationStore.
+// getPodCliqueExpectationsStoreKey generates a unique key for storing expectations
+// related to this PodClique in the ExpectationStore.
 func getPodCliqueExpectationsStoreKey(logger logr.Logger, operation string, pclqObjMeta metav1.ObjectMeta) (string, error) {
 	pclqObjKey := k8sutils.GetObjectKeyFromObjectMeta(pclqObjMeta)
 	pclqExpStoreKey, err := expect.ControlleeKeyFunc(&grovecorev1alpha1.PodClique{ObjectMeta: pclqObjMeta})

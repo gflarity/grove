@@ -36,6 +36,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// reconcileSpec orchestrates the complete reconciliation of a PodClique's spec.
+// It executes a series of reconciliation steps in order and handles any failures
+// by recording incomplete reconciliation status.
 func (r *Reconciler) reconcileSpec(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	log := logger.WithValues("operation", "specReconcile")
 	reconcileStepFns := []ctrlcommon.ReconcileStepFn[grovecorev1alpha1.PodClique]{
@@ -47,6 +50,7 @@ func (r *Reconciler) reconcileSpec(ctx context.Context, logger logr.Logger, pclq
 		r.updateObservedGeneration,
 	}
 
+	// Execute each reconciliation step in sequence
 	for _, fn := range reconcileStepFns {
 		if stepResult := fn(ctx, log, pclq); ctrlcommon.ShortCircuitReconcileFlow(stepResult) {
 			return r.recordIncompleteReconcile(ctx, logger, pclq, &stepResult)
@@ -56,16 +60,22 @@ func (r *Reconciler) reconcileSpec(ctx context.Context, logger logr.Logger, pclq
 	return ctrlcommon.ContinueReconcile()
 }
 
+// ensureFinalizer adds the PodClique finalizer if it's not already present.
+// The finalizer ensures proper cleanup during deletion. Returns requeue when finalizer is added.
 func (r *Reconciler) ensureFinalizer(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	if !controllerutil.ContainsFinalizer(pclq, constants.FinalizerPodClique) {
 		logger.Info("Adding finalizer", "PodClique", client.ObjectKeyFromObject(pclq), "finalizerName", constants.FinalizerPodClique)
 		if err := ctrlutils.AddAndPatchFinalizer(ctx, r.client, pclq, constants.FinalizerPodClique); err != nil {
 			return ctrlcommon.ReconcileWithErrors("error adding finalizer", err)
 		}
+		// Requeue to work with the updated object that now has the finalizer
+		return ctrlcommon.ReconcileWithErrors("finalizer added, requeuing to continue reconciliation")
 	}
 	return ctrlcommon.ContinueReconcile()
 }
 
+// recordReconcileStart records the beginning of a reconciliation operation
+// in the PodClique's status for observability and debugging.
 func (r *Reconciler) recordReconcileStart(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	if err := r.reconcileStatusRecorder.RecordStart(ctx, pclq, grovecorev1alpha1.LastOperationTypeReconcile); err != nil {
 		logger.Error(err, "failed to record reconcile start operation")
@@ -170,10 +180,12 @@ func (r *Reconciler) initOrResetRollingUpdate(ctx context.Context, pgs *grovecor
 
 func (r *Reconciler) syncPCLQResources(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	for _, kind := range getOrderedKindsForSync() {
+		// Get the component operator for this resource kind
 		operator, err := r.operatorRegistry.GetOperator(kind)
 		if err != nil {
 			return ctrlcommon.ReconcileWithErrors(fmt.Sprintf("error getting operator for kind: %s", kind), err)
 		}
+
 		logger.Info("Syncing PodClique resources", "kind", kind)
 		if err = operator.Sync(ctx, logger, pclq); err != nil {
 			if shouldRequeue := ctrlutils.ShouldRequeueAfter(err); shouldRequeue {
@@ -187,6 +199,8 @@ func (r *Reconciler) syncPCLQResources(ctx context.Context, logger logr.Logger, 
 	return ctrlcommon.ContinueReconcile()
 }
 
+// recordReconcileSuccess records the successful completion of a reconciliation
+// operation in the PodClique's status.
 func (r *Reconciler) recordReconcileSuccess(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	if err := r.reconcileStatusRecorder.RecordCompletion(ctx, pclq, grovecorev1alpha1.LastOperationTypeReconcile, nil); err != nil {
 		logger.Error(err, "failed to record reconcile success operation")
@@ -195,7 +209,10 @@ func (r *Reconciler) recordReconcileSuccess(ctx context.Context, logger logr.Log
 	return ctrlcommon.ContinueReconcile()
 }
 
+// updateObservedGeneration updates the PodClique's status to reflect that
+// the current generation has been successfully reconciled.
 func (r *Reconciler) updateObservedGeneration(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
+	// Create a copy for the patch operation
 	original := pclq.DeepCopy()
 	pclq.Status.ObservedGeneration = &pclq.Generation
 	if err := r.client.Status().Patch(ctx, pclq, client.MergeFrom(original)); err != nil {
@@ -206,16 +223,20 @@ func (r *Reconciler) updateObservedGeneration(ctx context.Context, logger logr.L
 	return ctrlcommon.ContinueReconcile()
 }
 
+// recordIncompleteReconcile records a failed or incomplete reconciliation
+// operation in the PodClique's status and combines any additional errors.
 func (r *Reconciler) recordIncompleteReconcile(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique, errResult *ctrlcommon.ReconcileStepResult) ctrlcommon.ReconcileStepResult {
 	if err := r.reconcileStatusRecorder.RecordCompletion(ctx, pclq, grovecorev1alpha1.LastOperationTypeReconcile, errResult); err != nil {
 		logger.Error(err, "failed to record incomplete reconcile operation")
-		// combine all errors
+		// Combine all errors from the original failure and the recording failure
 		allErrs := append(errResult.GetErrors(), err)
 		return ctrlcommon.ReconcileWithErrors("error recording incomplete reconciliation", allErrs...)
 	}
 	return *errResult
 }
 
+// getOrderedKindsForSync returns the ordered list of component kinds that
+// need to be synchronized during PodClique reconciliation.
 func getOrderedKindsForSync() []component.Kind {
 	return []component.Kind{
 		component.KindPod,

@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// triggerDeletionFlow orchestrates the complete deletion process for a PodClique resource.
+// It executes deletion steps sequentially and short-circuits on any failure.
 func (r *Reconciler) triggerDeletionFlow(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	dLog := logger.WithValues("operation", "delete")
 	deleteStepFns := []ctrlcommon.ReconcileStepFn[grovecorev1alpha1.PodClique]{
@@ -38,6 +40,7 @@ func (r *Reconciler) triggerDeletionFlow(ctx context.Context, logger logr.Logger
 		r.verifyNoResourcesAwaitsCleanup,
 		r.removeFinalizer,
 	}
+	// Execute each deletion step, stopping on first failure
 	for _, fn := range deleteStepFns {
 		if stepResult := fn(ctx, dLog, pclq); ctrlcommon.ShortCircuitReconcileFlow(stepResult) {
 			return stepResult
@@ -47,8 +50,11 @@ func (r *Reconciler) triggerDeletionFlow(ctx context.Context, logger logr.Logger
 	return ctrlcommon.DoNotRequeue()
 }
 
+// deletePodCliqueResources deletes all managed resources associated with the PodClique.
+// It runs deletion tasks concurrently for all registered operators.
 func (r *Reconciler) deletePodCliqueResources(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	operators := r.operatorRegistry.GetAllOperators()
+	// Create deletion tasks for all registered operators
 	deleteTasks := make([]utils.Task, 0, len(operators))
 	for kind, operator := range operators {
 		deleteTasks = append(deleteTasks, utils.Task{
@@ -59,6 +65,7 @@ func (r *Reconciler) deletePodCliqueResources(ctx context.Context, logger logr.L
 		})
 	}
 	logger.Info("Triggering delete of PodClique resources")
+	// Execute all deletion tasks concurrently
 	if runResult := utils.RunConcurrently(ctx, logger, deleteTasks); runResult.HasErrors() {
 		deletionErr := runResult.GetAggregatedError()
 		logger.Error(deletionErr, "Error deleting managed resources", "summary", runResult.GetSummary())
@@ -67,10 +74,14 @@ func (r *Reconciler) deletePodCliqueResources(ctx context.Context, logger logr.L
 	return ctrlcommon.ContinueReconcile()
 }
 
+// verifyNoResourcesAwaitsCleanup ensures all managed resources have been successfully deleted.
+// It delegates to the controller utilities to perform the verification.
 func (r *Reconciler) verifyNoResourcesAwaitsCleanup(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	return ctrlutils.VerifyNoResourceAwaitsCleanup(ctx, logger, r.operatorRegistry, pclq.ObjectMeta)
 }
 
+// removeFinalizer removes the PodClique finalizer from the resource to allow garbage collection.
+// It checks for finalizer presence before attempting removal and handles errors appropriately.
 func (r *Reconciler) removeFinalizer(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	if !controllerutil.ContainsFinalizer(pclq, constants.FinalizerPodClique) {
 		logger.Info("Finalizer not found", "PodClique", pclq)

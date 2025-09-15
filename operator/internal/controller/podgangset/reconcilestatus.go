@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// reconcileStatus updates the status fields of a PodGangSet by calculating
+// available replicas and persisting the updated status to the Kubernetes API.
 func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	// Calculate available replicas using PCSG-inspired approach
 	err := r.mutateReplicas(ctx, logger, pgs)
@@ -45,6 +47,8 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pg
 	return ctrlcommon.ContinueReconcile()
 }
 
+// mutateReplicas updates the replica-related status fields in the PodGangSet.
+// It sets the total replicas to match the spec and calculates available replicas.
 func (r *Reconciler) mutateReplicas(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) error {
 	// Set basic replica count
 	pgs.Status.Replicas = pgs.Spec.Replicas
@@ -96,6 +100,7 @@ func (r *Reconciler) computeAvailableAndUpdatedReplicas(ctx context.Context, log
 	standalonePCLQsByReplica := componentutils.GroupPCLQsByPGSReplicaIndex(standalonePCLQs)
 	pcsgsByReplica := componentutils.GroupPCSGsByPGSReplicaIndex(pcsgs)
 
+	// Check availability for each replica
 	for replicaIndex := 0; replicaIndex < int(pgs.Spec.Replicas); replicaIndex++ {
 		replicaIndexStr := strconv.Itoa(replicaIndex)
 		replicaStandalonePCLQs := standalonePCLQsByReplica[replicaIndexStr]

@@ -14,6 +14,7 @@
 // limitations under the License.
 // */
 
+// Package utils provides utility functions for controller operations.
 package utils
 
 import (
@@ -23,7 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// AddAndPatchFinalizer uses merge-patch strategy to patch the given object with the given finalizer.
+// AddAndPatchFinalizer adds a finalizer to the object using merge-patch strategy
+// with optimistic locking to prevent conflicts during concurrent updates.
 func AddAndPatchFinalizer(ctx context.Context, writer client.Writer, obj client.Object, finalizer string) error {
 	return patchFinalizer(ctx,
 		writer,
@@ -34,7 +36,8 @@ func AddAndPatchFinalizer(ctx context.Context, writer client.Writer, obj client.
 	)
 }
 
-// RemoveAndPatchFinalizer uses merge-patch strategy to patch the given object thereby resulting in removal of the given finalizer.
+// RemoveAndPatchFinalizer removes a finalizer from the object using merge-patch strategy
+// with optimistic locking. Returns nil if the object is not found.
 func RemoveAndPatchFinalizer(ctx context.Context, writer client.Writer, obj client.Object, finalizer string) error {
 	return client.IgnoreNotFound(
 		patchFinalizer(ctx,
@@ -47,19 +50,28 @@ func RemoveAndPatchFinalizer(ctx context.Context, writer client.Writer, obj clie
 	)
 }
 
+// mergeFromWithOptimisticLock creates a merge patch with optimistic locking enabled
+// to prevent conflicts during concurrent updates.
 func mergeFromWithOptimisticLock(obj client.Object, opts ...client.MergeFromOption) client.Patch {
 	return client.MergeFromWithOptions(obj, append(opts, client.MergeFromWithOptimisticLock{})...)
 }
 
-// patchFn is a function that returns a client.Patch with the given client.Object as the base object.
-// The client.Patch returned is then used to patch the object.
+// patchFn creates a client.Patch using the given object as the base.
 type patchFn func(client.Object, ...client.MergeFromOption) client.Patch
 
-// mutateFn is a function that mutates the object with the given finalizer.
+// mutateFn modifies an object by adding or removing the specified finalizer.
+// Returns true if the object was modified.
 type mutateFn func(client.Object, string) bool
 
+// patchFinalizer applies a finalizer mutation to an object and patches it to the API server.
+// It creates a deep copy before mutation to generate the proper patch.
 func patchFinalizer(ctx context.Context, writer client.Writer, obj client.Object, patchFunc patchFn, mutateFunc mutateFn, finalizer string) error {
+	// Create a copy of the object before mutation for patch generation
 	beforePatch := obj.DeepCopyObject().(client.Object)
+
+	// Apply the finalizer mutation (add or remove)
 	mutateFunc(obj, finalizer)
+
+	// Patch the object with the changes
 	return writer.Patch(ctx, obj, patchFunc(beforePatch))
 }

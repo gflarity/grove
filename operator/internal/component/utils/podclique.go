@@ -14,6 +14,7 @@
 // limitations under the License.
 // */
 
+// Package utils provides utility functions for working with PodClique resources.
 package utils
 
 import (
@@ -37,10 +38,13 @@ import (
 
 // GetPCLQsByOwner retrieves PodClique objects that are owned by the specified owner kind and object key, and match the provided selector labels.
 func GetPCLQsByOwner(ctx context.Context, cl client.Client, ownerKind string, ownerObjectKey client.ObjectKey, selectorLabels map[string]string) ([]grovecorev1alpha1.PodClique, error) {
+	// Get all PodCliques matching the selector labels in the namespace
 	pclqs, err := GetPCLQsMatchingLabels(ctx, cl, ownerObjectKey.Namespace, selectorLabels)
 	if err != nil {
 		return pclqs, err
 	}
+
+	// Filter PodCliques by owner reference
 	filteredPCLQs := lo.Filter(pclqs, func(pclq grovecorev1alpha1.PodClique, _ int) bool {
 		if len(pclq.OwnerReferences) == 0 {
 			return false
@@ -62,6 +66,8 @@ func GetPCLQsByOwnerReplicaIndex(ctx context.Context, cl client.Client, ownerKin
 // GetPCLQsMatchingLabels gets all the PodClique's in a given namespace matching selectorLabels.
 func GetPCLQsMatchingLabels(ctx context.Context, cl client.Client, namespace string, selectorLabels map[string]string) ([]grovecorev1alpha1.PodClique, error) {
 	podCliqueList := &grovecorev1alpha1.PodCliqueList{}
+
+	// List PodCliques in namespace with matching labels
 	if err := cl.List(ctx,
 		podCliqueList,
 		client.InNamespace(namespace),
@@ -86,18 +92,24 @@ func GroupPCLQsByPGSReplicaIndex(pclqs []grovecorev1alpha1.PodClique) map[string
 	return groupPCLQsByLabel(pclqs, apicommon.LabelPodGangSetReplicaIndex)
 }
 
-// GetMinAvailableBreachedPCLQInfo filters PodCliques that have grovecorev1alpha1.ConditionTypeMinAvailableBreached set to true.
-// For each such PodClique it returns the name of the PodClique a duration to wait for before terminationDelay is breached.
+// GetMinAvailableBreachedPCLQInfo filters PodCliques that have ConditionTypeMinAvailableBreached set to true.
+// For each such PodClique, it returns the name and calculates the duration to wait before terminationDelay is breached.
+// Returns the candidate names and the shortest wait duration.
 func GetMinAvailableBreachedPCLQInfo(pclqs []grovecorev1alpha1.PodClique, terminationDelay time.Duration, since time.Time) ([]string, time.Duration) {
 	pclqCandidateNames := make([]string, 0, len(pclqs))
 	waitForDurations := make([]time.Duration, 0, len(pclqs))
+
+	// Check each PodClique for MinAvailableBreached condition
 	for _, pclq := range pclqs {
 		cond := meta.FindStatusCondition(pclq.Status.Conditions, constants.ConditionTypeMinAvailableBreached)
 		if cond == nil {
 			continue
 		}
+
+		// Process PodCliques with breached condition
 		if cond.Status == metav1.ConditionTrue {
 			pclqCandidateNames = append(pclqCandidateNames, pclq.Name)
+			// Calculate remaining wait time before termination delay expires
 			waitFor := terminationDelay - since.Sub(cond.LastTransitionTime.Time)
 			waitForDurations = append(waitForDurations, waitFor)
 		}
@@ -109,9 +121,12 @@ func GetMinAvailableBreachedPCLQInfo(pclqs []grovecorev1alpha1.PodClique, termin
 	return pclqCandidateNames, waitForDurations[0]
 }
 
-// GetPodCliquesWithParentPGS retrieves PodClique objects that are not part of any PodCliqueScalingGroup for the given PodGangSet.
+// GetPodCliquesWithParentPGS retrieves PodClique objects that are directly managed by the given PodGangSet
+// (not part of any PodCliqueScalingGroup).
 func GetPodCliquesWithParentPGS(ctx context.Context, cl client.Client, pgsObjKey client.ObjectKey) ([]grovecorev1alpha1.PodClique, error) {
 	pclqList := &grovecorev1alpha1.PodCliqueList{}
+
+	// List PodCliques with the constructed labels
 	err := cl.List(ctx,
 		pclqList,
 		client.InNamespace(pgsObjKey.Namespace),
@@ -128,8 +143,12 @@ func GetPodCliquesWithParentPGS(ctx context.Context, cl client.Client, pgsObjKey
 	return pclqList.Items, nil
 }
 
+// groupPCLQsByLabel groups PodCliques by the value of the specified label key.
+// PodCliques without the label are excluded from the result.
 func groupPCLQsByLabel(pclqs []grovecorev1alpha1.PodClique, labelKey string) map[string][]grovecorev1alpha1.PodClique {
 	grouped := make(map[string][]grovecorev1alpha1.PodClique)
+
+	// Group PodCliques by label value
 	for _, pclq := range pclqs {
 		labelValue, exists := pclq.Labels[labelKey]
 		if !exists {

@@ -18,6 +18,7 @@ package podclique
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -162,7 +163,16 @@ func TestDelete(t *testing.T) {
 			operator := New(cl, groveclientscheme.Scheme, record.NewFakeRecorder(10))
 			err := operator.Delete(context.Background(), logr.Discard(), pgsObjMeta)
 			if tc.expectedError != nil {
-				testutils.CheckGroveError(t, tc.expectedError, err)
+				assert.Error(t, err)
+				var groveErr *groveerr.GroveError
+				assert.True(t, errors.As(err, &groveErr))
+				assert.Equal(t, tc.expectedError.Code, groveErr.Code)
+				assert.Equal(t, tc.expectedError.Operation, groveErr.Operation)
+				// For delete operations with multiple resources, the cause may be an aggregated error
+				// so we just check that it contains the expected error message
+				if tc.expectedError.Cause != nil && groveErr.Cause != nil {
+					assert.Contains(t, groveErr.Cause.Error(), tc.expectedError.Cause.Error())
+				}
 			} else {
 				assert.NoError(t, err)
 				podCliquesPostDelete := getExistingPodCliques(t, cl, pgsObjMeta)

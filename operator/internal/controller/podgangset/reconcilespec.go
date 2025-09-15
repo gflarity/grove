@@ -14,6 +14,8 @@
 // limitations under the License.
 // */
 
+// Package podgangset provides PodGangSet reconciliation logic for managing
+// the desired state of PodGangSet resources and their associated components.
 package podgangset
 
 import (
@@ -36,8 +38,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// reconcileSpec performs the main reconciliation of PodGangSet desired state.
+// It executes a series of reconciliation steps in order and handles any errors
+// by recording incomplete reconciliation status.
 func (r *Reconciler) reconcileSpec(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	rLog := logger.WithValues("operation", "spec-reconcile")
+
+	// Define the ordered steps for reconciling PodGangSet spec
 	reconcileStepFns := []ctrlcommon.ReconcileStepFn[grovecorev1alpha1.PodGangSet]{
 		r.ensureFinalizer,
 		r.recordReconcileStart,
@@ -47,6 +54,7 @@ func (r *Reconciler) reconcileSpec(ctx context.Context, logger logr.Logger, pgs 
 		r.updateObservedGeneration,
 	}
 
+	// Execute each reconciliation step in sequence
 	for _, fn := range reconcileStepFns {
 		if stepResult := fn(ctx, rLog, pgs); ctrlcommon.ShortCircuitReconcileFlow(stepResult) {
 			return r.recordIncompleteReconcile(ctx, logger, pgs, &stepResult)
@@ -56,6 +64,8 @@ func (r *Reconciler) reconcileSpec(ctx context.Context, logger logr.Logger, pgs 
 	return ctrlcommon.ContinueReconcile()
 }
 
+// ensureFinalizer adds the PodGangSet finalizer if it's not already present.
+// The finalizer ensures proper cleanup when the PodGangSet is being deleted.
 func (r *Reconciler) ensureFinalizer(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	if !controllerutil.ContainsFinalizer(pgs, constants.FinalizerPodGangSet) {
 		logger.Info("Adding finalizer", "finalizerName", constants.FinalizerPodGangSet)
@@ -66,6 +76,8 @@ func (r *Reconciler) ensureFinalizer(ctx context.Context, logger logr.Logger, pg
 	return ctrlcommon.ContinueReconcile()
 }
 
+// recordReconcileStart records the start of a reconcile operation in the PodGangSet status.
+// This provides visibility into the current state of the reconciliation process.
 func (r *Reconciler) recordReconcileStart(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	if err := r.reconcileStatusRecorder.RecordStart(ctx, pgs, grovecorev1alpha1.LastOperationTypeReconcile); err != nil {
 		logger.Error(err, "failed to record reconcile start operation")
@@ -151,6 +163,8 @@ func (r *Reconciler) initRollingUpdateProgress(ctx context.Context, pgs *groveco
 
 func (r *Reconciler) syncPodGangSetResources(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	continueReconcileAndRequeueKinds := make([]component.Kind, 0)
+
+	// Sync each component kind in dependency order
 	for _, kind := range getOrderedKindsForSync() {
 		operator, err := r.operatorRegistry.GetOperator(kind)
 		if err != nil {
@@ -158,6 +172,7 @@ func (r *Reconciler) syncPodGangSetResources(ctx context.Context, logger logr.Lo
 		}
 		logger.Info("Syncing PodGangSet resource", "kind", kind)
 		if err = operator.Sync(ctx, logger, pgs); err != nil {
+			// Handle different error types with appropriate retry strategies
 			if ctrlutils.ShouldContinueReconcileAndRequeue(err) {
 				logger.Info("component has registered a request to requeue post completion of all component syncs", "kind", kind, "message", err.Error())
 				continueReconcileAndRequeueKinds = append(continueReconcileAndRequeueKinds, kind)
@@ -171,12 +186,16 @@ func (r *Reconciler) syncPodGangSetResources(ctx context.Context, logger logr.Lo
 			return ctrlcommon.ReconcileWithErrors("error syncing managed resources", fmt.Errorf("failed to sync %s: %w", kind, err))
 		}
 	}
+
+	// Schedule requeue if any components need continuation
 	if len(continueReconcileAndRequeueKinds) > 0 {
 		return ctrlcommon.ReconcileAfter(ctrlcommon.ComponentSyncRetryInterval, fmt.Sprintf("requeueing sync due to component(s) %v after %s", continueReconcileAndRequeueKinds, ctrlcommon.ComponentSyncRetryInterval))
 	}
 	return ctrlcommon.ContinueReconcile()
 }
 
+// recordReconcileSuccess records the successful completion of a reconcile operation
+// in the PodGangSet status, indicating that all resources have been synchronized.
 func (r *Reconciler) recordReconcileSuccess(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	if err := r.reconcileStatusRecorder.RecordCompletion(ctx, pgs, grovecorev1alpha1.LastOperationTypeReconcile, nil); err != nil {
 		logger.Error(err, "failed to record reconcile success operation")
@@ -185,6 +204,8 @@ func (r *Reconciler) recordReconcileSuccess(ctx context.Context, logger logr.Log
 	return ctrlcommon.ContinueReconcile()
 }
 
+// updateObservedGeneration updates the status.ObservedGeneration field to match
+// the current generation, indicating that the controller has processed this version.
 func (r *Reconciler) updateObservedGeneration(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet) ctrlcommon.ReconcileStepResult {
 	original := pgs.DeepCopy()
 	pgs.Status.ObservedGeneration = &pgs.Generation
@@ -196,23 +217,31 @@ func (r *Reconciler) updateObservedGeneration(ctx context.Context, logger logr.L
 	return ctrlcommon.ContinueReconcile()
 }
 
+// recordIncompleteReconcile records when a reconcile operation fails or is incomplete,
+// capturing the error details in the PodGangSet status for observability.
 func (r *Reconciler) recordIncompleteReconcile(ctx context.Context, logger logr.Logger, pgs *grovecorev1alpha1.PodGangSet, errResult *ctrlcommon.ReconcileStepResult) ctrlcommon.ReconcileStepResult {
 	if err := r.reconcileStatusRecorder.RecordCompletion(ctx, pgs, grovecorev1alpha1.LastOperationTypeReconcile, errResult); err != nil {
 		logger.Error(err, "failed to record incomplete reconcile operation")
-		// combine all errors
+		// Combine all errors to provide complete error context
 		allErrs := append(errResult.GetErrors(), err)
 		return ctrlcommon.ReconcileWithErrors("error recording incomplete reconciliation", allErrs...)
 	}
 	return *errResult
 }
 
+// getOrderedKindsForSync returns the component kinds in dependency order for synchronization.
+// The ordering ensures that prerequisite resources (RBAC, secrets, services) are created
+// before dependent resources (HPAs, PodCliques, PodGangs).
 func getOrderedKindsForSync() []component.Kind {
 	return []component.Kind{
+		// RBAC components must be created first
 		component.KindServiceAccount,
 		component.KindRole,
 		component.KindRoleBinding,
 		component.KindServiceAccountTokenSecret,
+		// Networking components
 		component.KindHeadlessService,
+		// Scaling and workload components
 		component.KindHorizontalPodAutoscaler,
 		component.KindPodGangSetReplica,
 		component.KindPodClique,

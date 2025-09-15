@@ -27,11 +27,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// FindScalingGroupConfigForClique searches through the scaling group configurations to find
-// the one that contains the specified clique name in its CliqueNames list.
-//
-// Returns the matching PodCliqueScalingGroupConfig and true if found, or an empty config and false if not found.
+// FindScalingGroupConfigForClique finds the scaling group configuration containing the specified clique name.
+// Returns nil if no matching configuration is found.
 func FindScalingGroupConfigForClique(scalingGroupConfigs []grovecorev1alpha1.PodCliqueScalingGroupConfig, cliqueName string) *grovecorev1alpha1.PodCliqueScalingGroupConfig {
+	// Search for configuration containing the clique name
 	pcsgConfig, ok := lo.Find(scalingGroupConfigs, func(pcsgConfig grovecorev1alpha1.PodCliqueScalingGroupConfig) bool {
 		return slices.Contains(pcsgConfig.CliqueNames, cliqueName)
 	})
@@ -50,8 +49,10 @@ func GetPCSGsForPGS(ctx context.Context, cl client.Client, pgsObjKey client.Obje
 	return pcsgList.Items, nil
 }
 
+// doGetPCSGsForPGS is a helper function that lists PodCliqueScalingGroups with optional label filtering.
 func doGetPCSGsForPGS(ctx context.Context, cl client.Client, pgsObjKey client.ObjectKey, matchingLabels map[string]string) (*grovecorev1alpha1.PodCliqueScalingGroupList, error) {
 	pcsgList := &grovecorev1alpha1.PodCliqueScalingGroupList{}
+	// Combine default PGS labels with additional matching labels
 	if err := cl.List(ctx,
 		pcsgList,
 		client.InNamespace(pgsObjKey.Namespace),
@@ -65,9 +66,12 @@ func doGetPCSGsForPGS(ctx context.Context, cl client.Client, pgsObjKey client.Ob
 	return pcsgList, nil
 }
 
-// GenerateDependencyNamesForBasePodGang generates the FQNs of all PodCliques that would qualify as a dependency.
+// GenerateDependencyNamesForBasePodGang generates fully qualified names of PodCliques that serve as dependencies.
+// For scaling groups, it generates names for all MinAvailable replicas. For standalone cliques, it generates a single name.
 func GenerateDependencyNamesForBasePodGang(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int, parentCliqueName string) []string {
 	parentPCLQNames := make([]string, 0)
+
+	// Check if clique belongs to a scaling group
 	pcsgConfig := FindScalingGroupConfigForClique(pgs.Spec.Template.PodCliqueScalingGroupConfigs, parentCliqueName)
 	if pcsgConfig != nil {
 		// Generate FQNs of minAvailable number of PodCliques that belong to a PodCliueScalingGroup.
@@ -81,13 +85,18 @@ func GenerateDependencyNamesForBasePodGang(pgs *grovecorev1alpha1.PodGangSet, pg
 	return parentPCLQNames
 }
 
-// GroupPCSGsByPGSReplicaIndex filters PCSGs that have a PodGangSetReplicaIndex label and groups them by the PGS replica.
+// GroupPCSGsByPGSReplicaIndex groups PodCliqueScalingGroups by their PodGangSet replica index label.
+// Returns a map where keys are replica index strings and values are slices of PCSGs for that replica.
 func GroupPCSGsByPGSReplicaIndex(pcsgs []grovecorev1alpha1.PodCliqueScalingGroup) map[string][]grovecorev1alpha1.PodCliqueScalingGroup {
 	return groupPCSGsByLabel(pcsgs, apicommon.LabelPodGangSetReplicaIndex)
 }
 
+// groupPCSGsByLabel is a helper function that groups PodCliqueScalingGroups by a specified label.
+// PCSGs without the specified label are excluded from the result.
 func groupPCSGsByLabel(pcsgs []grovecorev1alpha1.PodCliqueScalingGroup, label string) map[string][]grovecorev1alpha1.PodCliqueScalingGroup {
 	result := make(map[string][]grovecorev1alpha1.PodCliqueScalingGroup)
+
+	// Group PCSGs by label value
 	for _, pcsg := range pcsgs {
 		labelValue, exists := pcsg.Labels[label]
 		if !exists {

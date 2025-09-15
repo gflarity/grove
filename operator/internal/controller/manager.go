@@ -39,34 +39,44 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
+// pprofBindAddress is the default bind address for pprof profiling endpoints.
 const (
 	pprofBindAddress = "127.0.0.1:2753"
 )
 
-// CreateManager creates the manager.
+// CreateManager creates and configures a new controller-runtime manager with the provided operator configuration.
 func CreateManager(operatorCfg *configv1alpha1.OperatorConfiguration) (ctrl.Manager, error) {
 	return ctrl.NewManager(getRestConfig(operatorCfg), createManagerOptions(operatorCfg))
 }
 
-// RegisterControllersAndWebhooks adds all the controllers and webhooks to the controller-manager using the passed in Config.
+// RegisterControllersAndWebhooks registers all controllers and webhooks with the manager.
+// It waits for webhook certificates to be ready before proceeding with registration.
 func RegisterControllersAndWebhooks(mgr ctrl.Manager, logger logr.Logger, operatorCfg *configv1alpha1.OperatorConfiguration, certsReady chan struct{}) error {
-	// Controllers will not work unless the webhoooks are fully configured and operational.
-	// For webhooks to work cert-controller should finish its work of generating and injecting certificates.
+	// Wait for webhook certificates to be ready before registering controllers.
+	// Controllers depend on fully operational webhooks with valid certificates.
 	cert.WaitTillWebhookCertsReady(logger, certsReady)
+
+	// Register all controllers with their configurations.
 	if err := RegisterControllers(mgr, operatorCfg.Controllers); err != nil {
 		return err
 	}
+
+	// Register all webhooks with the manager.
 	if err := webhook.RegisterWebhooks(mgr); err != nil {
 		return err
 	}
 	return nil
 }
 
-// SetupHealthAndReadinessEndpoints sets up the health and readiness endpoints for the operator.
+// SetupHealthAndReadinessEndpoints configures health and readiness probes for the operator.
+// The readiness probe waits for webhook certificates to be ready before reporting ready.
 func SetupHealthAndReadinessEndpoints(mgr ctrl.Manager, webhookCertsReadyCh chan struct{}) error {
+	// Add basic health check endpoint that responds with 200 OK.
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("could not setup health check :%w", err)
 	}
+
+	// Add readiness check that waits for webhook certificates and server startup.
 	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
 		select {
 		case <-webhookCertsReadyCh:
@@ -80,7 +90,9 @@ func SetupHealthAndReadinessEndpoints(mgr ctrl.Manager, webhookCertsReadyCh chan
 	return nil
 }
 
+// createManagerOptions builds controller-runtime manager options from the operator configuration.
 func createManagerOptions(operatorCfg *configv1alpha1.OperatorConfiguration) ctrl.Options {
+	// Configure base manager options with scheme and graceful shutdown.
 	opts := ctrl.Options{
 		Scheme:                  groveclientscheme.Scheme,
 		GracefulShutdownTimeout: ptr.To(5 * time.Second),
@@ -90,6 +102,7 @@ func createManagerOptions(operatorCfg *configv1alpha1.OperatorConfiguration) ctr
 		HealthProbeBindAddress:        net.JoinHostPort(operatorCfg.Server.HealthProbes.BindAddress, strconv.Itoa(operatorCfg.Server.HealthProbes.Port)),
 		LeaderElection:                operatorCfg.LeaderElection.Enabled,
 		LeaderElectionID:              operatorCfg.LeaderElection.ResourceName,
+		LeaderElectionNamespace:       operatorCfg.LeaderElection.ResourceNamespace,
 		LeaderElectionResourceLock:    operatorCfg.LeaderElection.ResourceLock,
 		LeaderElectionReleaseOnCancel: true,
 		LeaseDuration:                 &operatorCfg.LeaderElection.LeaseDuration.Duration,
@@ -104,6 +117,8 @@ func createManagerOptions(operatorCfg *configv1alpha1.OperatorConfiguration) ctr
 			CertDir: operatorCfg.Server.Webhooks.ServerCertDir,
 		}),
 	}
+
+	// Enable pprof profiling if configured in debugging options.
 	if operatorCfg.Debugging != nil {
 		if operatorCfg.Debugging.EnableProfiling != nil &&
 			*operatorCfg.Debugging.EnableProfiling {
@@ -113,8 +128,12 @@ func createManagerOptions(operatorCfg *configv1alpha1.OperatorConfiguration) ctr
 	return opts
 }
 
+// getRestConfig creates a Kubernetes REST client configuration with operator-specific settings.
 func getRestConfig(operatorCfg *configv1alpha1.OperatorConfiguration) *rest.Config {
+	// Get the default REST configuration from the environment.
 	restCfg := ctrl.GetConfigOrDie()
+
+	// Apply operator-specific client connection settings if provided.
 	if operatorCfg != nil {
 		restCfg.Burst = operatorCfg.ClientConnection.Burst
 		restCfg.QPS = operatorCfg.ClientConnection.QPS

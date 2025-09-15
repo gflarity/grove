@@ -45,7 +45,10 @@ func GetPodCliqueFQNsForPGSNotInPCSG(pgs *grovecorev1alpha1.PodGangSet) []string
 
 // GetPodCliqueFQNsForPGSReplicaNotInPCSG computes the FQNs for all PodCliques for a PGS replica which are not part of any PCSG.
 func GetPodCliqueFQNsForPGSReplicaNotInPCSG(pgs *grovecorev1alpha1.PodGangSet, pgsReplicaIndex int) []string {
+	// Pre-allocate slice with maximum possible capacity
 	pclqNames := make([]string, 0, len(pgs.Spec.Template.Cliques))
+
+	// Filter PodCliques that are not managed by any PodCliqueScalingGroup
 	for _, pclqTemplateSpec := range pgs.Spec.Template.Cliques {
 		if isStandalonePCLQ(pgs, pclqTemplateSpec.Name) {
 			pclqNames = append(pclqNames, common.GeneratePodCliqueName(common.ResourceNameReplica{Name: pgs.Name, Replica: pgsReplicaIndex}, pclqTemplateSpec.Name))
@@ -64,12 +67,16 @@ func isStandalonePCLQ(pgs *grovecorev1alpha1.PodGangSet, pclqName string) bool {
 // GetPodGangSet gets the owner PodGangSet object.
 func GetPodGangSet(ctx context.Context, cl client.Client, objectMeta metav1.ObjectMeta) (*grovecorev1alpha1.PodGangSet, error) {
 	pgsName := GetPodGangSetName(objectMeta)
+
+	// Create PodGangSet object with name and namespace
 	pgs := &grovecorev1alpha1.PodGangSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pgsName,
 			Namespace: objectMeta.Namespace,
 		},
 	}
+
+	// Fetch the actual PodGangSet from the cluster
 	err := cl.Get(ctx, client.ObjectKeyFromObject(pgs), pgs)
 	return pgs, err
 }
@@ -84,13 +91,18 @@ func GetPodGangSetName(objectMeta metav1.ObjectMeta) string {
 
 // GetExpectedPCLQNamesGroupByOwner returns the expected unqualified PodClique names which are either owned by PodGangSet or PodCliqueScalingGroup.
 func GetExpectedPCLQNamesGroupByOwner(pgs *grovecorev1alpha1.PodGangSet) (expectedPCLQNamesForPGS []string, expectedPCLQNamesForPCSG []string) {
+	// Collect all PodClique names managed by PodCliqueScalingGroups
 	pcsgConfigs := pgs.Spec.Template.PodCliqueScalingGroupConfigs
 	for _, pcsgConfig := range pcsgConfigs {
 		expectedPCLQNamesForPCSG = append(expectedPCLQNamesForPCSG, pcsgConfig.CliqueNames...)
 	}
+
+	// Extract all PodClique names from the PodGangSet template
 	pgsCliqueNames := lo.Map(pgs.Spec.Template.Cliques, func(pclqTemplateSpec *grovecorev1alpha1.PodCliqueTemplateSpec, _ int) string {
 		return pclqTemplateSpec.Name
 	})
+
+	// Calculate PodCliques owned directly by PGS (not managed by any PCSG)
 	expectedPCLQNamesForPGS, _ = lo.Difference(pgsCliqueNames, expectedPCLQNamesForPCSG)
 	return
 }
@@ -99,6 +111,8 @@ func GetExpectedPCLQNamesGroupByOwner(pgs *grovecorev1alpha1.PodGangSet) (expect
 func GetExpectedPCSGFQNsPerPGSReplica(pgs *grovecorev1alpha1.PodGangSet) map[int][]string {
 	pcsgFQNsByPGSReplica := make(map[int][]string)
 	for pgsReplicaIndex := range int(pgs.Spec.Replicas) {
+		// Initialize entry for this replica (even if no scaling groups exist)
+		pcsgFQNsByPGSReplica[pgsReplicaIndex] = []string{}
 		for _, pcsgConfig := range pgs.Spec.Template.PodCliqueScalingGroupConfigs {
 			pcsgName := common.GeneratePodCliqueScalingGroupName(common.ResourceNameReplica{Name: pgs.Name, Replica: pgsReplicaIndex}, pcsgConfig.Name)
 			pcsgFQNsByPGSReplica[pgsReplicaIndex] = append(pcsgFQNsByPGSReplica[pgsReplicaIndex], pcsgName)

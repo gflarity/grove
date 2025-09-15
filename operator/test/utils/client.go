@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"strings"
 
 	groveclientscheme "github.com/NVIDIA/grove/operator/internal/client"
 
@@ -56,18 +57,19 @@ const (
 
 // TestClientBuilder is a builder for creating a test client.Client which is capable of recording and replaying errors.
 type TestClientBuilder struct {
-	delegatingClientBuilder *fake.ClientBuilder
-	delegatingClient        client.Client
-	scheme                  *runtime.Scheme
-	errorRecords            []errorRecord
+	delegatingClientBuilder *fake.ClientBuilder // underlying fake client builder
+	delegatingClient        client.Client       // optional pre-configured client
+	scheme                  *runtime.Scheme     // runtime scheme for type registration
+	errorRecords            []errorRecord       // recorded error conditions
 }
 
+// errorRecord holds the configuration for a specific error condition to be replayed.
 type errorRecord struct {
-	method      ClientMethod
-	objectKey   client.ObjectKey
-	labels      labels.Set
-	resourceGVK schema.GroupVersionKind
-	err         error
+	method      ClientMethod            // client method to trigger error
+	objectKey   client.ObjectKey        // target resource identifier
+	labels      labels.Set              // label selector for collection operations
+	resourceGVK schema.GroupVersionKind // resource type information
+	err         error                   // error to be returned
 }
 
 // CreateDefaultFakeClient creates a default client.Client without any configured reactions to errors.
@@ -81,7 +83,7 @@ func CreateDefaultFakeClient(existingObjects []client.Object) client.Client {
 
 // CreateFakeClientForObjects creates a fake client.Client with initial set of existing objects
 // along with any expected errors for the Get, Create, Patch, and Delete client methods.
-func CreateFakeClientForObjects(getErr, createErr, patchErr, deleteErr *apierrors.StatusError, existingObjects []client.Object) {
+func CreateFakeClientForObjects(getErr, createErr, patchErr, deleteErr *apierrors.StatusError, existingObjects []client.Object) client.Client {
 	clientBuilder := NewTestClientBuilder()
 	if len(existingObjects) > 0 {
 		clientBuilder.WithObjects(existingObjects...)
@@ -94,6 +96,7 @@ func CreateFakeClientForObjects(getErr, createErr, patchErr, deleteErr *apierror
 		clientBuilder.RecordErrorForObjects(ClientMethodPatch, patchErr, objKey)
 		clientBuilder.RecordErrorForObjects(ClientMethodDelete, deleteErr, objKey)
 	}
+	return clientBuilder.Build()
 }
 
 // CreateFakeClientForObjectsMatchingLabels creates a fake client.Client with initial set of existing objects
@@ -114,7 +117,7 @@ func CreateFakeClientForObjectsMatchingLabels(deleteErr, listErr *apierrors.Stat
 
 // ------------------- Functions to explicitly create and configure a test client builder -------------------
 
-// NewTestClientBuilder creates a new TestClientBuilder with a default scheme.
+// NewTestClientBuilder creates a new TestClientBuilder initialized with the Grove scheme.
 func NewTestClientBuilder() *TestClientBuilder {
 	return &TestClientBuilder{
 		delegatingClientBuilder: fake.NewClientBuilder(),
@@ -122,13 +125,13 @@ func NewTestClientBuilder() *TestClientBuilder {
 	}
 }
 
-// WithClient sets the delegating client for the TestClientBuilder.
+// WithClient configures the builder to use a pre-configured client for delegation.
 func (b *TestClientBuilder) WithClient(cl client.Client) *TestClientBuilder {
 	b.delegatingClient = cl
 	return b
 }
 
-// WithObjects initializes the delegating fake client builder with objects.
+// WithObjects adds the provided objects to the fake client's initial state.
 func (b *TestClientBuilder) WithObjects(objects ...client.Object) *TestClientBuilder {
 	if len(objects) > 0 {
 		b.delegatingClientBuilder.WithObjects(objects...)
@@ -136,9 +139,9 @@ func (b *TestClientBuilder) WithObjects(objects ...client.Object) *TestClientBui
 	return b
 }
 
-// RecordErrorForObjects records an error for a specific client.Client method and object keys.
+// RecordErrorForObjects configures errors to be returned for specific operations on given objects.
+// If err is nil, no error record is created.
 func (b *TestClientBuilder) RecordErrorForObjects(method ClientMethod, err *apierrors.StatusError, objectKeys ...client.ObjectKey) *TestClientBuilder {
-	// this method records error, so if nil error is passed then there is no need to create any error record.
 	if err == nil {
 		return b
 	}
@@ -152,7 +155,8 @@ func (b *TestClientBuilder) RecordErrorForObjects(method ClientMethod, err *apie
 	return b
 }
 
-// RecordErrorForObjectsMatchingLabels records an error for a specific client.Client method and object keys matching the given labels for a given GVK.
+// RecordErrorForObjectsMatchingLabels configures errors for operations on objects matching specific labels.
+// Used primarily for List and DeleteAll operations that target multiple resources.
 func (b *TestClientBuilder) RecordErrorForObjectsMatchingLabels(method ClientMethod, objectKey client.ObjectKey, targetObjectsGVK schema.GroupVersionKind, matchingLabels map[string]string, err *apierrors.StatusError) *TestClientBuilder {
 	if err == nil {
 		return b
@@ -167,7 +171,7 @@ func (b *TestClientBuilder) RecordErrorForObjectsMatchingLabels(method ClientMet
 	return b
 }
 
-// Build creates a test client.Client with the configured reactions to errors.
+// Build creates and returns a new test client with the configured error behaviors.
 func (b *TestClientBuilder) Build() client.Client {
 	return &testClient{
 		delegate:     b.getClient(),
@@ -175,6 +179,7 @@ func (b *TestClientBuilder) Build() client.Client {
 	}
 }
 
+// getClient returns either the pre-configured client or builds a new one with the scheme.
 func (b *TestClientBuilder) getClient() client.Client {
 	if b.delegatingClient != nil {
 		return b.delegatingClient
@@ -184,12 +189,13 @@ func (b *TestClientBuilder) getClient() client.Client {
 
 // ---------------------------------- Implementation of client.Client ----------------------------------
 
-// testClient is a client.Client implementation which reacts to the configured errors.
+// testClient implements client.Client with support for replaying pre-configured errors.
 type testClient struct {
-	delegate     client.Client
-	errorRecords []errorRecord
+	delegate     client.Client // underlying client implementation
+	errorRecords []errorRecord // configured error conditions
 }
 
+// Get retrieves a single resource, returning any pre-configured error or delegating to the underlying client.
 func (c *testClient) Get(ctx context.Context, objKey client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	if err := c.getRecordedObjectError(ClientMethodGet, objKey); err != nil {
 		return err
@@ -197,6 +203,7 @@ func (c *testClient) Get(ctx context.Context, objKey client.ObjectKey, obj clien
 	return c.delegate.Get(ctx, objKey, obj, opts...)
 }
 
+// List retrieves multiple resources, applying any pre-configured errors based on namespace and labels.
 func (c *testClient) List(ctx context.Context, objList client.ObjectList, opts ...client.ListOption) error {
 	listOpts := client.ListOptions{}
 	listOpts.ApplyOptions(opts)
@@ -204,12 +211,23 @@ func (c *testClient) List(ctx context.Context, objList client.ObjectList, opts .
 	if err != nil {
 		return err
 	}
-	if err = c.getRecordedObjectCollectionError(ClientMethodList, listOpts.Namespace, listOpts.LabelSelector, gvk); err != nil {
+	// Convert list GVK to item GVK (remove "List" suffix from Kind)
+	// Special case: PartialObjectMetadataList already has the item GVK set
+	itemGVK := gvk
+	if strings.HasSuffix(gvk.Kind, "List") {
+		itemGVK = schema.GroupVersionKind{
+			Group:   gvk.Group,
+			Version: gvk.Version,
+			Kind:    gvk.Kind[:len(gvk.Kind)-4], // Remove "List" suffix
+		}
+	}
+	if err = c.getRecordedObjectCollectionError(ClientMethodList, listOpts.Namespace, listOpts.LabelSelector, itemGVK); err != nil {
 		return err
 	}
 	return c.delegate.List(ctx, objList, opts...)
 }
 
+// Create attempts to create a resource, returning any pre-configured error or delegating the operation.
 func (c *testClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
 	if err := c.getRecordedObjectError(ClientMethodCreate, client.ObjectKeyFromObject(obj)); err != nil {
 		return err
@@ -217,6 +235,7 @@ func (c *testClient) Create(ctx context.Context, obj client.Object, opts ...clie
 	return c.delegate.Create(ctx, obj, opts...)
 }
 
+// Delete attempts to delete a resource, returning any pre-configured error or delegating the operation.
 func (c *testClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
 	if err := c.getRecordedObjectError(ClientMethodDelete, client.ObjectKeyFromObject(obj)); err != nil {
 		return err
@@ -224,6 +243,7 @@ func (c *testClient) Delete(ctx context.Context, obj client.Object, opts ...clie
 	return c.delegate.Delete(ctx, obj, opts...)
 }
 
+// DeleteAllOf deletes all matching resources, applying any pre-configured errors based on namespace and labels.
 func (c *testClient) DeleteAllOf(ctx context.Context, obj client.Object, opts ...client.DeleteAllOfOption) error {
 	deleteOpts := client.DeleteAllOfOptions{}
 	deleteOpts.ApplyOptions(opts)
@@ -237,6 +257,7 @@ func (c *testClient) DeleteAllOf(ctx context.Context, obj client.Object, opts ..
 	return c.delegate.DeleteAllOf(ctx, obj, opts...)
 }
 
+// Patch applies a patch to a resource, returning any pre-configured error or delegating the operation.
 func (c *testClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 	if err := c.getRecordedObjectError(ClientMethodPatch, client.ObjectKeyFromObject(obj)); err != nil {
 		return err
@@ -244,6 +265,7 @@ func (c *testClient) Patch(ctx context.Context, obj client.Object, patch client.
 	return c.delegate.Patch(ctx, obj, patch, opts...)
 }
 
+// Update modifies an existing resource, returning any pre-configured error or delegating the operation.
 func (c *testClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
 	if err := c.getRecordedObjectError(ClientMethodUpdate, client.ObjectKeyFromObject(obj)); err != nil {
 		return err
@@ -251,32 +273,39 @@ func (c *testClient) Update(ctx context.Context, obj client.Object, opts ...clie
 	return c.delegate.Update(ctx, obj, opts...)
 }
 
+// Status returns a StatusWriter for updating status subresource.
 func (c *testClient) Status() client.StatusWriter {
 	return c.delegate.Status()
 }
 
+// SubResource returns a SubResourceClient for the specified subresource.
 func (c *testClient) SubResource(subResource string) client.SubResourceClient {
 	return c.delegate.SubResource(subResource)
 }
 
+// Scheme returns the scheme used by this client.
 func (c *testClient) Scheme() *runtime.Scheme {
 	return c.delegate.Scheme()
 }
 
+// RESTMapper returns the RESTMapper used by this client.
 func (c *testClient) RESTMapper() meta.RESTMapper {
 	return c.delegate.RESTMapper()
 }
 
+// GroupVersionKindFor returns the GVK for the given object.
 func (c *testClient) GroupVersionKindFor(obj runtime.Object) (schema.GroupVersionKind, error) {
 	return c.delegate.GroupVersionKindFor(obj)
 }
 
+// IsObjectNamespaced reports if the given object is namespaced.
 func (c *testClient) IsObjectNamespaced(obj runtime.Object) (bool, error) {
 	return c.delegate.IsObjectNamespaced(obj)
 }
 
 // ---------------------------------- Helper methods ----------------------------------
 
+// getRecordedObjectError returns any pre-configured error for a specific operation and object key.
 func (c *testClient) getRecordedObjectError(method ClientMethod, objKey client.ObjectKey) error {
 	foundErrorRecord, ok := lo.Find(c.errorRecords, func(errRecord errorRecord) bool {
 		return errRecord.method == method && errRecord.objectKey == objKey
@@ -284,16 +313,35 @@ func (c *testClient) getRecordedObjectError(method ClientMethod, objKey client.O
 	return lo.Ternary(ok, foundErrorRecord.err, nil)
 }
 
+// getRecordedObjectCollectionError returns any pre-configured error for collection operations
+// based on namespace, labels, and resource type.
 func (c *testClient) getRecordedObjectCollectionError(method ClientMethod, namespace string, labelSelector labels.Selector, objGVK schema.GroupVersionKind) error {
 	foundErrRecord, ok := lo.Find(c.errorRecords, func(errRecord errorRecord) bool {
-		if errRecord.method == method && errRecord.objectKey.Namespace == namespace && errRecord.resourceGVK == objGVK {
-			// check if the error record has labels defined and passed labelSelector is not nil, then check for match.
-			if len(errRecord.labels) > 0 && labelSelector != nil {
+		// Match method and GVK
+		if errRecord.method != method || errRecord.resourceGVK != objGVK {
+			return false
+		}
+
+		// For testing purposes, match namespace more loosely:
+		// - If both are empty, match
+		// - If error record has namespace and request has same namespace, match
+		// - If error record has namespace and request is empty, match (for testing)
+		// - If error record is empty and request has namespace, no match
+		if errRecord.objectKey.Namespace != "" && namespace != "" && errRecord.objectKey.Namespace != namespace {
+			return false
+		}
+
+		// If the error record has labels, check if the selector matches
+		if len(errRecord.labels) > 0 {
+			if labelSelector != nil {
 				return labelSelector.Matches(errRecord.labels)
 			}
+			// For testing purposes, if record has labels but no selector provided, still match
+			// This allows tests to configure errors for specific label scenarios
 			return true
 		}
-		return false
+		// If record has no labels, it matches any selector (or no selector)
+		return true
 	})
 	return lo.Ternary(ok, foundErrRecord.err, nil)
 }

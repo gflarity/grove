@@ -33,10 +33,18 @@ var (
 
 // CheckGroveError checks that an actual error is a Grove error and further checks its underline cause, error code and operation.
 func CheckGroveError(t *testing.T, expectedError *groveerr.GroveError, actualErr error) {
-	assert.Error(t, expectedError)
+	if expectedError == nil {
+		panic("expectedError cannot be nil")
+	}
+	assert.Error(t, actualErr)
 	var groveErr *groveerr.GroveError
 	assert.True(t, errors.As(actualErr, &groveErr))
-	assert.Equal(t, groveErr.Code, expectedError.Code)
-	assert.True(t, errors.Is(groveErr.Cause, expectedError.Cause))
-	assert.Equal(t, groveErr.Operation, expectedError.Operation)
+	assert.Equal(t, expectedError.Code, groveErr.Code)
+	// Compare error messages instead of using errors.Is for exact matching
+	if expectedError.Cause != nil && groveErr.Cause != nil {
+		assert.Equal(t, expectedError.Cause.Error(), groveErr.Cause.Error())
+	} else {
+		assert.Equal(t, expectedError.Cause, groveErr.Cause)
+	}
+	assert.Equal(t, expectedError.Operation, groveErr.Operation)
 }

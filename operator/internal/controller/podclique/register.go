@@ -42,6 +42,7 @@ import (
 )
 
 const (
+	// controllerName is the identifier for the PodClique controller.
 	controllerName = "podclique-controller"
 )
 
@@ -79,6 +80,8 @@ func (r *Reconciler) RegisterWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// managedPodCliquePredicate returns a predicate that filters PodClique events
+// to only those that are managed by PodCliqueScalingGroup or PodGangSet.
 func managedPodCliquePredicate() predicate.Predicate {
 	expectedOwnerKinds := []string{constants.KindPodCliqueScalingGroup, constants.KindPodGangSet}
 	return predicate.Funcs{
@@ -95,7 +98,8 @@ func managedPodCliquePredicate() predicate.Predicate {
 	}
 }
 
-// podPredicate returns a predicate that filters out pods that are not managed by Grove.
+// podPredicate returns a predicate that filters Pod events to only include
+// pods managed by Grove, focusing on deletion and status changes.
 func podPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(_ event.CreateEvent) bool { return false },
@@ -113,10 +117,13 @@ func podPredicate() predicate.Predicate {
 	}
 }
 
+// hasPodSpecChanged determines if a Pod's spec has changed by comparing generations.
 func hasPodSpecChanged(updateEvent event.UpdateEvent) bool {
 	return updateEvent.ObjectOld.GetGeneration() != updateEvent.ObjectNew.GetGeneration()
 }
 
+// hasPodStatusChanged determines if a Pod's status has changed in meaningful ways
+// including ready condition, termination states, or container started/ready states.
 func hasPodStatusChanged(updateEvent event.UpdateEvent) bool {
 	oldPod, oldOk := updateEvent.ObjectOld.(*corev1.Pod)
 	newPod, newOk := updateEvent.ObjectNew.(*corev1.Pod)
@@ -129,6 +136,7 @@ func hasPodStatusChanged(updateEvent event.UpdateEvent) bool {
 		hasStartedAndReadyChangedForAnyContainer(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses)
 }
 
+// hasReadyConditionChanged checks if a Pod's ready condition has changed between updates.
 func hasReadyConditionChanged(oldPodConditions, newPodConditions []corev1.PodCondition) bool {
 	getReadyCondition := func(podConditions []corev1.PodCondition) (corev1.PodCondition, bool) {
 		return lo.Find(podConditions, func(condition corev1.PodCondition) bool {
@@ -142,12 +150,16 @@ func hasReadyConditionChanged(oldPodConditions, newPodConditions []corev1.PodCon
 	return oldPodReady != newPodReady
 }
 
+// hasLastTerminationStateChanged checks if container termination states have changed
+// by detecting when erroneous termination status appears or disappears.
 func hasLastTerminationStateChanged(oldContainerStatuses []corev1.ContainerStatus, newContainerStatuses []corev1.ContainerStatus) bool {
 	oldErroneousContainerStatus := k8sutils.GetContainerStatusIfTerminatedErroneously(oldContainerStatuses)
 	newErroneousContainerStatus := k8sutils.GetContainerStatusIfTerminatedErroneously(newContainerStatuses)
 	return utils.OnlyOneIsNil(oldErroneousContainerStatus, newErroneousContainerStatus)
 }
 
+// hasStartedAndReadyChangedForAnyContainer checks if any container's started or ready
+// status has changed between the old and new container statuses.
 func hasStartedAndReadyChangedForAnyContainer(oldContainerStatuses []corev1.ContainerStatus, newContainerStatuses []corev1.ContainerStatus) bool {
 	for _, oldContainerStatus := range oldContainerStatuses {
 		matchingNewContainerStatus, ok := lo.Find(newContainerStatuses, func(containerStatus corev1.ContainerStatus) bool {
@@ -238,6 +250,8 @@ func mapPodGangToPCLQs() handler.MapFunc {
 		if !ok {
 			return nil
 		}
+
+		// Create reconcile requests for each PodClique referenced by the PodGang
 		requests := make([]reconcile.Request, 0, len(podGang.Spec.PodGroups))
 		for _, podGroup := range podGang.Spec.PodGroups {
 			if len(podGroup.PodReferences) == 0 {
@@ -253,11 +267,15 @@ func mapPodGangToPCLQs() handler.MapFunc {
 	}
 }
 
+// extractPCLQNameFromPodName extracts the PodClique name from a Pod name
+// by removing the suffix after the last hyphen.
 func extractPCLQNameFromPodName(podName string) string {
 	endIndex := strings.LastIndex(podName, "-")
 	return podName[:endIndex]
 }
 
+// podGangPredicate returns a predicate that filters PodGang events
+// to only process create and update events.
 func podGangPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return true },
@@ -267,6 +285,8 @@ func podGangPredicate() predicate.Predicate {
 	}
 }
 
+// isManagedPod determines if a Pod is managed by Grove by checking
+// if it has a PodClique owner and Grove management labels.
 func isManagedPod(obj client.Object) bool {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
