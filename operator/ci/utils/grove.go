@@ -24,7 +24,7 @@ type GroveInstallConfig struct {
 	Namespace string
 	// Values is a map of custom values to pass to the chart
 	Values map[string]interface{}
-	// Logger is the logger to use for output (default: uses CiLogger)
+	// Logger is the logger to use for output (default: uses CILogger)
 	Logger func(format string, v ...interface{})
 }
 
@@ -57,7 +57,7 @@ func (c *GroveInstallConfig) Validate() error {
 	}
 	if c.Logger == nil {
 		// Create a default logger that writes to stdout
-		defaultLogger := NewCiLogger(nil)
+		defaultLogger := NewCILogger(nil)
 		c.Logger = defaultLogger.Printf
 	}
 	return nil
@@ -65,7 +65,7 @@ func (c *GroveInstallConfig) Validate() error {
 
 // GroveInstallConfigV0_1_0_Alpha1 returns a configuration for Grove v0.1.0-alpha.1 installation
 func GroveInstallConfigV0_1_0_Alpha1() *GroveInstallConfig {
-	defaultLogger := NewCiLogger(nil)
+	defaultLogger := NewCILogger(nil)
 	return &GroveInstallConfig{
 		ReleaseName:  "grove",
 		ChartRef:     "oci://ghcr.io/nvidia/grove/grove-charts",
@@ -78,10 +78,13 @@ func GroveInstallConfigV0_1_0_Alpha1() *GroveInstallConfig {
 
 // InstallGrove installs Grove on a Kubernetes cluster using Helm
 // It returns the installed release and any error that occurred
-func InstallGrove(config *GroveInstallConfig) (*release.Release, error) {
+func InstallGrove(config *GroveInstallConfig, logger *CILogger) (*release.Release, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+
+	// Override the logger in config with the passed logger
+	config.Logger = logger.Printf
 
 	config.Logger("Setting up Helm and Kubernetes configuration...")
 
@@ -137,10 +140,13 @@ func InstallGrove(config *GroveInstallConfig) (*release.Release, error) {
 
 // InstallOrUpgradeGrove installs Grove if it doesn't exist, or upgrades it if it does
 // It returns the installed/upgraded release and any error that occurred
-func InstallOrUpgradeGrove(config *GroveInstallConfig) (*release.Release, error) {
+func InstallOrUpgradeGrove(config *GroveInstallConfig, logger *CILogger) (*release.Release, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+
+	// Override the logger in config with the passed logger
+	config.Logger = logger.Printf
 
 	config.Logger("Setting up Helm and Kubernetes configuration...")
 

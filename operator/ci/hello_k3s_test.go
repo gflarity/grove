@@ -28,8 +28,12 @@ import (
 	"github.com/NVIDIA/grove/operator/ci/utils"
 )
 
-func TestWith3dCluster(t *testing.T) {
+func TestWithK3DCluster(t *testing.T) {
 	ctx := context.Background()
+
+	// Create a CILogger for this test
+	logger, closeLogger := utils.NewCILoggerWithFile()
+	defer closeLogger()
 
 	// Custom configuration
 	customCfg := utils.ClusterConfig{
@@ -44,11 +48,11 @@ func TestWith3dCluster(t *testing.T) {
 	fmt.Printf("🚀 Starting k3d cluster test with config: %+v\n", customCfg)
 
 	// Setup cluster with custom config
-	clientset, _, cleanup, err := utils.SetupK3DCluster(ctx, customCfg)
+	clientset, _, cleanup, err := utils.SetupK3DCluster(ctx, customCfg, logger)
+	defer cleanup() // always call cleanup
 	if err != nil {
 		t.Fatalf("Failed to setup k3d cluster: %v", err)
 	}
-	defer cleanup()
 
 	fmt.Printf("✅ Cluster setup complete, testing node listing...\n")
 
@@ -71,7 +75,7 @@ func TestWith3dCluster(t *testing.T) {
 	groveConfig.ReleaseName = "grove-test"
 	groveConfig.Namespace = "grove-system"
 
-	groveResult, err := InstallGroveWithTiming(t, groveConfig)
+	groveResult, err := InstallGroveWithTiming(t, groveConfig, logger)
 	if err != nil {
 		t.Fatalf("Grove installation failed: %v", err)
 	}
@@ -86,6 +90,10 @@ func TestWith3dCluster(t *testing.T) {
 func TestWithKindCluster(t *testing.T) {
 	ctx := context.Background()
 
+	// Create a CILogger for this test
+	logger, closeLogger := utils.NewCILoggerWithFile()
+	defer closeLogger()
+
 	// Custom configuration
 	customCfg := utils.KindClusterConfig{
 		Name:          "custom-kind-cluster",
@@ -97,11 +105,12 @@ func TestWithKindCluster(t *testing.T) {
 	fmt.Printf("🚀 Starting kind cluster test with config: %+v\n", customCfg)
 
 	// Setup cluster with custom config
-	clientset, cleanup, err := utils.SetupKindCluster(ctx, customCfg)
+	clientset, cleanup, err := utils.SetupKindCluster(ctx, customCfg, logger)
+	defer cleanup() // always call cleanup
 	if err != nil {
 		t.Fatalf("Failed to setup kind cluster: %v", err)
+
 	}
-	defer cleanup()
 
 	fmt.Printf("✅ Kind cluster setup complete, testing node listing...\n")
 
@@ -124,7 +133,7 @@ func TestWithKindCluster(t *testing.T) {
 	groveConfig.ReleaseName = "grove-kind-test"
 	groveConfig.Namespace = "grove-system"
 
-	groveResult, err := InstallOrUpgradeGroveWithTiming(t, groveConfig)
+	groveResult, err := InstallOrUpgradeGroveWithTiming(t, groveConfig, logger)
 	if err != nil {
 		t.Fatalf("Grove installation failed: %v", err)
 	}
@@ -143,13 +152,13 @@ type GroveInstallResult struct {
 
 // InstallGroveWithTiming installs Grove and measures the installation time
 // It prints the timing information and returns both the release and duration
-func InstallGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig) (*GroveInstallResult, error) {
+func InstallGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig, logger *utils.CILogger) (*GroveInstallResult, error) {
 	t.Helper()
 
 	start := time.Now()
-	fmt.Printf("🚀 Starting Grove installation...\n")
+	logger.Info("🚀 Starting Grove installation...")
 
-	rel, err := utils.InstallGrove(config)
+	rel, err := utils.InstallGrove(config, logger)
 	duration := time.Since(start)
 
 	result := &GroveInstallResult{
@@ -158,10 +167,10 @@ func InstallGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig) (*Gr
 	}
 
 	if err != nil {
-		fmt.Printf("❌ Grove installation failed after %v: %v\n", duration, err)
+		logger.Errorf("❌ Grove installation failed after %v: %v", duration, err)
 		return result, err
 	} else {
-		fmt.Printf("✅ Grove installation completed successfully in %v (release: %s, namespace: %s)\n",
+		logger.Infof("✅ Grove installation completed successfully in %v (release: %s, namespace: %s)",
 			duration, rel.Name, rel.Namespace)
 	}
 
@@ -170,13 +179,13 @@ func InstallGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig) (*Gr
 
 // InstallOrUpgradeGroveWithTiming installs or upgrades Grove and measures the time
 // It prints the timing information and returns both the release and duration
-func InstallOrUpgradeGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig) (*GroveInstallResult, error) {
+func InstallOrUpgradeGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig, logger *utils.CILogger) (*GroveInstallResult, error) {
 	t.Helper()
 
 	start := time.Now()
-	fmt.Printf("🚀 Starting Grove install/upgrade...\n")
+	logger.Info("🚀 Starting Grove install/upgrade...")
 
-	rel, err := utils.InstallOrUpgradeGrove(config)
+	rel, err := utils.InstallOrUpgradeGrove(config, logger)
 	duration := time.Since(start)
 
 	result := &GroveInstallResult{
@@ -185,10 +194,10 @@ func InstallOrUpgradeGroveWithTiming(t *testing.T, config *utils.GroveInstallCon
 	}
 
 	if err != nil {
-		fmt.Printf("❌ Grove install/upgrade failed after %v: %v\n", duration, err)
+		logger.Errorf("❌ Grove install/upgrade failed after %v: %v", duration, err)
 		return result, err
 	} else {
-		fmt.Printf("✅ Grove install/upgrade completed successfully in %v (release: %s, namespace: %s)\n",
+		logger.Infof("✅ Grove install/upgrade completed successfully in %v (release: %s, namespace: %s)",
 			duration, rel.Name, rel.Namespace)
 	}
 

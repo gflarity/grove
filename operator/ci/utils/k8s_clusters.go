@@ -41,8 +41,7 @@ func DefaultClusterConfig() ClusterConfig {
 }
 
 // SetupK3DCluster creates a k3d cluster and returns a kubernetes clientset
-func SetupK3DCluster(ctx context.Context, cfg ClusterConfig) (*kubernetes.Clientset, *v1alpha5.ClusterConfig, func(), error) {
-	logger, closeWriter := NewCiLoggerWithFile()
+func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (*kubernetes.Clientset, *v1alpha5.ClusterConfig, func(), error) {
 	logger.Infof("📝 Preparing k3d cluster configuration for '%s'...", cfg.Name)
 
 	// Route k3d internal logs to our logger writer
@@ -68,7 +67,7 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig) (*kubernetes.Client
 		},
 		Options: v1alpha5.SimpleConfigOptions{
 			Runtime: v1alpha5.SimpleConfigOptionsRuntime{
-				AgentsMemory: "500Mi",
+				AgentsMemory: "150m",
 			},
 		},
 	}
@@ -92,49 +91,7 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig) (*kubernetes.Client
 		return nil, nil, nil, fmt.Errorf("failed to transform config: %w", err)
 	}
 
-	// Create cluster
-	logger.Infof("🚀 Creating cluster '%s' with %d server(s) and %d agent(s)...",
-		k3dConfig.Name, cfg.Servers, cfg.Agents)
-
-	if err := client.ClusterRun(ctx, runtimes.Docker, k3dConfig); err != nil {
-		closeWriter()
-		return nil, nil, nil, fmt.Errorf("failed to create cluster: %w", err)
-	}
-	logger.Info("✅ Cluster created successfully!")
-
-	// Get kubeconfig
-	logger.Info("📄 Fetching kubeconfig...")
-	cluster, err := client.ClusterGet(ctx, runtimes.Docker, &k3dConfig.Cluster)
-	if err != nil {
-		closeWriter()
-		return nil, nil, nil, fmt.Errorf("could not get cluster: %w", err)
-	}
-
-	kubeconfig, err := client.KubeconfigGet(ctx, runtimes.Docker, cluster)
-	if err != nil {
-		closeWriter()
-		return nil, nil, nil, fmt.Errorf("failed to get kubeconfig: %w", err)
-	}
-
-	kubeconfigBytes, err := clientcmd.Write(*kubeconfig)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to serialize kubeconfig: %w", err)
-	}
-
-	// Create kubernetes clientset
-	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
-	if err != nil {
-		closeWriter()
-		return nil, nil, nil, fmt.Errorf("could not create rest config: %w", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		closeWriter()
-		return nil, nil, nil, fmt.Errorf("could not create clientset: %w", err)
-	}
-
-	// Return cleanup function
+	// this is the cleanup funciton, we always return it now so the caller can decide to use it or not
 	cleanup := func() {
 		logger.Info("🗑️ Deleting cluster...")
 		if err := client.ClusterDelete(ctx, runtimes.Docker, &k3dConfig.Cluster, k3d.ClusterDeleteOpts{}); err != nil {
@@ -142,7 +99,43 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig) (*kubernetes.Client
 		} else {
 			logger.Info("✅ Cluster deleted successfully")
 		}
-		closeWriter()
+	}
+
+	// Create cluster
+	logger.Infof("🚀 Creating cluster '%s' with %d server(s) and %d agent(s)...",
+		k3dConfig.Name, cfg.Servers, cfg.Agents)
+
+	if err := client.ClusterRun(ctx, runtimes.Docker, k3dConfig); err != nil {
+		return nil, nil, cleanup, fmt.Errorf("failed to create cluster: %w", err)
+	}
+	logger.Info("✅ Cluster created successfully!")
+
+	// Get kubeconfig
+	logger.Info("📄 Fetching kubeconfig...")
+	cluster, err := client.ClusterGet(ctx, runtimes.Docker, &k3dConfig.Cluster)
+	if err != nil {
+		return nil, nil, cleanup, fmt.Errorf("could not get cluster: %w", err)
+	}
+
+	kubeconfig, err := client.KubeconfigGet(ctx, runtimes.Docker, cluster)
+	if err != nil {
+		return nil, nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
+	}
+
+	kubeconfigBytes, err := clientcmd.Write(*kubeconfig)
+	if err != nil {
+		return nil, nil, cleanup, fmt.Errorf("failed to serialize kubeconfig: %w", err)
+	}
+
+	// Create kubernetes clientset
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
+	if err != nil {
+		return nil, nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
 	}
 
 	return clientset, k3dConfig, cleanup, nil
@@ -167,11 +160,10 @@ func DefaultKindClusterConfig() KindClusterConfig {
 }
 
 // SetupKindCluster creates a kind cluster and returns a kubernetes clientset
-func SetupKindCluster(_ context.Context, cfg KindClusterConfig) (*kubernetes.Clientset, func(), error) {
-	logger, closeWriter := NewCiLoggerWithFile()
+func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger) (*kubernetes.Clientset, func(), error) {
 	logger.Infof("📝 Preparing kind cluster configuration for '%s'...", cfg.Name)
 
-	// Provide our unified CiLogger to kind with verbosity filtering
+	// Provide our unified CILogger to kind with verbosity filtering
 	// This will suppress verbose node logs but keep kind's main status updates
 	provider := cluster.NewProvider(cluster.ProviderWithLogger(logger))
 
@@ -207,11 +199,22 @@ func SetupKindCluster(_ context.Context, cfg KindClusterConfig) (*kubernetes.Cli
 	logger.Infof("🚀 Creating kind cluster '%s' with %d control-plane(s) and %d worker(s)...",
 		cfg.Name, cfg.ControlPlanes, cfg.Workers)
 
+	// this is the cleanup funciton, we always return it now so the caller can decide to use it or not
+	cleanup := func() {
+		logger.Info("🗑️ Deleting kind cluster...")
+		if err := provider.Delete(cfg.Name, ""); err != nil {
+			logger.Errorf("Failed to delete kind cluster: %v", err)
+		} else {
+			logger.Info("✅ Kind cluster deleted successfully")
+		}
+	}
+
+	// Create cluster
 	if err := provider.Create(
 		cfg.Name,
 		cluster.CreateWithV1Alpha4Config(kindConfig),
 	); err != nil {
-		return nil, nil, fmt.Errorf("failed to create kind cluster: %w", err)
+		return nil, cleanup, fmt.Errorf("failed to create kind cluster: %w", err)
 	}
 	logger.Info("✅ Kind cluster created successfully!")
 
@@ -220,29 +223,18 @@ func SetupKindCluster(_ context.Context, cfg KindClusterConfig) (*kubernetes.Cli
 	// ... (the rest of your function remains the same) ...
 	kubeConfigYaml, err := provider.KubeConfig(cfg.Name, false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get kubeconfig: %w", err)
+		return nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
 	// Create kubernetes clientset
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeConfigYaml))
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not create rest config: %w", err)
+		return nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
 	}
 
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not create clientset: %w", err)
-	}
-
-	// Return cleanup function
-	cleanup := func() {
-		logger.Info("🗑️ Deleting kind cluster...")
-		if err := provider.Delete(cfg.Name, ""); err != nil {
-			logger.Errorf("Failed to delete kind cluster: %v", err)
-		} else {
-			logger.Info("✅ Kind cluster deleted successfully")
-		}
-		closeWriter()
+		return nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
 	}
 
 	return clientset, cleanup, nil

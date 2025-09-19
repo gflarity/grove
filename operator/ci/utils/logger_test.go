@@ -8,10 +8,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func TestCiLogger(t *testing.T) {
+func TestCILogger(t *testing.T) {
 	// Test basic logging functionality
 	var buf bytes.Buffer
-	logger := NewCiLogger(&buf)
+	logger := NewCILogger(&buf)
 
 	logger.Info("test info message")
 	logger.Warn("test warn message")
@@ -29,10 +29,10 @@ func TestCiLogger(t *testing.T) {
 	}
 }
 
-func TestCiLoggerPrintf(t *testing.T) {
+func TestCILoggerPrintf(t *testing.T) {
 	// Test Printf compatibility
 	var buf bytes.Buffer
-	logger := NewCiLogger(&buf)
+	logger := NewCILogger(&buf)
 
 	logger.Printf("test printf message with %s", "formatting")
 
@@ -42,9 +42,9 @@ func TestCiLoggerPrintf(t *testing.T) {
 	}
 }
 
-func TestCiLoggerWithNilWriter(t *testing.T) {
+func TestCILoggerWithNilWriter(t *testing.T) {
 	// Test that nil writer defaults to stdout (should not panic)
-	logger := NewCiLogger(nil)
+	logger := NewCILogger(nil)
 	if logger == nil {
 		t.Error("Expected logger to be created even with nil writer")
 	}
@@ -53,10 +53,10 @@ func TestCiLoggerWithNilWriter(t *testing.T) {
 	}
 }
 
-func TestCiLoggerLevels(t *testing.T) {
+func TestCILoggerLevels(t *testing.T) {
 	// Test different log levels
 	var buf bytes.Buffer
-	logger := NewCiLogger(&buf)
+	logger := NewCILogger(&buf)
 
 	// Set to debug level to capture all messages
 	logger.SetLevel(logrus.DebugLevel)
@@ -82,9 +82,9 @@ func TestCiLoggerLevels(t *testing.T) {
 }
 
 func TestKindLoggerCompatibility(t *testing.T) {
-	// Test kind logger compatibility using unified CiLogger
+	// Test kind logger compatibility using unified CILogger
 	var buf bytes.Buffer
-	logger := NewCiLoggerWithVerbosity(&buf, KindVerbosityFromEnv())
+	logger := NewCILoggerWithVerbosity(&buf, KindVerbosityFromEnv())
 
 	// Test kind.Logger interface methods
 	logger.Warn("kind warn message")

@@ -9,25 +9,25 @@ import (
 	kindlog "sigs.k8s.io/kind/pkg/log"
 )
 
-// CiLogger provides a structured logger that can write to any io.Writer
+// CILogger provides a structured logger that can write to any io.Writer
 // It wraps logrus and provides compatibility with kind's logging interfaces
 // It implements both kind.Logger and kind.InfoLogger interfaces
-type CiLogger struct {
+type CILogger struct {
 	*logrus.Logger
 	writer    io.Writer
 	closer    func()
 	verbosity kindlog.Level
 }
 
-// NewCiLogger creates a new CiLogger that writes to the specified writer
+// NewCILogger creates a new CILogger that writes to the specified writer
 // If writer is nil, it defaults to stdout
 // verbosity controls kind logging verbosity (0 = only main messages, higher = more verbose)
-func NewCiLogger(writer io.Writer) *CiLogger {
-	return NewCiLoggerWithVerbosity(writer, KindVerbosityFromEnv())
+func NewCILogger(writer io.Writer) *CILogger {
+	return NewCILoggerWithVerbosity(writer, KindVerbosityFromEnv())
 }
 
-// NewCiLoggerWithVerbosity creates a new CiLogger with custom verbosity
-func NewCiLoggerWithVerbosity(writer io.Writer, verbosity kindlog.Level) *CiLogger {
+// NewCILoggerWithVerbosity creates a new CILogger with custom verbosity
+func NewCILoggerWithVerbosity(writer io.Writer, verbosity kindlog.Level) *CILogger {
 	if writer == nil {
 		writer = os.Stdout
 	}
@@ -40,7 +40,7 @@ func NewCiLoggerWithVerbosity(writer io.Writer, verbosity kindlog.Level) *CiLogg
 	})
 	logger.SetLevel(logrus.InfoLevel)
 
-	return &CiLogger{
+	return &CILogger{
 		Logger:    logger,
 		writer:    writer,
 		closer:    func() {}, // no-op by default
@@ -48,26 +48,27 @@ func NewCiLoggerWithVerbosity(writer io.Writer, verbosity kindlog.Level) *CiLogg
 	}
 }
 
-// NewCiLoggerWithFile creates a CiLogger that tees output to stdout and a file
-// This is used to log the output of the k8s clusters setup process to a file for realtime tailing
-// as it takes a while to setup the clusters and we want to be able to see the progress for debugging purposes.
-// The file path is controlled by GROVE_CI_LOG_PATH (default: /tmp/grove-ci.log).
+// NewCILoggerWithFile creates a CILogger that optionally tees output to stdout and a file.
+// File logging is only enabled if GROVE_E2E_LOG_PATH is set. This allows developers to
+// capture logs for debugging purposes during long-running cluster setup operations.
 // It returns the logger and a close function to release resources when done.
-func NewCiLoggerWithFile() (*CiLogger, func()) {
-	path := os.Getenv("GROVE_CI_LOG_PATH")
+func NewCILoggerWithFile() (*CILogger, func()) {
+	path := os.Getenv("GROVE_E2E_LOG_PATH")
 	if path == "" {
-		path = "/tmp/grove-ci.log"
+		// No file logging - just stdout
+		logger := NewCILogger(os.Stdout)
+		return logger, func() {}
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		// Fallback: just stdout; closer is no-op
-		logger := NewCiLogger(os.Stdout)
+		logger := NewCILogger(os.Stdout)
 		return logger, func() {}
 	}
 
 	mw := io.MultiWriter(os.Stdout, f)
-	logger := NewCiLogger(mw)
+	logger := NewCILogger(mw)
 
 	closer := func() {
 		_ = f.Close()
@@ -78,44 +79,44 @@ func NewCiLoggerWithFile() (*CiLogger, func()) {
 }
 
 // Writer returns the underlying io.Writer
-func (l *CiLogger) Writer() io.Writer {
+func (l *CILogger) Writer() io.Writer {
 	return l.writer
 }
 
 // Close calls the closer function if set
-func (l *CiLogger) Close() {
+func (l *CILogger) Close() {
 	l.closer()
 }
 
 // Printf provides compatibility with functions expecting a printf-style logger
-func (l *CiLogger) Printf(format string, args ...interface{}) {
+func (l *CILogger) Printf(format string, args ...interface{}) {
 	l.Infof(format, args...)
 }
 
 // --- kind.Logger interface implementation ---
 
 // Warn implements kind.Logger interface
-func (l *CiLogger) Warn(message string) {
+func (l *CILogger) Warn(message string) {
 	l.Logger.Warn(message)
 }
 
 // Warnf implements kind.Logger interface
-func (l *CiLogger) Warnf(format string, args ...interface{}) {
+func (l *CILogger) Warnf(format string, args ...interface{}) {
 	l.Logger.Warnf(format, args...)
 }
 
 // Error implements kind.Logger interface
-func (l *CiLogger) Error(message string) {
+func (l *CILogger) Error(message string) {
 	l.Logger.Error(message)
 }
 
 // Errorf implements kind.Logger interface
-func (l *CiLogger) Errorf(format string, args ...interface{}) {
+func (l *CILogger) Errorf(format string, args ...interface{}) {
 	l.Logger.Errorf(format, args...)
 }
 
 // V implements kind.Logger interface for verbosity-based logging
-func (l *CiLogger) V(level kindlog.Level) kindlog.InfoLogger {
+func (l *CILogger) V(level kindlog.Level) kindlog.InfoLogger {
 	// If the message's verbosity is higher than our configured level,
 	// return a no-op logger that discards the message.
 	if level > l.verbosity {
@@ -128,7 +129,7 @@ func (l *CiLogger) V(level kindlog.Level) kindlog.InfoLogger {
 // --- kind.InfoLogger interface implementation ---
 
 // Info implements kind.InfoLogger interface
-func (l *CiLogger) Info(message string) {
+func (l *CILogger) Info(message string) {
 	l.Logger.Info(message)
 }
 
@@ -136,7 +137,7 @@ func (l *CiLogger) Info(message string) {
 // Note: logrus.Logger already has Infof, so we inherit it
 
 // Enabled implements kind.InfoLogger interface
-func (l *CiLogger) Enabled() bool {
+func (l *CILogger) Enabled() bool {
 	return true
 }
 
