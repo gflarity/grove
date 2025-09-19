@@ -40,7 +40,7 @@ func TestWithK3DCluster(t *testing.T) {
 	customCfg := utils.ClusterConfig{
 		Name:             "custom-test-cluster",
 		Servers:          2,
-		Agents:           3,
+		Agents:           20,
 		Image:            "rancher/k3s:v1.28.8-k3s1",
 		HostPort:         "6551",
 		LoadBalancerPort: "8081:80",
@@ -98,7 +98,20 @@ func TestWithK3DCluster(t *testing.T) {
 	fmt.Printf("⏱️  Grove installation took %v (release: %s, namespace: %s)\n",
 		groveResult.Duration, groveResult.Release.Name, groveResult.Release.Namespace)
 
-	fmt.Printf("🎉 Test completed successfully!\n")
+	// Apply workload1.yaml and wait for all pods to be ready
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath: "/Users/gflarity/git/grove/operator/ci/workloads/workload1.yaml",
+		Namespace:    namespace,
+		RestConfig:   restConfig,
+		Timeout:      10 * time.Minute, // Allow more time for workload pods
+	}
+
+	fmt.Printf("🚀 Applying workload1.yaml and waiting for pods to be ready...\n")
+	if err := utils.ApplyWorkloadAndWaitForPods(ctx, workloadConfig, logger); err != nil {
+		t.Fatalf("Failed to apply workload and wait for pods: %v", err)
+	}
+
+	fmt.Printf("🎉 Test completed successfully! All workload pods are ready.\n")
 }
 
 // Example of how to use kind with custom configuration
@@ -170,7 +183,20 @@ func TestWithKindCluster(t *testing.T) {
 	fmt.Printf("⏱️  Grove installation took %v (release: %s, namespace: %s)\n",
 		groveResult.Duration, groveResult.Release.Name, groveResult.Release.Namespace)
 
-	fmt.Printf("🎉 Kind test completed successfully!\n")
+	// Apply workload1.yaml and wait for all pods to be ready
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath: "/Users/gflarity/git/grove/operator/ci/workloads/workload1.yaml",
+		Namespace:    namespace,
+		RestConfig:   restConfig,
+		Timeout:      10 * time.Minute, // Allow more time for workload pods
+	}
+
+	fmt.Printf("🚀 Applying workload1.yaml and waiting for pods to be ready...\n")
+	if err := utils.ApplyWorkloadAndWaitForPods(ctx, workloadConfig, logger); err != nil {
+		t.Fatalf("Failed to apply workload and wait for pods: %v", err)
+	}
+
+	fmt.Printf("🎉 Kind test completed successfully! All workload pods are ready.\n")
 }
 
 // GroveInstallResult holds the result of a timed Grove installation

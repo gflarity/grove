@@ -27,6 +27,7 @@ type ClusterConfig struct {
 	HostPort         string
 	LoadBalancerPort string
 	AgentNodeLabels  map[string]string
+	WorkerMemory     string // Memory allocation for worker/agent nodes (e.g., "150m")
 }
 
 // DefaultClusterConfig returns a sensible default cluster configuration
@@ -38,6 +39,7 @@ func DefaultClusterConfig() ClusterConfig {
 		Image:            "rancher/k3s:v1.28.8-k3s1",
 		HostPort:         "6550",
 		LoadBalancerPort: "8080:80",
+		WorkerMemory:     "150m",
 	}
 }
 
@@ -68,7 +70,7 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 		},
 		Options: v1alpha5.SimpleConfigOptions{
 			Runtime: v1alpha5.SimpleConfigOptionsRuntime{
-				AgentsMemory: "150m",
+				AgentsMemory: cfg.WorkerMemory,
 			},
 		},
 	}
@@ -85,6 +87,24 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 			)
 		}
 	}
+
+	// Always add the required e2e node label and taint for Grove testing
+	clusterConfig.Options.K3sOptions.NodeLabels = append(
+		clusterConfig.Options.K3sOptions.NodeLabels,
+		v1alpha5.LabelWithNodeFilters{
+			Label:       "node_role.e2e.grove.nvidia.com=agent",
+			NodeFilters: []string{"agent:*"},
+		},
+	)
+
+	// Add the required node taint for Grove testing
+	clusterConfig.Options.K3sOptions.ExtraArgs = append(
+		clusterConfig.Options.K3sOptions.ExtraArgs,
+		v1alpha5.K3sArgWithNodeFilters{
+			Arg:         "--node-taint=node_role.e2e.grove.nvidia.com=agent:NoSchedule",
+			NodeFilters: []string{"agent:*"},
+		},
+	)
 
 	// Transform configuration
 	k3dConfig, err := config.TransformSimpleToClusterConfig(ctx, runtimes.Docker, clusterConfig, "")
@@ -148,6 +168,7 @@ type KindClusterConfig struct {
 	ControlPlanes int
 	Workers       int
 	Image         string
+	WorkerMemory  string // Memory allocation for worker nodes (e.g., "150m")
 }
 
 // DefaultKindClusterConfig returns a sensible default kind cluster configuration
@@ -157,6 +178,7 @@ func DefaultKindClusterConfig() KindClusterConfig {
 		ControlPlanes: 1,
 		Workers:       2,
 		Image:         "", // Empty means use kind's default
+		WorkerMemory:  "150m",
 	}
 }
 
@@ -193,6 +215,17 @@ func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger
 		if cfg.Image != "" {
 			node.Image = cfg.Image
 		}
+
+		// Configure memory reservation for worker nodes if specified
+		if cfg.WorkerMemory != "" {
+			node.KubeadmConfigPatches = []string{
+				fmt.Sprintf(`kind: JoinConfiguration
+nodeRegistration:
+  kubeletExtraArgs:
+    system-reserved: memory=%s`, cfg.WorkerMemory),
+			}
+		}
+
 		kindConfig.Nodes = append(kindConfig.Nodes, node)
 	}
 
