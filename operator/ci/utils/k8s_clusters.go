@@ -12,6 +12,7 @@ import (
 	"github.com/k3d-io/k3d/v5/pkg/runtimes"
 	k3d "github.com/k3d-io/k3d/v5/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/kind/pkg/apis/config/v1alpha4"
 	"sigs.k8s.io/kind/pkg/cluster"
@@ -40,8 +41,8 @@ func DefaultClusterConfig() ClusterConfig {
 	}
 }
 
-// SetupK3DCluster creates a k3d cluster and returns a kubernetes clientset
-func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (*kubernetes.Clientset, *v1alpha5.ClusterConfig, func(), error) {
+// SetupK3DCluster creates a k3d cluster and returns a kubernetes clientset and REST config
+func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
 	logger.Infof("📝 Preparing k3d cluster configuration for '%s'...", cfg.Name)
 
 	// Route k3d internal logs to our logger writer
@@ -88,7 +89,7 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 	// Transform configuration
 	k3dConfig, err := config.TransformSimpleToClusterConfig(ctx, runtimes.Docker, clusterConfig, "")
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to transform config: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to transform config: %w", err)
 	}
 
 	// this is the cleanup funciton, we always return it now so the caller can decide to use it or not
@@ -106,7 +107,7 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 		k3dConfig.Name, cfg.Servers, cfg.Agents)
 
 	if err := client.ClusterRun(ctx, runtimes.Docker, k3dConfig); err != nil {
-		return nil, nil, cleanup, fmt.Errorf("failed to create cluster: %w", err)
+		return nil, nil, nil, cleanup, fmt.Errorf("failed to create cluster: %w", err)
 	}
 	logger.Info("✅ Cluster created successfully!")
 
@@ -114,31 +115,31 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 	logger.Info("📄 Fetching kubeconfig...")
 	cluster, err := client.ClusterGet(ctx, runtimes.Docker, &k3dConfig.Cluster)
 	if err != nil {
-		return nil, nil, cleanup, fmt.Errorf("could not get cluster: %w", err)
+		return nil, nil, nil, cleanup, fmt.Errorf("could not get cluster: %w", err)
 	}
 
 	kubeconfig, err := client.KubeconfigGet(ctx, runtimes.Docker, cluster)
 	if err != nil {
-		return nil, nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
+		return nil, nil, nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
 	kubeconfigBytes, err := clientcmd.Write(*kubeconfig)
 	if err != nil {
-		return nil, nil, cleanup, fmt.Errorf("failed to serialize kubeconfig: %w", err)
+		return nil, nil, nil, cleanup, fmt.Errorf("failed to serialize kubeconfig: %w", err)
 	}
 
 	// Create kubernetes clientset
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
 	if err != nil {
-		return nil, nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
+		return nil, nil, nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
 	}
 
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		return nil, nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
+		return nil, nil, nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
 	}
 
-	return clientset, k3dConfig, cleanup, nil
+	return clientset, restConfig, k3dConfig, cleanup, nil
 }
 
 // KindClusterConfig holds configuration for creating a kind cluster
@@ -159,8 +160,8 @@ func DefaultKindClusterConfig() KindClusterConfig {
 	}
 }
 
-// SetupKindCluster creates a kind cluster and returns a kubernetes clientset
-func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger) (*kubernetes.Clientset, func(), error) {
+// SetupKindCluster creates a kind cluster and returns a kubernetes clientset and REST config
+func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, func(), error) {
 	logger.Infof("📝 Preparing kind cluster configuration for '%s'...", cfg.Name)
 
 	// Provide our unified CILogger to kind with verbosity filtering
@@ -214,7 +215,7 @@ func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger
 		cfg.Name,
 		cluster.CreateWithV1Alpha4Config(kindConfig),
 	); err != nil {
-		return nil, cleanup, fmt.Errorf("failed to create kind cluster: %w", err)
+		return nil, nil, cleanup, fmt.Errorf("failed to create kind cluster: %w", err)
 	}
 	logger.Info("✅ Kind cluster created successfully!")
 
@@ -223,19 +224,19 @@ func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger
 	// ... (the rest of your function remains the same) ...
 	kubeConfigYaml, err := provider.KubeConfig(cfg.Name, false)
 	if err != nil {
-		return nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
+		return nil, nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
 	// Create kubernetes clientset
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeConfigYaml))
 	if err != nil {
-		return nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
+		return nil, nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
 	}
 
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		return nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
+		return nil, nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
 	}
 
-	return clientset, cleanup, nil
+	return clientset, restConfig, cleanup, nil
 }

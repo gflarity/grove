@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"helm.sh/helm/v3/pkg/release"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/NVIDIA/grove/operator/ci/utils"
@@ -48,7 +49,7 @@ func TestWithK3DCluster(t *testing.T) {
 	fmt.Printf("🚀 Starting k3d cluster test with config: %+v\n", customCfg)
 
 	// Setup cluster with custom config
-	clientset, _, cleanup, err := utils.SetupK3DCluster(ctx, customCfg, logger)
+	clientset, restConfig, _, cleanup, err := utils.SetupK3DCluster(ctx, customCfg, logger)
 	defer cleanup() // always call cleanup
 	if err != nil {
 		t.Fatalf("Failed to setup k3d cluster: %v", err)
@@ -70,10 +71,24 @@ func TestWithK3DCluster(t *testing.T) {
 		t.Errorf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
 	}
 
+	// Create the namespace for Grove installation
+	namespace := "grove-system"
+	_, err = clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: namespace,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Failed to create namespace %s: %v", namespace, err)
+	}
+	fmt.Printf("✅ Created namespace: %s\n", namespace)
+
 	// Install Grove with timing
 	groveConfig := utils.GroveInstallConfigV0_1_0_Alpha1()
 	groveConfig.ReleaseName = "grove-test"
-	groveConfig.Namespace = "grove-system"
+	groveConfig.Namespace = namespace
+	// Use the same REST config as the cluster
+	groveConfig.RestConfig = restConfig
 
 	groveResult, err := InstallGroveWithTiming(t, groveConfig, logger)
 	if err != nil {
@@ -105,7 +120,7 @@ func TestWithKindCluster(t *testing.T) {
 	fmt.Printf("🚀 Starting kind cluster test with config: %+v\n", customCfg)
 
 	// Setup cluster with custom config
-	clientset, cleanup, err := utils.SetupKindCluster(ctx, customCfg, logger)
+	clientset, restConfig, cleanup, err := utils.SetupKindCluster(ctx, customCfg, logger)
 	defer cleanup() // always call cleanup
 	if err != nil {
 		t.Fatalf("Failed to setup kind cluster: %v", err)
@@ -128,10 +143,24 @@ func TestWithKindCluster(t *testing.T) {
 		t.Errorf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
 	}
 
+	// Create the namespace for Grove installation
+	namespace := "grove-system"
+	_, err = clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: namespace,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Failed to create namespace %s: %v", namespace, err)
+	}
+	fmt.Printf("✅ Created namespace: %s\n", namespace)
+
 	// Install Grove with timing on Kind cluster
 	groveConfig := utils.GroveInstallConfigV0_1_0_Alpha1()
 	groveConfig.ReleaseName = "grove-kind-test"
-	groveConfig.Namespace = "grove-system"
+	groveConfig.Namespace = namespace
+	// Use the same REST config as the cluster
+	groveConfig.RestConfig = restConfig
 
 	groveResult, err := InstallOrUpgradeGroveWithTiming(t, groveConfig, logger)
 	if err != nil {

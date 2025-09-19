@@ -10,6 +10,14 @@ import (
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/release"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // GroveInstallConfig holds configuration for installing Grove
@@ -26,6 +34,8 @@ type GroveInstallConfig struct {
 	Values map[string]interface{}
 	// Logger is the logger to use for output (default: uses CILogger)
 	Logger func(format string, v ...interface{})
+	// RestConfig is the Kubernetes REST config to use (optional, defaults to system kubeconfig)
+	RestConfig *rest.Config
 }
 
 // Validate validates required fields and normalizes optional ones.
@@ -63,6 +73,65 @@ func (c *GroveInstallConfig) Validate() error {
 	return nil
 }
 
+// customRESTClientGetter implements genericclioptions.RESTClientGetter using a provided rest.Config
+type customRESTClientGetter struct {
+	restConfig *rest.Config
+	namespace  string
+}
+
+func (c *customRESTClientGetter) ToRESTConfig() (*rest.Config, error) {
+	return c.restConfig, nil
+}
+
+func (c *customRESTClientGetter) ToDiscoveryClient() (discovery.CachedDiscoveryInterface, error) {
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(c.restConfig)
+	if err != nil {
+		return nil, err
+	}
+	return memory.NewMemCacheClient(discoveryClient), nil
+}
+
+func (c *customRESTClientGetter) ToRESTMapper() (meta.RESTMapper, error) {
+	discoveryClient, err := c.ToDiscoveryClient()
+	if err != nil {
+		return nil, err
+	}
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
+	return mapper, nil
+}
+
+func (c *customRESTClientGetter) ToRawKubeConfigLoader() clientcmd.ClientConfig {
+	return &directClientConfig{
+		config:    c.restConfig,
+		namespace: c.namespace,
+	}
+}
+
+// directClientConfig implements clientcmd.ClientConfig for direct REST config usage
+type directClientConfig struct {
+	config    *rest.Config
+	namespace string
+}
+
+func (d *directClientConfig) RawConfig() (clientcmdapi.Config, error) {
+	return clientcmdapi.Config{}, fmt.Errorf("raw config not available")
+}
+
+func (d *directClientConfig) ClientConfig() (*rest.Config, error) {
+	return d.config, nil
+}
+
+func (d *directClientConfig) Namespace() (string, bool, error) {
+	if d.namespace == "" {
+		return "default", false, nil
+	}
+	return d.namespace, true, nil
+}
+
+func (d *directClientConfig) ConfigAccess() clientcmd.ConfigAccess {
+	return nil
+}
+
 // GroveInstallConfigV0_1_0_Alpha1 returns a configuration for Grove v0.1.0-alpha.1 installation
 func GroveInstallConfigV0_1_0_Alpha1() *GroveInstallConfig {
 	defaultLogger := NewCILogger(nil)
@@ -88,12 +157,24 @@ func InstallGrove(config *GroveInstallConfig, logger *CILogger) (*release.Releas
 
 	config.Logger("Setting up Helm and Kubernetes configuration...")
 
-	// Initialize Helm settings
+	// Initialize Helm settings and REST client getter
 	settings := cli.New()
+	var restClientGetter genericclioptions.RESTClientGetter
+
+	if config.RestConfig != nil {
+		// Use custom REST config if provided
+		restClientGetter = &customRESTClientGetter{
+			restConfig: config.RestConfig,
+			namespace:  config.Namespace,
+		}
+	} else {
+		// Use default settings
+		restClientGetter = settings.RESTClientGetter()
+	}
 
 	// Create a new ActionConfig object
 	actionConfig := new(action.Configuration)
-	if err := actionConfig.Init(settings.RESTClientGetter(), config.Namespace, os.Getenv("HELM_DRIVER"), config.Logger); err != nil {
+	if err := actionConfig.Init(restClientGetter, config.Namespace, os.Getenv("HELM_DRIVER"), config.Logger); err != nil {
 		return nil, fmt.Errorf("failed to initialize Helm action configuration: %w", err)
 	}
 
@@ -150,12 +231,24 @@ func InstallOrUpgradeGrove(config *GroveInstallConfig, logger *CILogger) (*relea
 
 	config.Logger("Setting up Helm and Kubernetes configuration...")
 
-	// Initialize Helm settings
+	// Initialize Helm settings and REST client getter
 	settings := cli.New()
+	var restClientGetter genericclioptions.RESTClientGetter
+
+	if config.RestConfig != nil {
+		// Use custom REST config if provided
+		restClientGetter = &customRESTClientGetter{
+			restConfig: config.RestConfig,
+			namespace:  config.Namespace,
+		}
+	} else {
+		// Use default settings
+		restClientGetter = settings.RESTClientGetter()
+	}
 
 	// Create a new ActionConfig object
 	actionConfig := new(action.Configuration)
-	if err := actionConfig.Init(settings.RESTClientGetter(), config.Namespace, os.Getenv("HELM_DRIVER"), config.Logger); err != nil {
+	if err := actionConfig.Init(restClientGetter, config.Namespace, os.Getenv("HELM_DRIVER"), config.Logger); err != nil {
 		return nil, fmt.Errorf("failed to initialize Helm action configuration: %w", err)
 	}
 
