@@ -33,8 +33,7 @@ func TestWithK3DCluster(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a CILogger for this test
-	logger, closeLogger := utils.NewCILoggerWithFile()
-	defer closeLogger()
+	logger := utils.NewCILogger(nil)
 
 	// Custom configuration
 	customCfg := utils.ClusterConfig{
@@ -119,8 +118,7 @@ func TestWithKindCluster(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a CILogger for this test
-	logger, closeLogger := utils.NewCILoggerWithFile()
-	defer closeLogger()
+	logger := utils.NewCILogger(nil)
 
 	// Custom configuration
 	customCfg := utils.KindClusterConfig{

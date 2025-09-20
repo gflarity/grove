@@ -15,7 +15,6 @@ import (
 type CILogger struct {
 	*logrus.Logger
 	writer    io.Writer
-	closer    func()
 	verbosity kindlog.Level
 }
 
@@ -43,49 +42,13 @@ func NewCILoggerWithVerbosity(writer io.Writer, verbosity kindlog.Level) *CILogg
 	return &CILogger{
 		Logger:    logger,
 		writer:    writer,
-		closer:    func() {}, // no-op by default
 		verbosity: verbosity,
 	}
-}
-
-// NewCILoggerWithFile creates a CILogger that optionally tees output to stdout and a file.
-// File logging is only enabled if GROVE_E2E_LOG_PATH is set. This allows developers to
-// capture logs for debugging purposes during long-running cluster setup operations.
-// It returns the logger and a close function to release resources when done.
-func NewCILoggerWithFile() (*CILogger, func()) {
-	path := os.Getenv("GROVE_E2E_LOG_PATH")
-	if path == "" {
-		// No file logging - just stdout
-		logger := NewCILogger(os.Stdout)
-		return logger, func() {}
-	}
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		// Fallback: just stdout; closer is no-op
-		logger := NewCILogger(os.Stdout)
-		return logger, func() {}
-	}
-
-	mw := io.MultiWriter(os.Stdout, f)
-	logger := NewCILogger(mw)
-
-	closer := func() {
-		_ = f.Close()
-	}
-	logger.closer = closer
-
-	return logger, closer
 }
 
 // Writer returns the underlying io.Writer
 func (l *CILogger) Writer() io.Writer {
 	return l.writer
-}
-
-// Close calls the closer function if set
-func (l *CILogger) Close() {
-	l.closer()
 }
 
 // Printf provides compatibility with functions expecting a printf-style logger
