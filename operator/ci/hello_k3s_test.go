@@ -107,7 +107,7 @@ func TestWithK3DCluster(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload1.yaml and waiting for pods to be ready...\n")
-	if err := utils.ApplyWorkloadAndWaitForPods(ctx, workloadConfig, logger); err != nil {
+	if err := utils.ApplyYAMLAndWaitForPods(ctx, workloadConfig, logger); err != nil {
 		t.Fatalf("Failed to apply workload and wait for pods: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestWithKindCluster(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload1.yaml and waiting for pods to be ready...\n")
-	if err := utils.ApplyWorkloadAndWaitForPods(ctx, workloadConfig, logger); err != nil {
+	if err := utils.ApplyYAMLAndWaitForPods(ctx, workloadConfig, logger); err != nil {
 		t.Fatalf("Failed to apply workload and wait for pods: %v", err)
 	}
 
