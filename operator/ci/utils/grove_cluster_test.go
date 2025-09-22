@@ -14,7 +14,7 @@
 // limitations under the License.
 // */
 
-package ci
+package utils
 
 import (
 	"context"
@@ -25,30 +25,38 @@ import (
 	"helm.sh/helm/v3/pkg/release"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/NVIDIA/grove/operator/ci/utils"
 )
 
 func TestWithK3DCluster(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	logger := NewCILogger(nil)
 
 	// Custom configuration
-	customCfg := utils.ClusterConfig{
+	customCfg := ClusterConfig{
 		Name:             "custom-test-cluster",
 		Servers:          2,
 		Agents:           20,
 		Image:            "rancher/k3s:v1.28.8-k3s1",
 		HostPort:         "6551",
 		LoadBalancerPort: "8081:80",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
+		},
+		AgentNodeTaints: []NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
 	}
 
 	fmt.Printf("🚀 Starting k3d cluster test with config: %+v\n", customCfg)
 
 	// Setup cluster with custom config
-	clientset, restConfig, _, cleanup, err := utils.SetupK3DCluster(ctx, customCfg, logger)
+	clientset, restConfig, _, cleanup, err := SetupK3DCluster(ctx, customCfg, logger)
 	defer cleanup() // always call cleanup
 	if err != nil {
 		t.Fatalf("Failed to setup k3d cluster: %v", err)
@@ -70,6 +78,22 @@ func TestWithK3DCluster(t *testing.T) {
 		t.Errorf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
 	}
 
+	// Verify configured node labels are applied to agent nodes
+	agentNodes := 0
+	for _, node := range nodes.Items {
+		// Check if this is an agent node (not a server/control-plane)
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
+			agentNodes++
+			// Verify all configured labels are present
+			for k, expectedV := range customCfg.AgentNodeLabels {
+				if actualV, exists := node.Labels[k]; !exists || actualV != expectedV {
+					t.Errorf("Expected label %s=%s on agent node %s, but got %s", k, expectedV, node.Name, actualV)
+				}
+			}
+		}
+	}
+	fmt.Printf("✅ Verified labels on %d agent nodes\n", agentNodes)
+
 	// Create the namespace for Grove installation
 	namespace := "grove-system"
 	_, err = clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
@@ -83,11 +107,20 @@ func TestWithK3DCluster(t *testing.T) {
 	fmt.Printf("✅ Created namespace: %s\n", namespace)
 
 	// Install Grove with timing
-	groveConfig := utils.GroveInstallConfigV0_1_0_Alpha1()
+	groveConfig := GroveInstallConfigV0_1_0_Alpha1()
 	groveConfig.ReleaseName = "grove-test"
 	groveConfig.Namespace = namespace
 	// Use the same REST config as the cluster
 	groveConfig.RestConfig = restConfig
+
+	// Add tolerations for control-plane and Grove e2e taints so Grove can schedule on all nodes
+	groveConfig.Values["tolerations"] = []map[string]interface{}{
+		{
+			"key":      "node-role.kubernetes.io/control-plane",
+			"operator": "Exists",
+			"effect":   "NoSchedule",
+		},
+	}
 
 	groveResult, err := InstallGroveWithTiming(t, groveConfig, logger)
 	if err != nil {
@@ -98,7 +131,7 @@ func TestWithK3DCluster(t *testing.T) {
 		groveResult.Duration, groveResult.Release.Name, groveResult.Release.Namespace)
 
 	// Apply workload1.yaml and wait for all pods to be ready
-	workloadConfig := &utils.WorkloadConfig{
+	workloadConfig := &WorkloadConfig{
 		YAMLFilePath: "/Users/gflarity/git/grove/operator/ci/workloads/workload1.yaml",
 		Namespace:    namespace,
 		RestConfig:   restConfig,
@@ -106,7 +139,7 @@ func TestWithK3DCluster(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload1.yaml and waiting for pods to be ready...\n")
-	if err := utils.ApplyYAMLAndWaitForPods(ctx, workloadConfig, logger); err != nil {
+	if err := ApplyYAMLAndWaitForPods(ctx, workloadConfig, logger); err != nil {
 		t.Fatalf("Failed to apply workload and wait for pods: %v", err)
 	}
 
@@ -118,20 +151,30 @@ func TestWithKindCluster(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	logger := NewCILogger(nil)
 
 	// Custom configuration
-	customCfg := utils.KindClusterConfig{
+	customCfg := KindClusterConfig{
 		Name:          "custom-kind-cluster",
 		ControlPlanes: 2,
 		Workers:       3,
 		Image:         "kindest/node:v1.28.0", // Optional: specify custom image
+		WorkerNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
+		},
+		WorkerNodeTaints: []NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
 	}
 
 	fmt.Printf("🚀 Starting kind cluster test with config: %+v\n", customCfg)
 
 	// Setup cluster with custom config
-	clientset, restConfig, cleanup, err := utils.SetupKindCluster(ctx, customCfg, logger)
+	clientset, restConfig, cleanup, err := SetupKindCluster(ctx, customCfg, logger)
 	defer cleanup() // always call cleanup
 	if err != nil {
 		t.Fatalf("Failed to setup kind cluster: %v", err)
@@ -154,6 +197,22 @@ func TestWithKindCluster(t *testing.T) {
 		t.Errorf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
 	}
 
+	// Verify configured node labels are applied to worker nodes
+	workerNodes := 0
+	for _, node := range nodes.Items {
+		// Check if this is a worker node (not a control-plane)
+		if _, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; !isControlPlane {
+			workerNodes++
+			// Verify all configured labels are present
+			for k, expectedV := range customCfg.WorkerNodeLabels {
+				if actualV, exists := node.Labels[k]; !exists || actualV != expectedV {
+					t.Errorf("Expected label %s=%s on worker node %s, but got %s", k, expectedV, node.Name, actualV)
+				}
+			}
+		}
+	}
+	fmt.Printf("✅ Verified labels on %d worker nodes\n", workerNodes)
+
 	// Create the namespace for Grove installation
 	namespace := "grove-system"
 	_, err = clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
@@ -167,11 +226,26 @@ func TestWithKindCluster(t *testing.T) {
 	fmt.Printf("✅ Created namespace: %s\n", namespace)
 
 	// Install Grove with timing on Kind cluster
-	groveConfig := utils.GroveInstallConfigV0_1_0_Alpha1()
+	groveConfig := GroveInstallConfigV0_1_0_Alpha1()
 	groveConfig.ReleaseName = "grove-kind-test"
 	groveConfig.Namespace = namespace
 	// Use the same REST config as the cluster
 	groveConfig.RestConfig = restConfig
+
+	// Add tolerations for control-plane and Grove e2e taints so Grove can schedule on all nodes
+	groveConfig.Values["tolerations"] = []map[string]interface{}{
+		{
+			"key":      "node-role.kubernetes.io/control-plane",
+			"operator": "Exists",
+			"effect":   "NoSchedule",
+		},
+		{
+			"key":      "node_role.e2e.grove.nvidia.com",
+			"operator": "Equal",
+			"value":    "agent",
+			"effect":   "NoSchedule",
+		},
+	}
 
 	groveResult, err := InstallOrUpgradeGroveWithTiming(t, groveConfig, logger)
 	if err != nil {
@@ -182,7 +256,7 @@ func TestWithKindCluster(t *testing.T) {
 		groveResult.Duration, groveResult.Release.Name, groveResult.Release.Namespace)
 
 	// Apply workload1.yaml and wait for all pods to be ready
-	workloadConfig := &utils.WorkloadConfig{
+	workloadConfig := &WorkloadConfig{
 		YAMLFilePath: "/Users/gflarity/git/grove/operator/ci/workloads/workload1.yaml",
 		Namespace:    namespace,
 		RestConfig:   restConfig,
@@ -190,7 +264,7 @@ func TestWithKindCluster(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload1.yaml and waiting for pods to be ready...\n")
-	if err := utils.ApplyYAMLAndWaitForPods(ctx, workloadConfig, logger); err != nil {
+	if err := ApplyYAMLAndWaitForPods(ctx, workloadConfig, logger); err != nil {
 		t.Fatalf("Failed to apply workload and wait for pods: %v", err)
 	}
 
@@ -205,13 +279,13 @@ type GroveInstallResult struct {
 
 // InstallGroveWithTiming installs Grove and measures the installation time
 // It prints the timing information and returns both the release and duration
-func InstallGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig, logger *utils.CILogger) (*GroveInstallResult, error) {
+func InstallGroveWithTiming(t *testing.T, config *GroveInstallConfig, logger *CILogger) (*GroveInstallResult, error) {
 	t.Helper()
 
 	start := time.Now()
 	logger.Info("🚀 Starting Grove installation...")
 
-	rel, err := utils.InstallGrove(config, logger)
+	rel, err := InstallGrove(config, logger)
 	duration := time.Since(start)
 
 	result := &GroveInstallResult{
@@ -232,13 +306,13 @@ func InstallGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig, logg
 
 // InstallOrUpgradeGroveWithTiming installs or upgrades Grove and measures the time
 // It prints the timing information and returns both the release and duration
-func InstallOrUpgradeGroveWithTiming(t *testing.T, config *utils.GroveInstallConfig, logger *utils.CILogger) (*GroveInstallResult, error) {
+func InstallOrUpgradeGroveWithTiming(t *testing.T, config *GroveInstallConfig, logger *CILogger) (*GroveInstallResult, error) {
 	t.Helper()
 
 	start := time.Now()
 	logger.Info("🚀 Starting Grove install/upgrade...")
 
-	rel, err := utils.InstallOrUpgradeGrove(config, logger)
+	rel, err := InstallOrUpgradeGrove(config, logger)
 	duration := time.Since(start)
 
 	result := &GroveInstallResult{

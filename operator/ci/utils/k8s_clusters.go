@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/k3d-io/k3d/v5/pkg/client"
 	"github.com/k3d-io/k3d/v5/pkg/config"
@@ -18,6 +19,13 @@ import (
 	"sigs.k8s.io/kind/pkg/cluster"
 )
 
+// NodeTaint represents a Kubernetes node taint
+type NodeTaint struct {
+	Key    string
+	Value  string
+	Effect string
+}
+
 // ClusterConfig holds configuration for creating a k3d cluster
 type ClusterConfig struct {
 	Name             string
@@ -27,7 +35,8 @@ type ClusterConfig struct {
 	HostPort         string
 	LoadBalancerPort string
 	AgentNodeLabels  map[string]string
-	WorkerMemory     string // Memory allocation for worker/agent nodes (e.g., "150m")
+	AgentNodeTaints  []NodeTaint // Taints to apply to agent nodes
+	WorkerMemory     string      // Memory allocation for worker/agent nodes (e.g., "150m")
 }
 
 // DefaultClusterConfig returns a sensible default cluster configuration
@@ -88,23 +97,16 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 		}
 	}
 
-	// Always add the required e2e node label and taint for Grove testing
-	clusterConfig.Options.K3sOptions.NodeLabels = append(
-		clusterConfig.Options.K3sOptions.NodeLabels,
-		v1alpha5.LabelWithNodeFilters{
-			Label:       "node_role.e2e.grove.nvidia.com=agent",
-			NodeFilters: []string{"agent:*"},
-		},
-	)
-
-	// Add the required node taint for Grove testing
-	clusterConfig.Options.K3sOptions.ExtraArgs = append(
-		clusterConfig.Options.K3sOptions.ExtraArgs,
-		v1alpha5.K3sArgWithNodeFilters{
-			Arg:         "--node-taint=node_role.e2e.grove.nvidia.com=agent:NoSchedule",
-			NodeFilters: []string{"agent:*"},
-		},
-	)
+	// Apply agent node taints if specified
+	for _, taint := range cfg.AgentNodeTaints {
+		clusterConfig.Options.K3sOptions.ExtraArgs = append(
+			clusterConfig.Options.K3sOptions.ExtraArgs,
+			v1alpha5.K3sArgWithNodeFilters{
+				Arg:         fmt.Sprintf("--node-taint=%s=%s:%s", taint.Key, taint.Value, taint.Effect),
+				NodeFilters: []string{"agent:*"},
+			},
+		)
+	}
 
 	// Transform configuration
 	k3dConfig, err := config.TransformSimpleToClusterConfig(ctx, runtimes.Docker, clusterConfig, "")
@@ -164,11 +166,12 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 
 // KindClusterConfig holds configuration for creating a kind cluster
 type KindClusterConfig struct {
-	Name          string
-	ControlPlanes int
-	Workers       int
-	Image         string
-	WorkerMemory  string // Memory allocation for worker nodes (e.g., "150m")
+	Name             string
+	ControlPlanes    int
+	Workers          int
+	Image            string
+	WorkerNodeLabels map[string]string // Labels to apply to worker nodes
+	WorkerNodeTaints []NodeTaint       // Taints to apply to worker nodes
 }
 
 // DefaultKindClusterConfig returns a sensible default kind cluster configuration
@@ -178,11 +181,12 @@ func DefaultKindClusterConfig() KindClusterConfig {
 		ControlPlanes: 1,
 		Workers:       2,
 		Image:         "", // Empty means use kind's default
-		WorkerMemory:  "150m",
 	}
 }
 
 // SetupKindCluster creates a kind cluster and returns a kubernetes clientset and REST config
+// Note that kind clsuters don't support total memory limits unlike k3d, this is here incase
+// we still want to use Kind for some reason
 func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, func(), error) {
 	logger.Infof("📝 Preparing kind cluster configuration for '%s'...", cfg.Name)
 
@@ -216,14 +220,43 @@ func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger
 			node.Image = cfg.Image
 		}
 
-		// Configure memory reservation for worker nodes if specified
-		if cfg.WorkerMemory != "" {
-			node.KubeadmConfigPatches = []string{
-				fmt.Sprintf(`kind: JoinConfiguration
-nodeRegistration:
-  kubeletExtraArgs:
-    system-reserved: memory=%s`, cfg.WorkerMemory),
+		// Build node labels string for kubelet
+		var allLabels []string
+
+		// Add custom worker node labels, if provided
+		if len(cfg.WorkerNodeLabels) > 0 {
+			for k, v := range cfg.WorkerNodeLabels {
+				allLabels = append(allLabels, fmt.Sprintf("%s=%s", k, v))
 			}
+		}
+
+		// Apply labels and taints via kubeadmConfigPatches if specified
+		if len(allLabels) > 0 || len(cfg.WorkerNodeTaints) > 0 {
+			var configParts []string
+
+			// Build kubeletExtraArgs section if labels are specified
+			if len(allLabels) > 0 {
+				nodeLabelsStr := strings.Join(allLabels, ",")
+				configParts = append(configParts, fmt.Sprintf(`  kubeletExtraArgs:
+    node-labels: "%s"`, nodeLabelsStr))
+			}
+
+			// Build taints section if taints are specified
+			if len(cfg.WorkerNodeTaints) > 0 {
+				taintLines := []string{"  taints:"}
+				for _, taint := range cfg.WorkerNodeTaints {
+					taintLines = append(taintLines, fmt.Sprintf(`  - key: "%s"
+    value: "%s"
+    effect: "%s"`, taint.Key, taint.Value, taint.Effect))
+				}
+				configParts = append(configParts, strings.Join(taintLines, "\n"))
+			}
+
+			configPatch := fmt.Sprintf(`kind: JoinConfiguration
+nodeRegistration:
+%s`, strings.Join(configParts, "\n"))
+
+			node.KubeadmConfigPatches = []string{configPatch}
 		}
 
 		kindConfig.Nodes = append(kindConfig.Nodes, node)
