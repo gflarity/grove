@@ -546,10 +546,6 @@ func waitForPodCliqueSetPodsReady(ctx context.Context, config *WorkloadConfig, p
 			return false, nil
 		}
 
-		if !allReady {
-			logger.Infof("⏳ Waiting for %d more pods to become ready...", totalPods-readyPods)
-		}
-
 		return allReady, nil
 	})
 }
