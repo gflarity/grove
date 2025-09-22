@@ -34,12 +34,6 @@ type AppliedResource struct {
 	GVR       schema.GroupVersionResource
 }
 
-// AppliedPodCliqueSet holds information about an applied PodCliqueSet (for backward compatibility)
-type AppliedPodCliqueSet struct {
-	Name      string
-	Namespace string
-}
-
 // WorkloadConfig holds configuration for applying workload YAML files
 type WorkloadConfig struct {
 	// YAMLFilePath is the path to the YAML file to apply
@@ -54,6 +48,13 @@ type WorkloadConfig struct {
 	PodLabelSelector string
 }
 
+// ApplyYAMLContent applies YAML content directly to Kubernetes
+func ApplyYAMLContent(ctx context.Context, yamlContent string, namespace string, restConfig *rest.Config, logger *CILogger) ([]AppliedResource, error) {
+	logger.Infof("📄 Applying YAML content...")
+
+	return applyYAMLData(ctx, []byte(yamlContent), namespace, restConfig, logger)
+}
+
 // ApplyYAML applies a YAML file containing Kubernetes resources
 func ApplyYAML(ctx context.Context, config *WorkloadConfig, logger *CILogger) ([]AppliedResource, error) {
 	logger.Infof("📄 Applying resources from %s...", config.YAMLFilePath)
@@ -64,14 +65,20 @@ func ApplyYAML(ctx context.Context, config *WorkloadConfig, logger *CILogger) ([
 		return nil, fmt.Errorf("failed to read YAML file %s: %w", config.YAMLFilePath, err)
 	}
 
+	return applyYAMLData(ctx, yamlData, config.Namespace, config.RestConfig, logger)
+}
+
+// applyYAMLData is the common function that applies YAML data to Kubernetes
+func applyYAMLData(ctx context.Context, yamlData []byte, namespace string, restConfig *rest.Config, logger *CILogger) ([]AppliedResource, error) {
+
 	// Create dynamic client
-	dynamicClient, err := dynamic.NewForConfig(config.RestConfig)
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
 	// Create REST mapper for dynamic GVR discovery
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config.RestConfig)
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create discovery client: %w", err)
 	}
@@ -109,8 +116,8 @@ func ApplyYAML(ctx context.Context, config *WorkloadConfig, logger *CILogger) ([
 		}
 
 		// Override namespace if specified
-		if config.Namespace != "" {
-			unstructuredObj.SetNamespace(config.Namespace)
+		if namespace != "" {
+			unstructuredObj.SetNamespace(namespace)
 		}
 		if unstructuredObj.GetNamespace() == "" {
 			unstructuredObj.SetNamespace("default")
@@ -276,280 +283,6 @@ func getGVRFromGVK(restMapper meta.RESTMapper, gvk schema.GroupVersionKind) (sch
 	return mapping.Resource, nil
 }
 
-// waitForGroveOperatorReady waits for the Grove operator to be ready before applying workloads
-func waitForGroveOperatorReady(ctx context.Context, config *WorkloadConfig, logger *CILogger) error {
-	clientset, err := kubernetes.NewForConfig(config.RestConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create clientset: %w", err)
-	}
-
-	// Grove operator is always installed in grove-system namespace
-	namespace := "grove-system"
-
-	logger.Infof("⏳ Waiting for Grove operator to be ready in namespace %s...", namespace)
-
-	// Wait for the Grove operator deployment to be ready
-	return wait.PollUntilContextTimeout(ctx, 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
-		// Check if the Grove operator deployment is ready
-		deployment, err := clientset.AppsV1().Deployments(namespace).Get(ctx, "grove-operator", metav1.GetOptions{})
-		if err != nil {
-			if errors.IsNotFound(err) {
-				logger.Info("⏳ Grove operator deployment not found yet, waiting...")
-				return false, nil
-			}
-			logger.Errorf("Failed to get Grove operator deployment: %v", err)
-			return false, nil
-		}
-
-		// Check if deployment is ready
-		if deployment.Status.ReadyReplicas > 0 && deployment.Status.ReadyReplicas == deployment.Status.Replicas {
-			logger.Info("✅ Grove operator deployment is ready!")
-
-			// Also check if the webhook service has endpoints
-			endpoints, err := clientset.CoreV1().Endpoints(namespace).Get(ctx, "grove-operator", metav1.GetOptions{})
-			if err != nil {
-				logger.Infof("⏳ Grove operator service endpoints not ready yet: %v", err)
-				return false, nil
-			}
-
-			if len(endpoints.Subsets) > 0 && len(endpoints.Subsets[0].Addresses) > 0 {
-				logger.Info("✅ Grove operator webhook service endpoints are ready!")
-
-				// Check if the webhook server is actually ready by verifying webhook configurations
-				logger.Info("⏳ Checking webhook server readiness...")
-				if checkWebhookReadiness(ctx, clientset, config.RestConfig, namespace, logger) {
-					logger.Info("✅ Grove operator webhook server is ready!")
-					return true, nil
-				}
-
-				logger.Info("⏳ Grove operator webhook server not ready yet...")
-				return false, nil
-			}
-
-			logger.Info("⏳ Grove operator webhook service endpoints not ready yet...")
-			return false, nil
-		}
-
-		logger.Infof("⏳ Grove operator deployment not ready yet (ready: %d/%d)", deployment.Status.ReadyReplicas, deployment.Status.Replicas)
-		return false, nil
-	})
-}
-
-// checkWebhookReadiness checks if the Grove operator webhook server is ready by verifying webhook configurations
-func checkWebhookReadiness(ctx context.Context, clientset *kubernetes.Clientset, restConfig *rest.Config, namespace string, logger *CILogger) bool {
-	// Check that the webhook configurations are properly set up with CA bundles
-	// This indicates that the cert-manager has finished setting up certificates
-	// and the webhook server should be ready to accept requests
-
-	// 1. Check if the webhook server certificate secret exists
-	logger.Info("⏳ Checking webhook server certificate secret...")
-	_, err := clientset.CoreV1().Secrets(namespace).Get(ctx, "grove-webhook-server-cert", metav1.GetOptions{})
-	if err != nil {
-		logger.Infof("Webhook certificate secret not ready: %v", err)
-		return false
-	}
-	logger.Info("✅ Webhook certificate secret exists")
-
-	// 2. Check ValidatingWebhookConfiguration has CA bundle set
-	logger.Info("⏳ Checking ValidatingWebhookConfiguration...")
-	vwc, err := clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, "podcliqueset-validating-webhook", metav1.GetOptions{})
-	if err != nil {
-		logger.Infof("ValidatingWebhookConfiguration not ready: %v", err)
-		return false
-	}
-	if len(vwc.Webhooks) == 0 || len(vwc.Webhooks[0].ClientConfig.CABundle) == 0 {
-		logger.Info("ValidatingWebhookConfiguration CA bundle not set yet")
-		return false
-	}
-	logger.Info("✅ ValidatingWebhookConfiguration has CA bundle")
-
-	// 3. Check MutatingWebhookConfiguration has CA bundle set
-	logger.Info("⏳ Checking MutatingWebhookConfiguration...")
-	mwc, err := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(ctx, "podcliqueset-defaulting-webhook", metav1.GetOptions{})
-	if err != nil {
-		logger.Infof("MutatingWebhookConfiguration not ready: %v", err)
-		return false
-	}
-	if len(mwc.Webhooks) == 0 || len(mwc.Webhooks[0].ClientConfig.CABundle) == 0 {
-		logger.Info("MutatingWebhookConfiguration CA bundle not set yet")
-		return false
-	}
-	logger.Info("✅ MutatingWebhookConfiguration has CA bundle")
-
-	// 4. Test webhook connectivity by creating a test PodCliqueSet to see if webhook responds
-	logger.Info("⏳ Testing webhook server connectivity...")
-	if testWebhookConnectivity(ctx, restConfig, namespace, logger) {
-		logger.Info("✅ Webhook server is responding to requests")
-		return true
-	}
-
-	logger.Info("⏳ Webhook server not responding yet...")
-	return false
-}
-
-// testWebhookConnectivity tests if the webhook server is actually responding by attempting to create a test resource
-func testWebhookConnectivity(ctx context.Context, restConfig *rest.Config, namespace string, logger *CILogger) bool {
-	// Create clientset for testing
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		logger.Infof("Failed to create clientset for webhook test: %v", err)
-		return false
-	}
-
-	// Create a test namespace for webhook connectivity test
-	testNamespace := "webhook-test-" + fmt.Sprintf("%d", time.Now().Unix())
-
-	// Create the test namespace
-	_, err = clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testNamespace,
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		logger.Infof("Failed to create test namespace: %v", err)
-		return false
-	}
-
-	// Clean up the test namespace regardless of outcome
-	defer func() {
-		_ = clientset.CoreV1().Namespaces().Delete(ctx, testNamespace, metav1.DeleteOptions{})
-	}()
-
-	// Create a minimal test PodCliqueSet to trigger the webhook
-	testPCS := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "grove.io/v1alpha1",
-			"kind":       "PodCliqueSet",
-			"metadata": map[string]interface{}{
-				"name":      "webhook-test",
-				"namespace": testNamespace,
-			},
-			"spec": map[string]interface{}{
-				"replicas": 1,
-				"template": map[string]interface{}{
-					"cliques": []interface{}{
-						map[string]interface{}{
-							"name": "test-clique",
-							"template": map[string]interface{}{
-								"spec": map[string]interface{}{
-									"containers": []interface{}{
-										map[string]interface{}{
-											"name":  "test",
-											"image": "nginx:latest",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// Try to create the test PodCliqueSet using dynamic client
-	dynamicClient, err := dynamic.NewForConfig(restConfig)
-	if err != nil {
-		logger.Infof("Failed to create dynamic client for webhook test: %v", err)
-		return false
-	}
-
-	gvr := schema.GroupVersionResource{
-		Group:    "grove.io",
-		Version:  "v1alpha1",
-		Resource: "podcliquesets",
-	}
-
-	// Attempt to create the test resource - if webhook is working, this should succeed or fail with validation error
-	// If webhook is not ready, we'll get a connection error
-	_, err = dynamicClient.Resource(gvr).Namespace(testNamespace).Create(ctx, testPCS, metav1.CreateOptions{})
-	if err != nil {
-		// Check if it's a webhook connectivity error (502 Bad Gateway, connection refused, etc.)
-		errStr := err.Error()
-		if strings.Contains(errStr, "502 Bad Gateway") ||
-			strings.Contains(errStr, "connection refused") ||
-			strings.Contains(errStr, "proxy error") ||
-			strings.Contains(errStr, "failed to call webhook") {
-			logger.Info("⏳ Webhook server not ready yet (connectivity test pending)")
-			return false
-		}
-		// If it's a validation error or other webhook response, that means webhook is working
-		logger.Infof("Webhook responded (validation error expected): %v", err)
-	}
-
-	// Clean up the test resource if it was created
-	_ = dynamicClient.Resource(gvr).Namespace(testNamespace).Delete(ctx, "webhook-test", metav1.DeleteOptions{})
-
-	return true
-}
-
-// waitForPodCliqueSetPodsReady waits for all pods created by the PodCliqueSet resources to be ready
-func waitForPodCliqueSetPodsReady(ctx context.Context, config *WorkloadConfig, podCliqueSets []AppliedPodCliqueSet, logger *CILogger) error {
-	// Create clientset for pod operations
-	clientset, err := kubernetes.NewForConfig(config.RestConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create clientset: %w", err)
-	}
-
-	// Create a context with timeout
-	timeoutCtx, cancel := context.WithTimeout(ctx, config.Timeout)
-	defer cancel()
-
-	// Extract PodCliqueSet names and namespaces
-	var podCliqueSetNames []string
-	var namespaces []string
-
-	for _, pcs := range podCliqueSets {
-		podCliqueSetNames = append(podCliqueSetNames, pcs.Name)
-		namespace := pcs.Namespace
-		if namespace == "" {
-			namespace = "default"
-		}
-		namespaces = append(namespaces, namespace)
-	}
-
-	logger.Infof("⏳ Waiting for pods from PodCliqueSet resources: %v", podCliqueSetNames)
-
-	// Wait for all pods to be ready
-	return wait.PollUntilContextTimeout(timeoutCtx, 5*time.Second, config.Timeout, true, func(ctx context.Context) (bool, error) {
-		allReady := true
-		totalPods := 0
-		readyPods := 0
-
-		for i, pcsName := range podCliqueSetNames {
-			namespace := namespaces[i]
-
-			// List pods with labels that match the PodCliqueSet
-			labelSelector := fmt.Sprintf("app.kubernetes.io/part-of=%s", pcsName)
-			pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-				LabelSelector: labelSelector,
-			})
-			if err != nil {
-				logger.Errorf("Failed to list pods for PodCliqueSet %s: %v", pcsName, err)
-				return false, nil // Continue polling
-			}
-
-			for _, pod := range pods.Items {
-				totalPods++
-				if isPodReady(&pod) {
-					readyPods++
-				} else {
-					allReady = false
-				}
-			}
-		}
-
-		logger.Infof("📊 Pod status: %d/%d ready", readyPods, totalPods)
-
-		if totalPods == 0 {
-			logger.Info("⏳ No pods found yet, Grove operator may still be creating resources...")
-			return false, nil
-		}
-
-		return allReady, nil
-	})
-}
-
 // waitForRegularPods waits for regular pods (non-PodCliqueSet) to be ready
 func waitForRegularPods(ctx context.Context, clientset *kubernetes.Clientset, namespace string, logger *CILogger) error {
 	if namespace == "" {
@@ -583,6 +316,16 @@ func waitForRegularPods(ctx context.Context, clientset *kubernetes.Clientset, na
 		logger.Infof("📊 Pod status: %d/%d ready", readyCount, len(pods.Items))
 		return allReady, nil
 	})
+}
+
+// WaitForPodsInNamespace waits for all pods in a namespace to be ready
+func WaitForPodsInNamespace(ctx context.Context, namespace string, restConfig *rest.Config, timeout time.Duration, logger *CILogger) error {
+	workloadConfig := &WorkloadConfig{
+		RestConfig: restConfig,
+		Timeout:    timeout,
+	}
+
+	return WaitForPods(ctx, workloadConfig, []string{namespace}, logger)
 }
 
 // isPodReady checks if a pod is ready

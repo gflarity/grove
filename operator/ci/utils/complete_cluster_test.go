@@ -130,6 +130,50 @@ func TestWithK3DCluster(t *testing.T) {
 	fmt.Printf("⏱️  Grove installation took %v (release: %s, namespace: %s)\n",
 		groveResult.Duration, groveResult.Release.Name, groveResult.Release.Namespace)
 
+	// Wait for Grove pods to be ready
+	if err := WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
+		t.Fatalf("Grove pods not ready: %v", err)
+	}
+
+	// Install Kai Scheduler with timing
+	kaiConfig := KaiInstallConfigLatest("v0.9.3")
+	// Use the same REST config as the cluster
+	kaiConfig.RestConfig = restConfig
+
+	// Add tolerations for control-plane taints so Kai can schedule on all nodes
+	kaiConfig.Values["global"] = map[string]interface{}{
+		"tolerations": []map[string]interface{}{
+			{
+				"key":      "node-role.kubernetes.io/control-plane",
+				"operator": "Exists",
+				"effect":   "NoSchedule",
+			},
+		},
+	}
+
+	kaiResult, err := InstallKaiWithTiming(t, kaiConfig, logger)
+	if err != nil {
+		t.Fatalf("Kai Scheduler installation failed: %v", err)
+	}
+
+	fmt.Printf("⏱️  Kai Scheduler installation took %v (release: %s, namespace: %s)\n",
+		kaiResult.Duration, kaiResult.Release.Name, kaiResult.Release.Namespace)
+
+	// Wait for Kai Scheduler pods to be ready
+	if err := WaitForKaiPodsReady(ctx, restConfig, logger); err != nil {
+		t.Fatalf("Kai Scheduler pods not ready: %v", err)
+	}
+
+	// Wait for Kai CRDs to be ready
+	if err := WaitForKaiCRDs(ctx, restConfig, logger); err != nil {
+		t.Fatalf("Failed to wait for Kai CRDs: %v", err)
+	}
+
+	// Create default queue for Kai scheduler
+	if err := CreateDefaultKaiQueue(ctx, restConfig, logger); err != nil {
+		t.Fatalf("Failed to create default queue for Kai scheduler: %v", err)
+	}
+
 	// Apply workload1.yaml and wait for all pods to be ready
 	workloadConfig := &WorkloadConfig{
 		YAMLFilePath: "/Users/gflarity/git/grove/operator/ci/workloads/workload1.yaml",
@@ -143,7 +187,7 @@ func TestWithK3DCluster(t *testing.T) {
 		t.Fatalf("Failed to apply workload and wait for pods: %v", err)
 	}
 
-	fmt.Printf("🎉 Test completed successfully! All workload pods are ready.\n")
+	fmt.Printf("🎉 Test completed successfully! Grove and Kai pods ready, all workload pods are ready.\n")
 }
 
 // Example of how to use kind with custom configuration
@@ -255,6 +299,50 @@ func TestWithKindCluster(t *testing.T) {
 	fmt.Printf("⏱️  Grove installation took %v (release: %s, namespace: %s)\n",
 		groveResult.Duration, groveResult.Release.Name, groveResult.Release.Namespace)
 
+	// Wait for Grove pods to be ready
+	if err := WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
+		t.Fatalf("Grove pods not ready: %v", err)
+	}
+
+	// Install Kai Scheduler with timing
+	kaiConfig := KaiInstallConfigLatest("v0.9.3")
+	// Use the same REST config as the cluster
+	kaiConfig.RestConfig = restConfig
+
+	// Add tolerations for control-plane and Grove e2e taints so Kai can schedule on all nodes
+	kaiConfig.Values["global"] = map[string]interface{}{
+		"tolerations": []map[string]interface{}{
+			{
+				"key":      "node-role.kubernetes.io/control-plane",
+				"operator": "Exists",
+				"effect":   "NoSchedule",
+			},
+		},
+	}
+
+	kaiResult, err := InstallOrUpgradeKaiWithTiming(t, kaiConfig, logger)
+	if err != nil {
+		t.Fatalf("Kai Scheduler installation failed: %v", err)
+	}
+
+	fmt.Printf("⏱️  Kai Scheduler installation took %v (release: %s, namespace: %s)\n",
+		kaiResult.Duration, kaiResult.Release.Name, kaiResult.Release.Namespace)
+
+	// Wait for Kai Scheduler pods to be ready
+	if err := WaitForKaiPodsReady(ctx, restConfig, logger); err != nil {
+		t.Fatalf("Kai Scheduler pods not ready: %v", err)
+	}
+
+	// Wait for Kai CRDs to be ready
+	if err := WaitForKaiCRDs(ctx, restConfig, logger); err != nil {
+		t.Fatalf("Failed to wait for Kai CRDs: %v", err)
+	}
+
+	// Create default queue for Kai scheduler
+	if err := CreateDefaultKaiQueue(ctx, restConfig, logger); err != nil {
+		t.Fatalf("Failed to create default queue for Kai scheduler: %v", err)
+	}
+
 	// Apply workload1.yaml and wait for all pods to be ready
 	workloadConfig := &WorkloadConfig{
 		YAMLFilePath: "/Users/gflarity/git/grove/operator/ci/workloads/workload1.yaml",
@@ -268,11 +356,17 @@ func TestWithKindCluster(t *testing.T) {
 		t.Fatalf("Failed to apply workload and wait for pods: %v", err)
 	}
 
-	fmt.Printf("🎉 Kind test completed successfully! All workload pods are ready.\n")
+	fmt.Printf("🎉 Kind test completed successfully! Grove and Kai pods ready, all workload pods are ready.\n")
 }
 
 // GroveInstallResult holds the result of a timed Grove installation
 type GroveInstallResult struct {
+	Release  *release.Release
+	Duration time.Duration
+}
+
+// KaiInstallResult holds the result of a timed Kai installation
+type KaiInstallResult struct {
 	Release  *release.Release
 	Duration time.Duration
 }
@@ -325,6 +419,60 @@ func InstallOrUpgradeGroveWithTiming(t *testing.T, config *GroveInstallConfig, l
 		return result, err
 	} else {
 		logger.Infof("✅ Grove install/upgrade completed successfully in %v (release: %s, namespace: %s)",
+			duration, rel.Name, rel.Namespace)
+	}
+
+	return result, nil
+}
+
+// InstallKaiWithTiming installs Kai Scheduler and measures the installation time
+// It prints the timing information and returns both the release and duration
+func InstallKaiWithTiming(t *testing.T, config *KaiInstallConfig, logger *CILogger) (*KaiInstallResult, error) {
+	t.Helper()
+
+	start := time.Now()
+	logger.Info("🚀 Starting Kai Scheduler installation...")
+
+	rel, err := InstallKai(config, logger)
+	duration := time.Since(start)
+
+	result := &KaiInstallResult{
+		Release:  rel,
+		Duration: duration,
+	}
+
+	if err != nil {
+		logger.Errorf("❌ Kai Scheduler installation failed after %v: %v", duration, err)
+		return result, err
+	} else {
+		logger.Infof("✅ Kai Scheduler installation completed successfully in %v (release: %s, namespace: %s)",
+			duration, rel.Name, rel.Namespace)
+	}
+
+	return result, nil
+}
+
+// InstallOrUpgradeKaiWithTiming installs or upgrades Kai Scheduler and measures the time
+// It prints the timing information and returns both the release and duration
+func InstallOrUpgradeKaiWithTiming(t *testing.T, config *KaiInstallConfig, logger *CILogger) (*KaiInstallResult, error) {
+	t.Helper()
+
+	start := time.Now()
+	logger.Info("🚀 Starting Kai Scheduler install/upgrade...")
+
+	rel, err := InstallOrUpgradeKai(config, logger)
+	duration := time.Since(start)
+
+	result := &KaiInstallResult{
+		Release:  rel,
+		Duration: duration,
+	}
+
+	if err != nil {
+		logger.Errorf("❌ Kai Scheduler install/upgrade failed after %v: %v", duration, err)
+		return result, err
+	} else {
+		logger.Infof("✅ Kai Scheduler install/upgrade completed successfully in %v (release: %s, namespace: %s)",
 			duration, rel.Name, rel.Namespace)
 	}
 
