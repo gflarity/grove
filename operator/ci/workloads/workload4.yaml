@@ -12,11 +12,14 @@ spec:
     cliqueStartupType: CliqueStartupTypeInOrder
     cliques:
       - name: pc-a
+        labels:
+          kai.scheduler/queue: default
         spec:
           roleName: role-a
           replicas: 2
           minAvailable: 1
           podSpec:
+            schedulerName: kai-scheduler
             affinity:
               nodeAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
@@ -38,11 +41,14 @@ spec:
                   requests:
                     memory: 80Mi
       - name: pc-b
+        labels:
+          kai.scheduler/queue: default
         spec:
           roleName: role-b
           replicas: 1
           minAvailable: 1
           podSpec:
+            schedulerName: kai-scheduler
             affinity:
               nodeAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
@@ -64,11 +70,14 @@ spec:
                   requests:
                     memory: 80Mi
       - name: pc-c
+        labels:
+          kai.scheduler/queue: default
         spec:
           roleName: role-c
           replicas: 3
           minAvailable: 1
           podSpec:
+            schedulerName: kai-scheduler
             affinity:
               nodeAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
