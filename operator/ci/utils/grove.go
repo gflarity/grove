@@ -6,9 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/release"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -29,43 +26,23 @@ type AppliedPodCliqueSet struct {
 
 // GroveInstallConfig holds configuration for installing Grove
 type GroveInstallConfig struct {
-	// ReleaseName is the name of the Helm release (default: "grove")
-	ReleaseName string
-	// ChartRef is the OCI chart reference (default: "oci://ghcr.io/nvidia/grove/grove-charts")
-	ChartRef string
-	// ChartVersion is the version of the chart to install (default: "v0.1.0-alpha.1")
-	ChartVersion string
-	// Namespace is the Kubernetes namespace to install into (default: "default")
-	Namespace string
-	// Values is a map of custom values to pass to the chart
-	Values map[string]interface{}
-	// Logger is the logger to use for output (default: uses CILogger)
-	Logger func(format string, v ...interface{})
-	// RestConfig is the Kubernetes REST config to use (optional, defaults to system kubeconfig)
-	RestConfig *rest.Config
+	BaseInstallConfig
 }
 
-// ToHelmInstallConfig converts GroveInstallConfig to HelmInstallConfig
-func (c *GroveInstallConfig) ToHelmInstallConfig() *HelmInstallConfig {
-	return &HelmInstallConfig{
-		ReleaseName:     c.ReleaseName,
-		ChartRef:        c.ChartRef,
-		ChartVersion:    c.ChartVersion,
-		Namespace:       c.Namespace,
-		CreateNamespace: false, // Grove installation doesn't create namespace by default
-		Values:          c.Values,
-		Logger:          c.Logger,
-		RestConfig:      c.RestConfig,
-	}
+// Component-specific configuration methods for ComponentInstallConfig interface
+func (c *GroveInstallConfig) GetCreateNamespace() bool { return false } // Grove installation doesn't create namespace by default
+func (c *GroveInstallConfig) GetWait() bool            { return false } // Default wait behavior
+func (c *GroveInstallConfig) GetGenerateName() bool    { return false } // Default generate name behavior
+
+func (c *GroveInstallConfig) GetDefaultReleaseName() string { return "grove" }
+func (c *GroveInstallConfig) GetDefaultChartRef() string {
+	return "oci://ghcr.io/nvidia/grove/grove-charts"
 }
+func (c *GroveInstallConfig) GetDefaultNamespace() string { return "default" }
 
-// Validate validates required fields and normalizes optional ones.
-// It returns an error if any required field is missing.
-func (c *GroveInstallConfig) Validate() error {
-	if c == nil {
-		return fmt.Errorf("config cannot be nil")
-	}
-
+// ValidateComponent provides component-specific validation
+func (c *GroveInstallConfig) ValidateComponent() error {
+	// Grove requires all fields to be present (no defaults for some fields)
 	var missing []string
 	if c.ReleaseName == "" {
 		missing = append(missing, "release name")
@@ -83,147 +60,44 @@ func (c *GroveInstallConfig) Validate() error {
 		return fmt.Errorf("missing required fields: %s", strings.Join(missing, ", "))
 	}
 
-	if c.Values == nil {
-		c.Values = make(map[string]interface{})
-	}
-	if c.Logger == nil {
-		// Create a default logger that writes to stdout
-		defaultLogger := NewCILogger(nil)
-		c.Logger = defaultLogger.Printf
-	}
-	return nil
+	return c.ValidateBase()
+}
+
+// ToHelmInstallConfig converts GroveInstallConfig to HelmInstallConfig (for backward compatibility)
+func (c *GroveInstallConfig) ToHelmInstallConfig() *HelmInstallConfig {
+	return ToHelmInstallConfig(c)
+}
+
+// Validate validates required fields and normalizes optional ones (for backward compatibility)
+func (c *GroveInstallConfig) Validate() error {
+	return ValidateComponentConfig(c)
 }
 
 // GroveInstallConfigV0_1_0_Alpha1 returns a configuration for Grove v0.1.0-alpha.1 installation
 func GroveInstallConfigV0_1_0_Alpha1() *GroveInstallConfig {
 	defaultLogger := NewCILogger(nil)
 	return &GroveInstallConfig{
-		ReleaseName:  "grove",
-		ChartRef:     "oci://ghcr.io/nvidia/grove/grove-charts",
-		ChartVersion: "v0.1.0-alpha.1",
-		Namespace:    "default",
-		Values:       make(map[string]interface{}),
-		Logger:       defaultLogger.Printf,
+		BaseInstallConfig: BaseInstallConfig{
+			ReleaseName:  "grove",
+			ChartRef:     "oci://ghcr.io/nvidia/grove/grove-charts",
+			ChartVersion: "v0.1.0-alpha.1",
+			Namespace:    "default",
+			Values:       make(map[string]interface{}),
+			Logger:       defaultLogger.Printf,
+		},
 	}
 }
 
 // InstallGrove installs Grove on a Kubernetes cluster using Helm
 // It returns the installed release and any error that occurred
 func InstallGrove(config *GroveInstallConfig, logger *CILogger) (*release.Release, error) {
-	if err := config.Validate(); err != nil {
-		return nil, err
-	}
-
-	// Override the logger in config with the passed logger
-	config.Logger = logger.Printf
-
-	// Convert to HelmInstallConfig
-	helmConfig := config.ToHelmInstallConfig()
-
-	config.Logger("Setting up Helm and Kubernetes configuration...")
-
-	// Set up Helm action configuration
-	actionConfig, _, err := setupHelmAction(helmConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	config.Logger("Locating and pulling chart %s version %s...", config.ChartRef, config.ChartVersion)
-
-	// Create a new Install action client
-	installClient := action.NewInstall(actionConfig)
-	installClient.Namespace = config.Namespace
-	installClient.ReleaseName = config.ReleaseName
-	installClient.Version = config.ChartVersion
-
-	// Set up chart path options for locating the chart
-	settings := cli.New()
-	installClient.ChartPathOptions.Version = config.ChartVersion
-	chartPath, err := installClient.ChartPathOptions.LocateChart(config.ChartRef, settings)
-	if err != nil {
-		return nil, fmt.Errorf("failed to locate chart: %w", err)
-	}
-	config.Logger("Chart located at: %s", chartPath)
-
-	// Load the chart from the located path
-	chart, err := loader.Load(chartPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load chart: %w", err)
-	}
-
-	config.Logger("Installing release: %s", config.ReleaseName)
-
-	// Perform the installation
-	rel, err := installClient.Run(chart, config.Values)
-	if err != nil {
-		return nil, fmt.Errorf("helm install failed: %w", err)
-	}
-
-	config.Logger("Success! Release '%s' installed in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
-	return rel, nil
+	return InstallComponent(config, logger)
 }
 
 // InstallOrUpgradeGrove installs Grove if it doesn't exist, or upgrades it if it does
 // It returns the installed/upgraded release and any error that occurred
 func InstallOrUpgradeGrove(config *GroveInstallConfig, logger *CILogger) (*release.Release, error) {
-	if err := config.Validate(); err != nil {
-		return nil, err
-	}
-
-	// Override the logger in config with the passed logger
-	config.Logger = logger.Printf
-
-	// Convert to HelmInstallConfig
-	helmConfig := config.ToHelmInstallConfig()
-
-	config.Logger("Setting up Helm and Kubernetes configuration...")
-
-	// Set up Helm action configuration
-	actionConfig, _, err := setupHelmAction(helmConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	config.Logger("Locating and pulling chart %s version %s...", config.ChartRef, config.ChartVersion)
-
-	// Create upgrade client first to locate the chart
-	upgradeClient := action.NewUpgrade(actionConfig)
-	upgradeClient.ChartPathOptions.Version = config.ChartVersion
-	settings := cli.New()
-	chartPath, err := upgradeClient.ChartPathOptions.LocateChart(config.ChartRef, settings)
-	if err != nil {
-		return nil, fmt.Errorf("failed to locate chart: %w", err)
-	}
-	config.Logger("Chart located at: %s", chartPath)
-
-	// Load the chart from the located path
-	chart, err := loader.Load(chartPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load chart: %w", err)
-	}
-
-	// Try upgrade first
-	config.Logger("Attempting to upgrade release: %s", config.ReleaseName)
-	upgradeClient.Install = false
-	if rel, err := upgradeClient.Run(config.ReleaseName, chart, config.Values); err == nil {
-		config.Logger("Success! Release '%s' upgraded in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
-		return rel, nil
-	}
-
-	// If upgrade failed, try install
-	config.Logger("Upgrade failed, attempting fresh install of release: %s", config.ReleaseName)
-	installClient := action.NewInstall(actionConfig)
-	installClient.Namespace = config.Namespace
-	installClient.ReleaseName = config.ReleaseName
-	installClient.Version = config.ChartVersion
-
-	rel, err := installClient.Run(chart, config.Values)
-	if err != nil {
-		return nil, fmt.Errorf("both upgrade and install failed: %w", err)
-	}
-
-	config.Logger("Success! Release '%s' installed in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
-	return rel, nil
+	return InstallOrUpgradeComponent(config, logger)
 }
 
 // WaitForGrovePodsReady waits for Grove operator pods to be ready

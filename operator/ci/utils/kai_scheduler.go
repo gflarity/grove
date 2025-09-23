@@ -32,9 +32,6 @@ import (
 	"time"
 
 	schedulingv2 "github.com/NVIDIA/KAI-scheduler/pkg/apis/scheduling/v2"
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/release"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -48,67 +45,34 @@ import (
 
 // KaiInstallConfig holds configuration for installing Kai Scheduler
 type KaiInstallConfig struct {
-	// ReleaseName is the name of the Helm release (default: "kai-scheduler")
-	ReleaseName string
-	// ChartRef is the OCI chart reference (default: "oci://ghcr.io/nvidia/kai-scheduler/kai-scheduler")
-	ChartRef string
-	// ChartVersion is the version of the chart to install
-	ChartVersion string
-	// Namespace is the Kubernetes namespace to install into (default: "kai-scheduler")
-	Namespace string
-	// Values is a map of custom values to pass to the chart
-	Values map[string]interface{}
-	// Logger is the logger to use for output (default: uses CILogger)
-	Logger func(format string, v ...interface{})
-	// RestConfig is the Kubernetes REST config to use (optional, defaults to system kubeconfig)
-	RestConfig *rest.Config
+	BaseInstallConfig
 }
 
-// ToHelmInstallConfig converts KaiInstallConfig to HelmInstallConfig
+// Component-specific configuration methods for ComponentInstallConfig interface
+func (c *KaiInstallConfig) GetCreateNamespace() bool { return true }  // Kai scheduler installation creates namespace by default
+func (c *KaiInstallConfig) GetWait() bool            { return false } // Default wait behavior
+func (c *KaiInstallConfig) GetGenerateName() bool    { return false } // Default generate name behavior
+
+func (c *KaiInstallConfig) GetDefaultReleaseName() string { return "kai-scheduler" }
+func (c *KaiInstallConfig) GetDefaultChartRef() string {
+	return "oci://ghcr.io/nvidia/kai-scheduler/kai-scheduler"
+}
+func (c *KaiInstallConfig) GetDefaultNamespace() string { return "kai-scheduler" }
+
+// ValidateComponent provides component-specific validation
+func (c *KaiInstallConfig) ValidateComponent() error {
+	// No additional validation needed for Kai Scheduler beyond base validation
+	return c.ValidateBase()
+}
+
+// ToHelmInstallConfig converts KaiInstallConfig to HelmInstallConfig (for backward compatibility)
 func (c *KaiInstallConfig) ToHelmInstallConfig() *HelmInstallConfig {
-	return &HelmInstallConfig{
-		ReleaseName:     c.ReleaseName,
-		ChartRef:        c.ChartRef,
-		ChartVersion:    c.ChartVersion,
-		Namespace:       c.Namespace,
-		CreateNamespace: true, // Kai scheduler installation creates namespace by default
-		Values:          c.Values,
-		Logger:          c.Logger,
-		RestConfig:      c.RestConfig,
-	}
+	return ToHelmInstallConfig(c)
 }
 
-// Validate validates required fields and normalizes optional ones.
+// Validate validates required fields and normalizes optional ones (for backward compatibility)
 func (c *KaiInstallConfig) Validate() error {
-	if c == nil {
-		return fmt.Errorf("config cannot be nil")
-	}
-
-	// Set defaults
-	if c.ReleaseName == "" {
-		c.ReleaseName = "kai-scheduler"
-	}
-	if c.ChartRef == "" {
-		c.ChartRef = "oci://ghcr.io/nvidia/kai-scheduler/kai-scheduler"
-	}
-	if c.Namespace == "" {
-		c.Namespace = "kai-scheduler"
-	}
-
-	// ChartVersion is required and has no default
-	if c.ChartVersion == "" {
-		return fmt.Errorf("chart version is required")
-	}
-
-	if c.Values == nil {
-		c.Values = make(map[string]interface{})
-	}
-	if c.Logger == nil {
-		// Create a default logger that writes to stdout
-		defaultLogger := NewCILogger(nil)
-		c.Logger = defaultLogger.Printf
-	}
-	return nil
+	return ValidateComponentConfig(c)
 }
 
 // KaiInstallConfigLatest returns a configuration for Kai Scheduler installation with latest defaults
@@ -116,134 +80,27 @@ func (c *KaiInstallConfig) Validate() error {
 func KaiInstallConfigLatest(version string) *KaiInstallConfig {
 	defaultLogger := NewCILogger(nil)
 	return &KaiInstallConfig{
-		ReleaseName:  "kai-scheduler",
-		ChartRef:     "oci://ghcr.io/nvidia/kai-scheduler/kai-scheduler",
-		ChartVersion: version,
-		Namespace:    "kai-scheduler",
-		Values:       make(map[string]interface{}),
-		Logger:       defaultLogger.Printf,
+		BaseInstallConfig: BaseInstallConfig{
+			ReleaseName:  "kai-scheduler",
+			ChartRef:     "oci://ghcr.io/nvidia/kai-scheduler/kai-scheduler",
+			ChartVersion: version,
+			Namespace:    "kai-scheduler",
+			Values:       make(map[string]interface{}),
+			Logger:       defaultLogger.Printf,
+		},
 	}
 }
 
 // InstallKai installs Kai Scheduler on a Kubernetes cluster using Helm
 // It returns the installed release and any error that occurred
 func InstallKai(config *KaiInstallConfig, logger *CILogger) (*release.Release, error) {
-	if err := config.Validate(); err != nil {
-		return nil, err
-	}
-
-	// Override the logger in config with the passed logger
-	config.Logger = logger.Printf
-
-	// Convert to HelmInstallConfig
-	helmConfig := config.ToHelmInstallConfig()
-
-	config.Logger("Setting up Helm and Kubernetes configuration...")
-
-	// Set up Helm action configuration
-	actionConfig, _, err := setupHelmAction(helmConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	config.Logger("Locating and pulling chart %s version %s...", config.ChartRef, config.ChartVersion)
-
-	// Create a new Install action client
-	installClient := action.NewInstall(actionConfig)
-	installClient.Namespace = config.Namespace
-	installClient.ReleaseName = config.ReleaseName
-	installClient.Version = config.ChartVersion
-	installClient.CreateNamespace = true // Equivalent to --create-namespace
-
-	// Set up chart path options for locating the chart
-	settings := cli.New()
-	installClient.ChartPathOptions.Version = config.ChartVersion
-	chartPath, err := installClient.ChartPathOptions.LocateChart(config.ChartRef, settings)
-	if err != nil {
-		return nil, fmt.Errorf("failed to locate chart: %w", err)
-	}
-	config.Logger("Chart located at: %s", chartPath)
-
-	// Load the chart from the located path
-	chart, err := loader.Load(chartPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load chart: %w", err)
-	}
-
-	config.Logger("Installing release: %s", config.ReleaseName)
-
-	// Perform the installation
-	rel, err := installClient.Run(chart, config.Values)
-	if err != nil {
-		return nil, fmt.Errorf("helm install failed: %w", err)
-	}
-
-	config.Logger("Success! Release '%s' installed in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
-	return rel, nil
+	return InstallComponent(config, logger)
 }
 
 // InstallOrUpgradeKai installs Kai Scheduler if it doesn't exist, or upgrades it if it does
 // It returns the installed/upgraded release and any error that occurred
 func InstallOrUpgradeKai(config *KaiInstallConfig, logger *CILogger) (*release.Release, error) {
-	if err := config.Validate(); err != nil {
-		return nil, err
-	}
-
-	// Override the logger in config with the passed logger
-	config.Logger = logger.Printf
-
-	// Convert to HelmInstallConfig
-	helmConfig := config.ToHelmInstallConfig()
-
-	config.Logger("Setting up Helm and Kubernetes configuration...")
-
-	// Set up Helm action configuration
-	actionConfig, _, err := setupHelmAction(helmConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	config.Logger("Locating and pulling chart %s version %s...", config.ChartRef, config.ChartVersion)
-
-	// Create upgrade client first to locate the chart
-	upgradeClient := action.NewUpgrade(actionConfig)
-	upgradeClient.ChartPathOptions.Version = config.ChartVersion
-	settings := cli.New()
-	chartPath, err := upgradeClient.ChartPathOptions.LocateChart(config.ChartRef, settings)
-	if err != nil {
-		return nil, fmt.Errorf("failed to locate chart: %w", err)
-	}
-	config.Logger("Chart located at: %s", chartPath)
-
-	// Load the chart from the located path
-	chart, err := loader.Load(chartPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load chart: %w", err)
-	}
-
-	// Try upgrade first
-	config.Logger("Attempting to upgrade release: %s", config.ReleaseName)
-	upgradeClient.Install = false
-	if rel, err := upgradeClient.Run(config.ReleaseName, chart, config.Values); err == nil {
-		config.Logger("Success! Release '%s' upgraded in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
-		return rel, nil
-	}
-
-	// If upgrade failed, try install
-	config.Logger("Upgrade failed, attempting fresh install of release: %s", config.ReleaseName)
-	installClient := action.NewInstall(actionConfig)
-	installClient.Namespace = config.Namespace
-	installClient.ReleaseName = config.ReleaseName
-	installClient.Version = config.ChartVersion
-	installClient.CreateNamespace = true // Equivalent to --create-namespace
-
-	rel, err := installClient.Run(chart, config.Values)
-	if err != nil {
-		return nil, fmt.Errorf("both upgrade and install failed: %w", err)
-	}
-
-	config.Logger("Success! Release '%s' installed in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
-	return rel, nil
+	return InstallOrUpgradeComponent(config, logger)
 }
 
 // WaitForKaiPodsReady waits for Kai Scheduler pods to be ready
