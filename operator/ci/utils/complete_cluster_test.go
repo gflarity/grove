@@ -273,7 +273,7 @@ func TestWithK3DCluster(t *testing.T) {
 	}
 
 	// Create default queue for Kai scheduler
-	if err := CreateDefaultKaiQueue(ctx, restConfig, logger); err != nil {
+	if err := CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
 		t.Fatalf("Failed to create default queue for Kai scheduler: %v", err)
 	}
 
@@ -525,7 +525,7 @@ func TestWithKindCluster(t *testing.T) {
 	}
 
 	// Create default queue for Kai scheduler
-	if err := CreateDefaultKaiQueue(ctx, restConfig, logger); err != nil {
+	if err := CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
 		t.Fatalf("Failed to create default queue for Kai scheduler: %v", err)
 	}
 

@@ -70,94 +70,190 @@ func ApplyYAML(ctx context.Context, config *WorkloadConfig, logger *CILogger) ([
 
 // applyYAMLData is the common function that applies YAML data to Kubernetes
 func applyYAMLData(ctx context.Context, yamlData []byte, namespace string, restConfig *rest.Config, logger *CILogger) ([]AppliedResource, error) {
-
-	// Create dynamic client
-	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	dynamicClient, restMapper, err := createKubernetesClients(restConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+		return nil, err
 	}
 
-	// Create REST mapper for dynamic GVR discovery
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create discovery client: %w", err)
-	}
-	cachedDiscoveryClient := memory.NewMemCacheClient(discoveryClient)
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscoveryClient)
-
-	// Parse and apply YAML documents
 	decoder := yamlutil.NewYAMLOrJSONDecoder(strings.NewReader(string(yamlData)), 4096)
 	var appliedResources []AppliedResource
 
 	for {
-		var rawObj runtime.RawExtension
-		if err := decoder.Decode(&rawObj); err != nil {
+		unstructuredObj, gvk, err := decodeNextYAMLObject(decoder)
+		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return nil, fmt.Errorf("failed to decode YAML: %w", err)
+			return nil, err
+		}
+		if unstructuredObj == nil {
+			continue // Skip empty objects
 		}
 
-		if len(rawObj.Raw) == 0 {
-			continue
-		}
-
-		// Decode the object as unstructured (no specific scheme needed)
-		yamlDecoder := yaml.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
-		obj, gvk, err := yamlDecoder.Decode(rawObj.Raw, nil, nil)
+		// Apply the resource
+		appliedResource, err := applyResource(ctx, dynamicClient, restMapper, unstructuredObj, gvk, namespace, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode object: %w", err)
+			return nil, err
 		}
 
-		// Convert to unstructured for dynamic client
-		unstructuredObj, ok := obj.(*unstructured.Unstructured)
-		if !ok {
-			return nil, fmt.Errorf("expected unstructured object, got %T", obj)
-		}
-
-		// Override namespace if specified
-		if namespace != "" {
-			unstructuredObj.SetNamespace(namespace)
-		}
-		if unstructuredObj.GetNamespace() == "" {
-			unstructuredObj.SetNamespace("default")
-		}
-
-		logger.Infof("🔧 Applying %s: %s/%s", gvk.Kind, unstructuredObj.GetNamespace(), unstructuredObj.GetName())
-
-		// Get REST mapping dynamically from GVK
-		gvr, err := getGVRFromGVK(restMapper, *gvk)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get GVR for %s: %w", gvk.String(), err)
-		}
-
-		// Apply the resource using dynamic client (assuming namespaced resources)
-		result, err := dynamicClient.Resource(gvr).Namespace(unstructuredObj.GetNamespace()).Create(ctx, unstructuredObj, metav1.CreateOptions{})
-		if err != nil {
-			if errors.IsAlreadyExists(err) {
-				// Try to update if it already exists
-				result, err = dynamicClient.Resource(gvr).Namespace(unstructuredObj.GetNamespace()).Update(ctx, unstructuredObj, metav1.UpdateOptions{})
-				if err != nil {
-					return nil, fmt.Errorf("failed to update %s %s: %w", gvk.Kind, unstructuredObj.GetName(), err)
-				}
-				logger.Infof("✅ Updated %s: %s/%s", gvk.Kind, result.GetNamespace(), result.GetName())
-			} else {
-				return nil, fmt.Errorf("failed to create %s %s: %w", gvk.Kind, unstructuredObj.GetName(), err)
-			}
-		} else {
-			logger.Infof("✅ Created %s: %s/%s", gvk.Kind, result.GetNamespace(), result.GetName())
-		}
-
-		appliedResources = append(appliedResources, AppliedResource{
-			Name:      result.GetName(),
-			Namespace: result.GetNamespace(),
-			GVK:       *gvk,
-			GVR:       gvr,
-		})
+		appliedResources = append(appliedResources, *appliedResource)
 	}
 
 	logger.Infof("📋 Applied %d resources successfully", len(appliedResources))
 	return appliedResources, nil
+}
+
+// createKubernetesClients creates the dynamic client and REST mapper
+func createKubernetesClients(restConfig *rest.Config) (dynamic.Interface, meta.RESTMapper, error) {
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create discovery client: %w", err)
+	}
+	cachedDiscoveryClient := memory.NewMemCacheClient(discoveryClient)
+	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscoveryClient)
+
+	return dynamicClient, restMapper, nil
+}
+
+// decodeNextYAMLObject decodes the next YAML object from the decoder
+func decodeNextYAMLObject(decoder *yamlutil.YAMLOrJSONDecoder) (*unstructured.Unstructured, *schema.GroupVersionKind, error) {
+	var rawObj runtime.RawExtension
+	if err := decoder.Decode(&rawObj); err != nil {
+		return nil, nil, err
+	}
+
+	if len(rawObj.Raw) == 0 {
+		return nil, nil, nil // Empty object
+	}
+
+	// Decode the object as unstructured
+	yamlDecoder := yaml.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
+	obj, gvk, err := yamlDecoder.Decode(rawObj.Raw, nil, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to decode object: %w", err)
+	}
+
+	unstructuredObj, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil, nil, fmt.Errorf("expected unstructured object, got %T", obj)
+	}
+
+	return unstructuredObj, gvk, nil
+}
+
+// applyResource applies a single Kubernetes resource
+func applyResource(ctx context.Context, dynamicClient dynamic.Interface, restMapper meta.RESTMapper, obj *unstructured.Unstructured, gvk *schema.GroupVersionKind, namespace string, logger *CILogger) (*AppliedResource, error) {
+	// Get resource mapping
+	gvr, mapping, err := getResourceMapping(restMapper, gvk)
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle namespace based on resource scope
+	handleResourceNamespace(obj, mapping, namespace)
+
+	// Log what we're applying
+	logResourceApplication(obj, gvk, logger)
+
+	// Apply the resource (create or update)
+	result, err := createOrUpdateResource(ctx, dynamicClient, gvr, mapping, obj)
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply %s %s: %w", gvk.Kind, obj.GetName(), err)
+	}
+
+	// Log success
+	logResourceSuccess(result, gvk, logger)
+
+	return &AppliedResource{
+		Name:      result.GetName(),
+		Namespace: result.GetNamespace(),
+		GVK:       *gvk,
+		GVR:       gvr,
+	}, nil
+}
+
+// getResourceMapping gets the GVR and mapping for a resource
+func getResourceMapping(restMapper meta.RESTMapper, gvk *schema.GroupVersionKind) (schema.GroupVersionResource, *meta.RESTMapping, error) {
+	gvr, err := getGVRFromGVK(restMapper, *gvk)
+	if err != nil {
+		return schema.GroupVersionResource{}, nil, fmt.Errorf("failed to get GVR for %s: %w", gvk.String(), err)
+	}
+
+	mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return schema.GroupVersionResource{}, nil, fmt.Errorf("failed to get REST mapping for %s: %w", gvk.String(), err)
+	}
+
+	return gvr, mapping, nil
+}
+
+// handleResourceNamespace sets the appropriate namespace based on resource scope
+func handleResourceNamespace(obj *unstructured.Unstructured, mapping *meta.RESTMapping, namespace string) {
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		// Namespaced resource
+		if namespace != "" {
+			obj.SetNamespace(namespace)
+		}
+		if obj.GetNamespace() == "" {
+			obj.SetNamespace("default")
+		}
+	} else {
+		// Cluster-scoped resource - clear any namespace
+		obj.SetNamespace("")
+	}
+}
+
+// logResourceApplication logs what resource is being applied
+func logResourceApplication(obj *unstructured.Unstructured, gvk *schema.GroupVersionKind, logger *CILogger) {
+	if obj.GetNamespace() != "" {
+		logger.Infof("🔧 Applying %s: %s/%s", gvk.Kind, obj.GetNamespace(), obj.GetName())
+	} else {
+		logger.Infof("🔧 Applying %s: %s", gvk.Kind, obj.GetName())
+	}
+}
+
+// createOrUpdateResource creates or updates a resource
+func createOrUpdateResource(ctx context.Context, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, mapping *meta.RESTMapping, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	// Try to create first
+	result, err := createResource(ctx, dynamicClient, gvr, mapping, obj)
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Resource exists, try to update
+			return updateResource(ctx, dynamicClient, gvr, mapping, obj)
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
+// createResource creates a new resource
+func createResource(ctx context.Context, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, mapping *meta.RESTMapping, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		return dynamicClient.Resource(gvr).Namespace(obj.GetNamespace()).Create(ctx, obj, metav1.CreateOptions{})
+	}
+	return dynamicClient.Resource(gvr).Create(ctx, obj, metav1.CreateOptions{})
+}
+
+// updateResource updates an existing resource
+func updateResource(ctx context.Context, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, mapping *meta.RESTMapping, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		return dynamicClient.Resource(gvr).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{})
+	}
+	return dynamicClient.Resource(gvr).Update(ctx, obj, metav1.UpdateOptions{})
+}
+
+// logResourceSuccess logs successful resource application
+func logResourceSuccess(result *unstructured.Unstructured, gvk *schema.GroupVersionKind, logger *CILogger) {
+	if result.GetNamespace() != "" {
+		logger.Infof("✅ Applied %s: %s/%s", gvk.Kind, result.GetNamespace(), result.GetName())
+	} else {
+		logger.Infof("✅ Applied %s: %s", gvk.Kind, result.GetName())
+	}
 }
 
 // WaitForPods waits for pods to be ready in the specified namespaces

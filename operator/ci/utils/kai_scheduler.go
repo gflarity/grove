@@ -29,17 +29,15 @@ package utils
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
-	schedulingv2 "github.com/NVIDIA/KAI-scheduler/pkg/apis/scheduling/v2"
 	"helm.sh/helm/v3/pkg/release"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 )
 
@@ -174,66 +172,26 @@ func hasKaiCRDVersion(crd *apiextensionsv1.CustomResourceDefinition, version str
 	return false
 }
 
-// CreateDefaultKaiQueue creates a default queue using the KAI-Scheduler Go types
-func CreateDefaultKaiQueue(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
-	logger.Info("📄 Creating default queue using KAI-Scheduler Go client...")
+// CreateDefaultKaiQueues creates queues using the k8s client YAML apply functionality
+func CreateDefaultKaiQueues(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
+	logger.Info("📄 Creating queues using k8s client...")
 
-	// Add the KAI-Scheduler scheme to the runtime scheme
-	if err := schedulingv2.AddToScheme(scheme.Scheme); err != nil {
-		return fmt.Errorf("failed to add KAI-Scheduler scheme: %w", err)
-	}
+	// Get the path to the queues.yaml file relative to this source file
+	_, currentFile, _, _ := runtime.Caller(0)
+	queuesPath := filepath.Join(filepath.Dir(currentFile), "queues.yaml")
 
-	// Create dynamic client
-	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	// Read the queues YAML file content
+	yamlContent, err := os.ReadFile(queuesPath)
 	if err != nil {
-		return fmt.Errorf("failed to create dynamic client: %w", err)
+		return fmt.Errorf("failed to read queues YAML file %s: %w", queuesPath, err)
 	}
 
-	// Create the default queue object
-	queue := &schedulingv2.Queue{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "scheduling.run.ai/v2",
-			Kind:       "Queue",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "default",
-		},
-		Spec: schedulingv2.QueueSpec{
-			Resources: &schedulingv2.QueueResources{
-				CPU: schedulingv2.QueueResource{
-					Quota:           -1,
-					Limit:           -1,
-					OverQuotaWeight: 1,
-				},
-				GPU: schedulingv2.QueueResource{
-					Quota:           -1,
-					Limit:           -1,
-					OverQuotaWeight: 1,
-				},
-				Memory: schedulingv2.QueueResource{
-					Quota:           -1,
-					Limit:           -1,
-					OverQuotaWeight: 1,
-				},
-			},
-		},
-	}
-
-	// Convert to unstructured for dynamic client
-	unstructuredObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(queue)
+	// Apply the YAML content using the k8s client
+	appliedResources, err := ApplyYAMLContent(ctx, string(yamlContent), "", restConfig, logger)
 	if err != nil {
-		return fmt.Errorf("failed to convert queue to unstructured: %w", err)
+		return fmt.Errorf("failed to apply queues YAML: %w", err)
 	}
 
-	// Get the GVR for Queue
-	gvr := schedulingv2.SchemeGroupVersion.WithResource("queues")
-
-	// Create the queue
-	_, err = dynamicClient.Resource(gvr).Create(ctx, &unstructured.Unstructured{Object: unstructuredObj}, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create queue: %w", err)
-	}
-
-	logger.Info("✅ Default queue created successfully using Go client")
+	logger.Infof("✅ Successfully applied %d queue resources", len(appliedResources))
 	return nil
 }

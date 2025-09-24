@@ -24,7 +24,7 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 	// Custom configuration for 10-node k3d cluster (1 server + 9 agents)
 	customCfg := utils.ClusterConfig{
 		Name:             "gang-scheduling-test-cluster",
-		Servers:          1,
+		Servers:          3,
 		Agents:           10, // 10 agents (worker nodes)
 		Image:            "rancher/k3s:v1.28.8-k3s1",
 		HostPort:         "6552",
@@ -108,9 +108,8 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 	// Add tolerations for control-plane and Grove e2e taints so Grove can schedule on all worker nodes
 	groveConfig.Values["tolerations"] = []map[string]interface{}{
 		{
-			"key":      "node_role.e2e.grove.nvidia.com",
-			"operator": "Equal",
-			"value":    "agent",
+			"key":      "node-role.kubernetes.io/control-plane",
+			"operator": "Exists",
 			"effect":   "NoSchedule",
 		},
 	}
@@ -127,12 +126,6 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 				"operator": "Exists",
 				"effect":   "NoSchedule",
 			},
-			{
-				"key":      "node_role.e2e.grove.nvidia.com",
-				"operator": "Equal",
-				"value":    "agent",
-				"effect":   "NoSchedule",
-			},
 		},
 	}
 
@@ -142,6 +135,7 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 	nvidiaConfig.GenerateName = false                          // Disable auto-generation
 	nvidiaConfig.RestConfig = restConfig
 
+	// TODO this is wrong, looks like tolerations need to be per component
 	// Add tolerations for control-plane and Grove e2e taints so NVIDIA operator can schedule on all nodes
 	nvidiaConfig.Values["tolerations"] = []map[string]interface{}{
 		{
@@ -149,35 +143,6 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 			"operator": "Exists",
 			"effect":   "NoSchedule",
 		},
-		{
-			"key":      "node_role.e2e.grove.nvidia.com",
-			"operator": "Equal",
-			"value":    "agent",
-			"effect":   "NoSchedule",
-		},
-	}
-
-	// Configure NVIDIA operator for test environment without actual GPUs
-	nvidiaConfig.Values["driver"] = map[string]interface{}{
-		"enabled": false, // Disable GPU driver installation in test environment
-	}
-	nvidiaConfig.Values["toolkit"] = map[string]interface{}{
-		"enabled": false, // Disable container toolkit in test environment
-	}
-	nvidiaConfig.Values["devicePlugin"] = map[string]interface{}{
-		"enabled": false, // Disable device plugin in test environment
-	}
-	nvidiaConfig.Values["dcgmExporter"] = map[string]interface{}{
-		"enabled": false, // Disable DCGM exporter in test environment
-	}
-	nvidiaConfig.Values["gfd"] = map[string]interface{}{
-		"enabled": false, // Disable GPU feature discovery in test environment
-	}
-	nvidiaConfig.Values["migManager"] = map[string]interface{}{
-		"enabled": false, // Disable MIG manager in test environment
-	}
-	nvidiaConfig.Values["nodeStatusExporter"] = map[string]interface{}{
-		"enabled": false, // Disable node status exporter in test environment
 	}
 
 	// Install all three components in parallel using goroutines
@@ -254,7 +219,7 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 	}
 
 	// Create default queue for Kai scheduler
-	if err := utils.CreateDefaultKaiQueue(ctx, restConfig, logger); err != nil {
+	if err := utils.CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
 		t.Fatalf("Failed to create default queue for Kai scheduler: %v", err)
 	}
 
@@ -266,7 +231,7 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 	// Deploy workload1.yaml
 	workloadNamespace := "default"
 	workloadConfig := &utils.WorkloadConfig{
-		YAMLFilePath: "/Users/gflarity/git/grove/operator/ci/workloads/workload1.yaml",
+		YAMLFilePath: "../yaml/workload1.yaml",
 		Namespace:    workloadNamespace,
 		RestConfig:   restConfig,
 		Timeout:      2 * time.Minute, // Short timeout since we expect pods to be pending

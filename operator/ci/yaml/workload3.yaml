@@ -1,19 +1,19 @@
-# Workload 5: Strict Startup with Dependency
+# Workload 3: Strict & In-Order Startup
 ---
 apiVersion: grove.io/v1alpha1
 kind: PodCliqueSet
 metadata:
-  name: workload5
+  name: workload3
   labels:
-    app: workload5
+    app: workload3
 spec:
   replicas: 1
   template:
-    cliqueStartupType: CliqueStartupTypeExplicit
+    cliqueStartupType: CliqueStartupTypeInOrder
     cliques:
       - name: pc-a
         labels:
-          kai.scheduler/queue: default
+          kai.scheduler/queue: test
         spec:
           roleName: role-a
           replicas: 2
@@ -42,13 +42,11 @@ spec:
                     memory: 80Mi
       - name: pc-b
         labels:
-          kai.scheduler/queue: default
+          kai.scheduler/queue: test
         spec:
           roleName: role-b
           replicas: 1
           minAvailable: 1
-          startsAfter:
-            - pc-c
           podSpec:
             schedulerName: kai-scheduler
             affinity:
@@ -73,7 +71,7 @@ spec:
                     memory: 80Mi
       - name: pc-c
         labels:
-          kai.scheduler/queue: default
+          kai.scheduler/queue: test
         spec:
           roleName: role-c
           replicas: 3
