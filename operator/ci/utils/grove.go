@@ -30,7 +30,7 @@ type GroveInstallConfig struct {
 }
 
 // Component-specific configuration methods for ComponentInstallConfig interface
-func (c *GroveInstallConfig) GetCreateNamespace() bool { return false } // Grove installation doesn't create namespace by default
+func (c *GroveInstallConfig) GetCreateNamespace() bool { return true }  // Grove installation creates namespace automatically
 func (c *GroveInstallConfig) GetWait() bool            { return false } // Default wait behavior
 func (c *GroveInstallConfig) GetGenerateName() bool    { return false } // Default generate name behavior
 

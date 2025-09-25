@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"helm.sh/helm/v3/pkg/release"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -55,14 +54,14 @@ func TestWithK3DCluster(t *testing.T) {
 
 	fmt.Printf("🚀 Starting k3d cluster test with config: %+v\n", customCfg)
 
-	// Setup cluster with custom config
-	clientset, restConfig, _, cleanup, err := SetupK3DCluster(ctx, customCfg, logger)
+	// Setup cluster with custom config including installations
+	clientset, _, _, cleanup, err := SetupCompleteK3DCluster(ctx, customCfg, logger)
 	defer cleanup() // always call cleanup
 	if err != nil {
 		t.Fatalf("Failed to setup k3d cluster: %v", err)
 	}
 
-	fmt.Printf("✅ Cluster setup complete, testing node listing...\n")
+	fmt.Printf("✅ Complete cluster setup finished, testing node listing...\n")
 
 	// Test with custom cluster
 	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -94,193 +93,7 @@ func TestWithK3DCluster(t *testing.T) {
 	}
 	fmt.Printf("✅ Verified labels on %d agent nodes\n", agentNodes)
 
-	// Create the namespace for Grove installation
-	namespace := "grove-system"
-	_, err = clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: namespace,
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Failed to create namespace %s: %v", namespace, err)
-	}
-	fmt.Printf("✅ Created namespace: %s\n", namespace)
-
-	// Install Grove, Kai, and NVIDIA GPU Operator in parallel
-	fmt.Printf("🚀 Starting parallel installation of Grove, Kai Scheduler, and NVIDIA GPU Operator...\n")
-
-	// Configure Grove
-	groveConfig := GroveInstallConfigV0_1_0_Alpha1()
-	groveConfig.ReleaseName = "grove-test"
-	groveConfig.Namespace = namespace
-	groveConfig.RestConfig = restConfig
-
-	// Add tolerations for control-plane and Grove e2e taints so Grove can schedule on all nodes
-	groveConfig.Values["tolerations"] = []map[string]interface{}{
-		{
-			"key":      "node-role.kubernetes.io/control-plane",
-			"operator": "Exists",
-			"effect":   "NoSchedule",
-		},
-		{
-			"key":      "node_role.e2e.grove.nvidia.com",
-			"operator": "Equal",
-			"value":    "agent",
-			"effect":   "NoSchedule",
-		},
-	}
-
-	// Configure Kai Scheduler
-	kaiConfig := KaiInstallConfigLatest("v0.9.3")
-	kaiConfig.RestConfig = restConfig
-
-	// Add tolerations for control-plane and Grove e2e taints so Kai can schedule on all nodes
-	kaiConfig.Values["global"] = map[string]interface{}{
-		"tolerations": []map[string]interface{}{
-			{
-				"key":      "node-role.kubernetes.io/control-plane",
-				"operator": "Exists",
-				"effect":   "NoSchedule",
-			},
-			{
-				"key":      "node_role.e2e.grove.nvidia.com",
-				"operator": "Equal",
-				"value":    "agent",
-				"effect":   "NoSchedule",
-			},
-		},
-	}
-
-	// Configure NVIDIA GPU Operator
-	nvidiaConfig := NvidiaOperatorInstallConfigLatest("v25.3.4")
-	nvidiaConfig.ReleaseName = "nvidia-gpu-operator-test" // Use specific name instead of auto-generated
-	nvidiaConfig.GenerateName = false                     // Disable auto-generation
-	nvidiaConfig.RestConfig = restConfig
-
-	// Add tolerations for control-plane and Grove e2e taints so NVIDIA operator can schedule on all nodes
-	nvidiaConfig.Values["node-feature-discovery"] = map[string]interface{}{
-		"gc": map[string]interface{}{
-			"tolerations": []map[string]interface{}{
-				{
-					"key":      "node-role.kubernetes.io/control-plane",
-					"operator": "Exists",
-					"effect":   "NoSchedule",
-				},
-				{
-					"key":      "node_role.e2e.grove.nvidia.com",
-					"operator": "Equal",
-					"value":    "agent",
-					"effect":   "NoSchedule",
-				},
-			},
-		},
-	}
-
-	// Configure NVIDIA operator for test environment without actual GPUs
-	nvidiaConfig.Values["driver"] = map[string]interface{}{
-		"enabled": false, // Disable GPU driver installation in test environment
-	}
-	nvidiaConfig.Values["toolkit"] = map[string]interface{}{
-		"enabled": false, // Disable container toolkit in test environment
-	}
-	nvidiaConfig.Values["devicePlugin"] = map[string]interface{}{
-		"enabled": false, // Disable device plugin in test environment
-	}
-	nvidiaConfig.Values["dcgmExporter"] = map[string]interface{}{
-		"enabled": false, // Disable DCGM exporter in test environment
-	}
-	nvidiaConfig.Values["gfd"] = map[string]interface{}{
-		"enabled": false, // Disable GPU feature discovery in test environment
-	}
-	nvidiaConfig.Values["migManager"] = map[string]interface{}{
-		"enabled": false, // Disable MIG manager in test environment
-	}
-	nvidiaConfig.Values["nodeStatusExporter"] = map[string]interface{}{
-		"enabled": false, // Disable node status exporter in test environment
-	}
-
-	// Install all three components in parallel using goroutines
-	type installResult struct {
-		name string
-		err  error
-	}
-
-	resultChan := make(chan installResult, 3)
-
-	// Install Grove
-	go func() {
-		logger.Info("🚀 Starting Grove installation...")
-		_, err := InstallGrove(groveConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ Grove installation failed: %v", err)
-			resultChan <- installResult{"Grove", err}
-		} else {
-			logger.Info("✅ Grove installation completed successfully")
-			resultChan <- installResult{"Grove", nil}
-		}
-	}()
-
-	// Install Kai Scheduler
-	go func() {
-		logger.Info("🚀 Starting Kai Scheduler installation...")
-		_, err := InstallKai(kaiConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ Kai Scheduler installation failed: %v", err)
-			resultChan <- installResult{"Kai", err}
-		} else {
-			logger.Info("✅ Kai Scheduler installation completed successfully")
-			resultChan <- installResult{"Kai", nil}
-		}
-	}()
-
-	// Install NVIDIA GPU Operator
-	go func() {
-		logger.Info("🚀 Starting NVIDIA GPU Operator installation...")
-		_, err := InstallNvidiaOperator(nvidiaConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ NVIDIA GPU Operator installation failed: %v", err)
-			resultChan <- installResult{"NVIDIA GPU Operator", err}
-		} else {
-			logger.Info("✅ NVIDIA GPU Operator installation completed successfully")
-			resultChan <- installResult{"NVIDIA GPU Operator", nil}
-		}
-	}()
-
-	// Wait for all three installations to complete
-	for i := 0; i < 3; i++ {
-		result := <-resultChan
-		if result.err != nil {
-			t.Fatalf("%s installation failed: %v", result.name, result.err)
-		}
-		fmt.Printf("✅ %s installation completed\n", result.name)
-	}
-
-	fmt.Printf("✅ All three installations (Grove, Kai Scheduler, and NVIDIA GPU Operator) completed successfully\n")
-
-	// Wait for Grove pods to be ready
-	if err := WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
-		t.Fatalf("Grove pods not ready: %v", err)
-	}
-
-	// Wait for Kai Scheduler pods to be ready
-	if err := WaitForKaiPodsReady(ctx, restConfig, logger); err != nil {
-		t.Fatalf("Kai Scheduler pods not ready: %v", err)
-	}
-
-	// Wait for Kai CRDs to be ready
-	if err := WaitForKaiCRDs(ctx, restConfig, logger); err != nil {
-		t.Fatalf("Failed to wait for Kai CRDs: %v", err)
-	}
-
-	// Create default queue for Kai scheduler
-	if err := CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
-		t.Fatalf("Failed to create default queue for Kai scheduler: %v", err)
-	}
-
-	// Wait for NVIDIA GPU Operator to be ready
-	if err := WaitForNvidiaOperatorReady(ctx, restConfig, logger); err != nil {
-		t.Fatalf("NVIDIA GPU Operator not ready: %v", err)
-	}
+	fmt.Printf("✅ Namespace %s ensured by helper\n", "grove-system")
 
 	fmt.Printf("🎉 Test completed successfully! Grove, Kai, and NVIDIA GPU Operator are all ready.\n")
 }
@@ -352,41 +165,27 @@ func TestWithKindCluster(t *testing.T) {
 	}
 	fmt.Printf("✅ Verified labels on %d worker nodes\n", workerNodes)
 
-	// Create the namespace for Grove installation
-	namespace := "grove-system"
-	_, err = clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: namespace,
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Failed to create namespace %s: %v", namespace, err)
-	}
-	fmt.Printf("✅ Created namespace: %s\n", namespace)
+	fmt.Printf("✅ Namespace grove-system ensured by helper\n")
 
 	// Install Grove, Kai, and NVIDIA GPU Operator in parallel
 	fmt.Printf("🚀 Starting parallel installation of Grove, Kai Scheduler, and NVIDIA GPU Operator...\n")
 
-	// Configure Grove
-	groveConfig := GroveInstallConfigV0_1_0_Alpha1()
-	groveConfig.ReleaseName = "grove-kind-test"
-	groveConfig.Namespace = namespace
-	groveConfig.RestConfig = restConfig
-
-	// Add tolerations for control-plane and Grove e2e taints so Grove can schedule on all nodes
-	groveConfig.Values["tolerations"] = []map[string]interface{}{
+	tolerations := []map[string]interface{}{
 		{
 			"key":      "node-role.kubernetes.io/control-plane",
 			"operator": "Exists",
 			"effect":   "NoSchedule",
 		},
-		{
-			"key":      "node_role.e2e.grove.nvidia.com",
-			"operator": "Equal",
-			"value":    "agent",
-			"effect":   "NoSchedule",
-		},
 	}
+
+	// Configure Grove
+	groveConfig := GroveInstallConfigV0_1_0_Alpha1()
+	groveConfig.ReleaseName = "grove-kind-test"
+	groveConfig.Namespace = "grove-system"
+	groveConfig.RestConfig = restConfig
+
+	// Add tolerations for control-plane and Grove e2e taints so Grove can schedule on all nodes
+	groveConfig.Values["tolerations"] = tolerations
 
 	// Configure Kai Scheduler
 	kaiConfig := KaiInstallConfigLatest("v0.9.3")
@@ -394,19 +193,7 @@ func TestWithKindCluster(t *testing.T) {
 
 	// Add tolerations for control-plane and Grove e2e taints so Kai can schedule on all nodes
 	kaiConfig.Values["global"] = map[string]interface{}{
-		"tolerations": []map[string]interface{}{
-			{
-				"key":      "node-role.kubernetes.io/control-plane",
-				"operator": "Exists",
-				"effect":   "NoSchedule",
-			},
-			{
-				"key":      "node_role.e2e.grove.nvidia.com",
-				"operator": "Equal",
-				"value":    "agent",
-				"effect":   "NoSchedule",
-			},
-		},
+		"tolerations": tolerations,
 	}
 
 	// Configure NVIDIA GPU Operator
@@ -418,99 +205,16 @@ func TestWithKindCluster(t *testing.T) {
 	// Add tolerations for control-plane and Grove e2e taints so NVIDIA operator can schedule on all nodes
 	nvidiaConfig.Values["node-feature-discovery"] = map[string]interface{}{
 		"gc": map[string]interface{}{
-			"tolerations": []map[string]interface{}{
-				{
-					"key":      "node-role.kubernetes.io/control-plane",
-					"operator": "Exists",
-					"effect":   "NoSchedule",
-				},
-			},
+			"tolerations": tolerations,
 		},
 	}
 
-	// Configure NVIDIA operator for test environment without actual GPUs
-	nvidiaConfig.Values["driver"] = map[string]interface{}{
-		"enabled": false, // Disable GPU driver installation in test environment
+	if err := InstallCoreComponents(logger, groveConfig, kaiConfig, nvidiaConfig); err != nil {
+		t.Fatalf("Component installation failed: %v", err)
 	}
-	nvidiaConfig.Values["toolkit"] = map[string]interface{}{
-		"enabled": false, // Disable container toolkit in test environment
-	}
-	nvidiaConfig.Values["devicePlugin"] = map[string]interface{}{
-		"enabled": false, // Disable device plugin in test environment
-	}
-	nvidiaConfig.Values["dcgmExporter"] = map[string]interface{}{
-		"enabled": false, // Disable DCGM exporter in test environment
-	}
-	nvidiaConfig.Values["gfd"] = map[string]interface{}{
-		"enabled": false, // Disable GPU feature discovery in test environment
-	}
-	nvidiaConfig.Values["migManager"] = map[string]interface{}{
-		"enabled": false, // Disable MIG manager in test environment
-	}
-	nvidiaConfig.Values["nodeStatusExporter"] = map[string]interface{}{
-		"enabled": false, // Disable node status exporter in test environment
-	}
-
-	// Install all three components in parallel using goroutines
-	type installResult struct {
-		name string
-		err  error
-	}
-
-	resultChan := make(chan installResult, 3)
-
-	// Install Grove
-	go func() {
-		logger.Info("🚀 Starting Grove installation...")
-		_, err := InstallOrUpgradeGrove(groveConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ Grove installation failed: %v", err)
-			resultChan <- installResult{"Grove", err}
-		} else {
-			logger.Info("✅ Grove installation completed successfully")
-			resultChan <- installResult{"Grove", nil}
-		}
-	}()
-
-	// Install Kai Scheduler
-	go func() {
-		logger.Info("🚀 Starting Kai Scheduler installation...")
-		_, err := InstallOrUpgradeKai(kaiConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ Kai Scheduler installation failed: %v", err)
-			resultChan <- installResult{"Kai", err}
-		} else {
-			logger.Info("✅ Kai Scheduler installation completed successfully")
-			resultChan <- installResult{"Kai", nil}
-		}
-	}()
-
-	// Install NVIDIA GPU Operator
-	go func() {
-		logger.Info("🚀 Starting NVIDIA GPU Operator installation...")
-		_, err := InstallNvidiaOperator(nvidiaConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ NVIDIA GPU Operator installation failed: %v", err)
-			resultChan <- installResult{"NVIDIA GPU Operator", err}
-		} else {
-			logger.Info("✅ NVIDIA GPU Operator installation completed successfully")
-			resultChan <- installResult{"NVIDIA GPU Operator", nil}
-		}
-	}()
-
-	// Wait for all three installations to complete
-	for i := 0; i < 3; i++ {
-		result := <-resultChan
-		if result.err != nil {
-			t.Fatalf("%s installation failed: %v", result.name, result.err)
-		}
-		fmt.Printf("✅ %s installation completed\n", result.name)
-	}
-
-	fmt.Printf("✅ All three installations (Grove, Kai Scheduler, and NVIDIA GPU Operator) completed successfully\n")
 
 	// Wait for Grove pods to be ready
-	if err := WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
+	if err := WaitForGrovePodsReady(ctx, "grove-system", restConfig, logger); err != nil {
 		t.Fatalf("Grove pods not ready: %v", err)
 	}
 

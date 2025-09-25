@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/k3d-io/k3d/v5/pkg/client"
 	"github.com/k3d-io/k3d/v5/pkg/config"
@@ -12,6 +13,9 @@ import (
 	k3dlogger "github.com/k3d-io/k3d/v5/pkg/logger"
 	"github.com/k3d-io/k3d/v5/pkg/runtimes"
 	k3d "github.com/k3d-io/k3d/v5/pkg/types"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -305,4 +309,185 @@ nodeRegistration:
 	}
 
 	return clientset, restConfig, cleanup, nil
+}
+
+func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, kaiConfig *KaiInstallConfig, nvidiaConfig *NvidiaOperatorInstallConfig) error {
+	var wg sync.WaitGroup
+	errChan := make(chan error, 3) // Buffer for up to 3 errors
+
+	// Install Grove
+	if groveConfig != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("🚀 Starting Grove installation...")
+			_, err := InstallGrove(groveConfig, logger)
+			if err != nil {
+				logger.Errorf("❌ Grove installation failed: %v", err)
+				errChan <- fmt.Errorf("Grove installation failed: %w", err)
+			} else {
+				logger.Info("✅ Grove installation completed successfully")
+			}
+		}()
+	}
+
+	// Install Kai Scheduler
+	if kaiConfig != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("🚀 Starting Kai Scheduler installation...")
+			_, err := InstallKai(kaiConfig, logger)
+			if err != nil {
+				logger.Errorf("❌ Kai Scheduler installation failed: %v", err)
+				errChan <- fmt.Errorf("Kai Scheduler installation failed: %w", err)
+			} else {
+				logger.Info("✅ Kai Scheduler installation completed successfully")
+			}
+		}()
+	}
+
+	// Install NVIDIA GPU Operator
+	if nvidiaConfig != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("🚀 Starting NVIDIA GPU Operator installation...")
+			_, err := InstallNvidiaOperator(nvidiaConfig, logger)
+			if err != nil {
+				logger.Errorf("❌ NVIDIA GPU Operator installation failed: %v", err)
+				errChan <- fmt.Errorf("NVIDIA GPU Operator installation failed: %w", err)
+			} else {
+				logger.Info("✅ NVIDIA GPU Operator installation completed successfully")
+			}
+		}()
+	}
+
+	// Wait for all installations to complete
+	wg.Wait()
+	close(errChan)
+
+	// Check for any errors
+	for err := range errChan {
+		return err // Return the first error encountered
+	}
+
+	logger.Info("✅ All component installations completed successfully")
+	return nil
+}
+
+func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
+	clientset, restConfig, k3dConfig, cleanup, err := SetupK3DCluster(ctx, cfg, logger)
+	if err != nil {
+		return nil, nil, nil, cleanup, err
+	}
+
+	namespace := "grove-system"
+	if err := ensureNamespace(ctx, clientset, namespace); err != nil {
+		cleanup()
+		return nil, nil, nil, nil, err
+	}
+
+	tolerations := []map[string]interface{}{
+		{
+			"key":      "node-role.kubernetes.io/control-plane",
+			"operator": "Exists",
+			"effect":   "NoSchedule",
+		},
+		{
+			"key":      "node_role.e2e.grove.nvidia.com",
+			"operator": "Equal",
+			"value":    "agent",
+			"effect":   "NoSchedule",
+		},
+	}
+
+	groveConfig := GroveInstallConfigV0_1_0_Alpha1()
+	groveConfig.ReleaseName = "grove"
+	groveConfig.Namespace = namespace
+	groveConfig.RestConfig = restConfig
+	if groveConfig.Values == nil {
+		groveConfig.Values = make(map[string]interface{})
+	}
+	groveConfig.Values["tolerations"] = tolerations
+
+	kaiConfig := KaiInstallConfigLatest("v0.9.3")
+	kaiConfig.ReleaseName = "kai-scheduler"
+	kaiConfig.RestConfig = restConfig
+	if kaiConfig.Values == nil {
+		kaiConfig.Values = make(map[string]interface{})
+	}
+	kaiConfig.Values["global"] = map[string]interface{}{
+		"tolerations": tolerations,
+	}
+
+	nvidiaConfig := NvidiaOperatorInstallConfigLatest("v25.3.4")
+	nvidiaConfig.ReleaseName = "nvidia-gpu-operator"
+	nvidiaConfig.GenerateName = false
+	nvidiaConfig.RestConfig = restConfig
+	if nvidiaConfig.Values == nil {
+		nvidiaConfig.Values = make(map[string]interface{})
+	}
+	nvidiaConfig.Values["tolerations"] = tolerations
+	nvidiaConfig.Values["driver"] = map[string]interface{}{"enabled": false}
+	nvidiaConfig.Values["toolkit"] = map[string]interface{}{"enabled": false}
+	nvidiaConfig.Values["devicePlugin"] = map[string]interface{}{"enabled": false}
+	nvidiaConfig.Values["dcgmExporter"] = map[string]interface{}{"enabled": false}
+	nvidiaConfig.Values["gfd"] = map[string]interface{}{"enabled": false}
+	nvidiaConfig.Values["migManager"] = map[string]interface{}{"enabled": false}
+	nvidiaConfig.Values["nodeStatusExporter"] = map[string]interface{}{"enabled": false}
+
+	logger.Info("🚀 Installing Grove, Kai Scheduler, and NVIDIA GPU Operator...")
+	if err := InstallCoreComponents(logger, groveConfig, kaiConfig, nvidiaConfig); err != nil {
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("component installation failed: %w", err)
+	}
+
+	logger.Info("⏳ Waiting for Grove pods to be ready...")
+	if err := WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("Grove pods not ready: %w", err)
+	}
+
+	logger.Info("⏳ Waiting for Kai Scheduler pods to be ready...")
+	if err := WaitForKaiPodsReady(ctx, restConfig, logger); err != nil {
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("Kai Scheduler pods not ready: %w", err)
+	}
+
+	logger.Info("⏳ Waiting for Kai CRDs to be ready...")
+	if err := WaitForKaiCRDs(ctx, restConfig, logger); err != nil {
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("Failed to wait for Kai CRDs: %w", err)
+	}
+
+	logger.Info("📄 Creating default Kai queues...")
+	if err := CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("Failed to create default Kai queue: %w", err)
+	}
+
+	logger.Info("⏳ Waiting for NVIDIA GPU Operator to be ready...")
+	if err := WaitForNvidiaOperatorReady(ctx, restConfig, logger); err != nil {
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("NVIDIA GPU Operator not ready: %w", err)
+	}
+
+	logger.Info("🎉 Complete k3d cluster setup successful!")
+	return clientset, restConfig, k3dConfig, cleanup, nil
+}
+
+func ensureNamespace(ctx context.Context, clientset kubernetes.Interface, namespace string) error {
+	_, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if errors.IsNotFound(err) {
+		_, createErr := clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}, metav1.CreateOptions{})
+		if createErr != nil {
+			return fmt.Errorf("failed to create namespace %s: %w", namespace, createErr)
+		}
+		return nil
+	}
+	return fmt.Errorf("failed to get namespace %s: %w", namespace, err)
 }
