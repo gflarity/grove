@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/docker/docker/api/types/container"
+	dockerclient "github.com/docker/docker/client"
 	"github.com/k3d-io/k3d/v5/pkg/client"
 	"github.com/k3d-io/k3d/v5/pkg/config"
 	"github.com/k3d-io/k3d/v5/pkg/config/types"
@@ -41,6 +44,8 @@ type ClusterConfig struct {
 	AgentNodeLabels  map[string]string
 	AgentNodeTaints  []NodeTaint // Taints to apply to agent nodes
 	WorkerMemory     string      // Memory allocation for worker/agent nodes (e.g., "150m")
+	EnableRegistry   bool        // Enable built-in Docker registry
+	RegistryPort     string      // Port for the Docker registry (e.g., "5001")
 }
 
 // DefaultClusterConfig returns a sensible default cluster configuration
@@ -53,6 +58,8 @@ func DefaultClusterConfig() ClusterConfig {
 		HostPort:         "6550",
 		LoadBalancerPort: "8080:80",
 		WorkerMemory:     "150m",
+		EnableRegistry:   false,
+		RegistryPort:     "5001",
 	}
 }
 
@@ -112,13 +119,24 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 		)
 	}
 
+	// Configure registry if enabled
+	if cfg.EnableRegistry {
+		clusterConfig.Registries = v1alpha5.SimpleConfigRegistries{
+			Create: &v1alpha5.SimpleConfigRegistryCreateConfig{
+				Name:     "registry",
+				Host:     "0.0.0.0",
+				HostPort: cfg.RegistryPort,
+			},
+		}
+	}
+
 	// Transform configuration
 	k3dConfig, err := config.TransformSimpleToClusterConfig(ctx, runtimes.Docker, clusterConfig, "")
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to transform config: %w", err)
 	}
 
-	// this is the cleanup funciton, we always return it now so the caller can decide to use it or not
+	// this is the cleanup function, we always return it now so the caller can decide to use it or not
 	cleanup := func() {
 		logger.Info("🗑️ Deleting cluster...")
 		if err := client.ClusterDelete(ctx, runtimes.Docker, &k3dConfig.Cluster, k3d.ClusterDeleteOpts{}); err != nil {
@@ -311,25 +329,38 @@ nodeRegistration:
 	return clientset, restConfig, cleanup, nil
 }
 
+// retryInstallation retries an installation function up to maxRetries times with a delay between attempts
+func retryInstallation(installFunc func() error, componentName string, maxRetries int, retryDelay time.Duration, logger *CILogger) error {
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			logger.Infof("🔄 Retrying %s installation (attempt %d/%d)...", componentName, attempt, maxRetries)
+			time.Sleep(retryDelay)
+		}
+
+		err := installFunc()
+		if err == nil {
+			if attempt > 1 {
+				logger.Infof("✅ %s installation succeeded on attempt %d/%d", componentName, attempt, maxRetries)
+			}
+			return nil
+		}
+
+		lastErr = err
+		logger.Errorf("❌ %s installation failed on attempt %d/%d: %v", componentName, attempt, maxRetries, err)
+	}
+
+	return fmt.Errorf("%s installation failed after %d attempts: %w", componentName, maxRetries, lastErr)
+}
+
 func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, kaiConfig *KaiInstallConfig, nvidiaConfig *NvidiaOperatorInstallConfig) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, 3) // Buffer for up to 3 errors
 
-	// Install Grove
-	if groveConfig != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			logger.Info("🚀 Starting Grove installation...")
-			_, err := InstallGrove(groveConfig, logger)
-			if err != nil {
-				logger.Errorf("❌ Grove installation failed: %v", err)
-				errChan <- fmt.Errorf("Grove installation failed: %w", err)
-			} else {
-				logger.Info("✅ Grove installation completed successfully")
-			}
-		}()
-	}
+	// There's occasionally wierd races regarding CRDS, for test stability we retry a few times
+	const maxRetries = 3
+	const retryDelay = 5 * time.Second
 
 	// Install Kai Scheduler
 	if kaiConfig != nil {
@@ -337,12 +368,38 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 		go func() {
 			defer wg.Done()
 			logger.Info("🚀 Starting Kai Scheduler installation...")
-			_, err := InstallKai(kaiConfig, logger)
+
+			installFunc := func() error {
+				_, err := InstallKai(kaiConfig, logger)
+				return err
+			}
+
+			err := retryInstallation(installFunc, "Kai Scheduler", maxRetries, retryDelay, logger)
 			if err != nil {
-				logger.Errorf("❌ Kai Scheduler installation failed: %v", err)
-				errChan <- fmt.Errorf("Kai Scheduler installation failed: %w", err)
+				errChan <- err
 			} else {
 				logger.Info("✅ Kai Scheduler installation completed successfully")
+			}
+		}()
+	}
+
+	// Install Grove
+	if groveConfig != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("🚀 Starting Grove installation...")
+
+			installFunc := func() error {
+				_, err := InstallGrove(groveConfig, logger)
+				return err
+			}
+
+			err := retryInstallation(installFunc, "Grove", maxRetries, retryDelay, logger)
+			if err != nil {
+				errChan <- err
+			} else {
+				logger.Info("✅ Grove installation completed successfully")
 			}
 		}()
 	}
@@ -353,10 +410,15 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 		go func() {
 			defer wg.Done()
 			logger.Info("🚀 Starting NVIDIA GPU Operator installation...")
-			_, err := InstallNvidiaOperator(nvidiaConfig, logger)
+
+			installFunc := func() error {
+				_, err := InstallNvidiaOperator(nvidiaConfig, logger)
+				return err
+			}
+
+			err := retryInstallation(installFunc, "NVIDIA GPU Operator", maxRetries, retryDelay, logger)
 			if err != nil {
-				logger.Errorf("❌ NVIDIA GPU Operator installation failed: %v", err)
-				errChan <- fmt.Errorf("NVIDIA GPU Operator installation failed: %w", err)
+				errChan <- err
 			} else {
 				logger.Info("✅ NVIDIA GPU Operator installation completed successfully")
 			}
@@ -377,6 +439,7 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 }
 
 func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
+
 	clientset, restConfig, k3dConfig, cleanup, err := SetupK3DCluster(ctx, cfg, logger)
 	if err != nil {
 		return nil, nil, nil, cleanup, err
@@ -386,6 +449,17 @@ func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CIL
 	if err := ensureNamespace(ctx, clientset, namespace); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, err
+	}
+
+	// Start node monitoring by default
+	nodeMonitoringCleanup := StartNodeMonitoring(ctx, cfg.Name, clientset, logger)
+
+	// Create enhanced cleanup function that includes node monitoring
+	enhancedCleanup := func() {
+		// Stop node monitoring first
+		nodeMonitoringCleanup()
+		// Then run the original cleanup
+		cleanup()
 	}
 
 	tolerations := []map[string]interface{}{
@@ -474,7 +548,7 @@ func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CIL
 	}
 
 	logger.Info("🎉 Complete k3d cluster setup successful!")
-	return clientset, restConfig, k3dConfig, cleanup, nil
+	return clientset, restConfig, k3dConfig, enhancedCleanup, nil
 }
 
 func ensureNamespace(ctx context.Context, clientset kubernetes.Interface, namespace string) error {
@@ -490,4 +564,164 @@ func ensureNamespace(ctx context.Context, clientset kubernetes.Interface, namesp
 		return nil
 	}
 	return fmt.Errorf("failed to get namespace %s: %w", namespace, err)
+}
+
+// StartNodeMonitoring starts a goroutine that monitors k3d cluster nodes for not ready status
+// and automatically replaces them by deleting the node and restarting the corresponding Docker container.
+// Returns a cleanup function that should be deferred to stop the monitoring.
+//
+// Example usage:
+//
+//	cleanup := StartNodeMonitoring(ctx, "my-cluster", clientset, logger)
+//	defer cleanup()
+//
+// The monitoring process:
+// 1. Checks for nodes that are not in Ready status every 5 seconds
+// 2. Skips cordoned nodes (intentionally unschedulable for maintenance)
+// 3. Deletes the not ready node from Kubernetes
+// 4. Finds and restarts the corresponding Docker container (node names match container names exactly)
+// 5. The restarted container will rejoin the cluster as a new node
+func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kubernetes.Clientset, logger *CILogger) func() {
+	// Create a context that can be cancelled to stop the monitoring
+	monitorCtx, cancel := context.WithCancel(ctx)
+
+	// Start the monitoring goroutine
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Errorf("Node monitoring goroutine panicked: %v", r)
+			}
+		}()
+
+		logger.Info("🔍 Starting node monitoring for not ready nodes...")
+
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-monitorCtx.Done():
+				logger.Info("🛑 Stopping node monitoring...")
+				return
+			case <-ticker.C:
+				if err := checkAndReplaceNotReadyNodes(monitorCtx, clientset, logger); err != nil {
+					logger.Errorf("Error during node monitoring: %v", err)
+				}
+			}
+		}
+	}()
+
+	// Return cleanup function
+	return func() {
+		logger.Info("🧹 Cleaning up node monitoring...")
+		cancel()
+	}
+}
+
+// checkAndReplaceNotReadyNodes checks for nodes that are not ready and replaces them
+func checkAndReplaceNotReadyNodes(ctx context.Context, clientset *kubernetes.Clientset, logger *CILogger) error {
+	// List all nodes
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	for _, node := range nodes.Items {
+		if !isNodeReady(&node) {
+			// Skip cordoned nodes (intentionally made unschedulable for maintenance)
+			if node.Spec.Unschedulable {
+				logger.Infof("⏭️ Skipping cordoned node: %s (intentionally unschedulable)", node.Name)
+				continue
+			}
+
+			logger.Infof("🚨 Found not ready node: %s", node.Name)
+
+			if err := replaceNotReadyNode(ctx, &node, clientset, logger); err != nil {
+				logger.Errorf("Failed to replace not ready node %s: %v", node.Name, err)
+				continue
+			}
+
+			logger.Infof("✅ Successfully replaced not ready node: %s", node.Name)
+		}
+	}
+
+	return nil
+}
+
+// isNodeReady checks if a node is in Ready state
+func isNodeReady(node *v1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == v1.NodeReady {
+			return condition.Status == v1.ConditionTrue
+		}
+	}
+	return false // If no Ready condition is found, consider the node not ready
+}
+
+// replaceNotReadyNode handles the process of replacing a not ready node
+func replaceNotReadyNode(ctx context.Context, node *v1.Node, clientset *kubernetes.Clientset, logger *CILogger) error {
+	nodeName := node.Name
+
+	// Step 1: Delete the node from Kubernetes
+	logger.Infof("🗑️ Deleting node from Kubernetes: %s", nodeName)
+	if err := clientset.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete node %s: %w", nodeName, err)
+	}
+
+	// Step 2: Find and restart the corresponding Docker container
+	logger.Infof("🔄 Restarting Docker container for node: %s", nodeName)
+	if err := restartNodeContainer(ctx, nodeName, logger); err != nil {
+		return fmt.Errorf("failed to restart container for node %s: %w", nodeName, err)
+	}
+
+	return nil
+}
+
+// restartNodeContainer finds and restarts the Docker container corresponding to a k3d node
+func restartNodeContainer(ctx context.Context, nodeName string, logger *CILogger) error {
+	// Create Docker client
+	dockerClient, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("failed to create Docker client: %w", err)
+	}
+	defer dockerClient.Close()
+
+	// List all containers to find the one corresponding to this node
+	containers, err := dockerClient.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("failed to list Docker containers: %w", err)
+	}
+
+	// Find the container for this specific node
+	// Node names match container names exactly (e.g., k3d-gang-scheduling-pcs-pcsg-scaling-test-cluster-agent-24)
+	var targetContainer *container.Summary
+	for _, c := range containers {
+		for _, name := range c.Names {
+			// Remove leading slash from container name
+			containerName := strings.TrimPrefix(name, "/")
+
+			// Direct name match - node names are the same as container names
+			if containerName == nodeName {
+				targetContainer = &c
+				logger.Infof("  🎯 Found matching container: %s (ID: %s)", containerName, c.ID[:12])
+				break
+			}
+		}
+		if targetContainer != nil {
+			break
+		}
+	}
+
+	if targetContainer == nil {
+		return fmt.Errorf("could not find Docker container for node %s", nodeName)
+	}
+
+	// Restart the container
+	logger.Infof("  🔄 Restarting container: %s", targetContainer.ID[:12])
+	if err := dockerClient.ContainerRestart(ctx, targetContainer.ID, container.StopOptions{}); err != nil {
+		return fmt.Errorf("failed to restart container %s: %w", targetContainer.ID[:12], err)
+	}
+
+	logger.Infof("  ✅ Container restarted successfully: %s", targetContainer.ID[:12])
+	return nil
 }

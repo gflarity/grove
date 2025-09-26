@@ -272,7 +272,7 @@ func testWebhookConnectivity(ctx context.Context, restConfig *rest.Config, names
 									"containers": []interface{}{
 										map[string]interface{}{
 											"name":  "test",
-											"image": "nginx:latest",
+											"image": "nginx:alpine-slim",
 										},
 									},
 								},

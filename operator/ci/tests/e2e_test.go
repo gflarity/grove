@@ -2,20 +2,33 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/NVIDIA/grove/operator/ci/utils"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
-// TestGangSchedulingWithFullReplicas tests gang-scheduling behavior with insufficient resources
-// Scenario: Initialize a 10-node Grove cluster, cordon 1 node, deploy workload WL1, verify 10 newly created pods
-// are all pending due to insufficient resources, then uncordon the node and verify all pods get scheduled
-func TestGangSchedulingWithFullReplicas(t *testing.T) {
+// Test_GS1_GangSchedulingWithFullReplicas tests gang-scheduling behavior with insufficient resources
+// Scenario GS-1:
+// 1. Initialize a 10-node Grove cluster, then cordon 1 node
+// 2. Deploy workload WL1, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon the node and verify all pods get scheduled
+func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a CILogger for this test
@@ -26,9 +39,12 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 		Name:             "gang-scheduling-test-cluster",
 		Servers:          3,
 		Agents:           10, // 10 agents (worker nodes)
-		Image:            "rancher/k3s:v1.28.8-k3s1",
+		WorkerMemory:     "150m",
+		Image:            "rancher/k3s:v1.33.5-k3s1",
 		HostPort:         "6552",
 		LoadBalancerPort: "8082:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
 		AgentNodeLabels: map[string]string{
 			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
 		},
@@ -43,12 +59,16 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 
 	fmt.Printf("🚀 Starting gang-scheduling test with 10-node k3d cluster: %+v\n", customCfg)
 
-	// Setup cluster with custom config
-	clientset, restConfig, _, cleanup, err := utils.SetupK3DCluster(ctx, customCfg, logger)
+	// 1. Initialize a 10-node Grove cluster, then cordon 1 node
+	// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
+	// Setup cluster with custom config and core components
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
 	defer cleanup() // always call cleanup
 	if err != nil {
 		t.Fatalf("Failed to setup k3d cluster: %v", err)
 	}
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
 
 	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
 
@@ -84,157 +104,14 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 		t.Fatalf("Failed to cordon node %s: %v", agentNodeToCordon, err)
 	}
 
-	// Create the namespace for Grove installation
-	namespace := "grove-system"
-	_, err = clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: namespace,
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Failed to create namespace %s: %v", namespace, err)
-	}
-	fmt.Printf("✅ Created namespace: %s\n", namespace)
-
-	// Install Grove, Kai, and NVIDIA GPU Operator in parallel
-	fmt.Printf("🚀 Starting parallel installation of Grove, Kai Scheduler, and NVIDIA GPU Operator...\n")
-
-	// Configure Grove
-	groveConfig := utils.GroveInstallConfigV0_1_0_Alpha1()
-	groveConfig.ReleaseName = "grove-gang-test"
-	groveConfig.Namespace = namespace
-	groveConfig.RestConfig = restConfig
-
-	// Add tolerations for control-plane and Grove e2e taints so Grove can schedule on all worker nodes
-	groveConfig.Values["tolerations"] = []map[string]interface{}{
-		{
-			"key":      "node-role.kubernetes.io/control-plane",
-			"operator": "Exists",
-			"effect":   "NoSchedule",
-		},
-	}
-
-	// Configure Kai Scheduler
-	kaiConfig := utils.KaiInstallConfigLatest("v0.9.3")
-	kaiConfig.RestConfig = restConfig
-
-	// Add tolerations for control-plane and Grove e2e taints so Kai can schedule on all nodes
-	kaiConfig.Values["global"] = map[string]interface{}{
-		"tolerations": []map[string]interface{}{
-			{
-				"key":      "node-role.kubernetes.io/control-plane",
-				"operator": "Exists",
-				"effect":   "NoSchedule",
-			},
-		},
-	}
-
-	// Configure NVIDIA GPU Operator
-	nvidiaConfig := utils.NvidiaOperatorInstallConfigLatest("v25.3.4")
-	nvidiaConfig.ReleaseName = "nvidia-gpu-operator-gang-test" // Use specific name instead of auto-generated
-	nvidiaConfig.GenerateName = false                          // Disable auto-generation
-	nvidiaConfig.RestConfig = restConfig
-
-	// TODO this is wrong, looks like tolerations need to be per component
-	// Add tolerations for control-plane and Grove e2e taints so NVIDIA operator can schedule on all nodes
-	nvidiaConfig.Values["tolerations"] = []map[string]interface{}{
-		{
-			"key":      "node-role.kubernetes.io/control-plane",
-			"operator": "Exists",
-			"effect":   "NoSchedule",
-		},
-	}
-
-	// Install all three components in parallel using goroutines
-	type installResult struct {
-		name string
-		err  error
-	}
-
-	resultChan := make(chan installResult, 3)
-
-	// Install Grove
-	go func() {
-		logger.Info("🚀 Starting Grove installation...")
-		_, err := utils.InstallGrove(groveConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ Grove installation failed: %v", err)
-			resultChan <- installResult{"Grove", err}
-		} else {
-			logger.Info("✅ Grove installation completed successfully")
-			resultChan <- installResult{"Grove", nil}
-		}
-	}()
-
-	// Install Kai Scheduler
-	go func() {
-		logger.Info("🚀 Starting Kai Scheduler installation...")
-		_, err := utils.InstallKai(kaiConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ Kai Scheduler installation failed: %v", err)
-			resultChan <- installResult{"Kai", err}
-		} else {
-			logger.Info("✅ Kai Scheduler installation completed successfully")
-			resultChan <- installResult{"Kai", nil}
-		}
-	}()
-
-	// Install NVIDIA GPU Operator
-	go func() {
-		logger.Info("🚀 Starting NVIDIA GPU Operator installation...")
-		_, err := utils.InstallNvidiaOperator(nvidiaConfig, logger)
-		if err != nil {
-			logger.Errorf("❌ NVIDIA GPU Operator installation failed: %v", err)
-			resultChan <- installResult{"NVIDIA GPU Operator", err}
-		} else {
-			logger.Info("✅ NVIDIA GPU Operator installation completed successfully")
-			resultChan <- installResult{"NVIDIA GPU Operator", nil}
-		}
-	}()
-
-	// Wait for all three installations to complete
-	for i := 0; i < 3; i++ {
-		result := <-resultChan
-		if result.err != nil {
-			t.Fatalf("%s installation failed: %v", result.name, result.err)
-		}
-		fmt.Printf("✅ %s installation completed\n", result.name)
-	}
-
-	fmt.Printf("✅ All three installations (Grove, Kai Scheduler, and NVIDIA GPU Operator) completed successfully\n")
-
-	// Wait for Grove pods to be ready
-	if err := utils.WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
-		t.Fatalf("Grove pods not ready: %v", err)
-	}
-
-	// Wait for Kai Scheduler pods to be ready
-	if err := utils.WaitForKaiPodsReady(ctx, restConfig, logger); err != nil {
-		t.Fatalf("Kai Scheduler pods not ready: %v", err)
-	}
-
-	// Wait for Kai CRDs to be ready
-	if err := utils.WaitForKaiCRDs(ctx, restConfig, logger); err != nil {
-		t.Fatalf("Failed to wait for Kai CRDs: %v", err)
-	}
-
-	// Create default queue for Kai scheduler
-	if err := utils.CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
-		t.Fatalf("Failed to create default queue for Kai scheduler: %v", err)
-	}
-
-	// Wait for NVIDIA GPU Operator to be ready
-	if err := utils.WaitForNvidiaOperatorReady(ctx, restConfig, logger); err != nil {
-		t.Fatalf("NVIDIA GPU Operator not ready: %v", err)
-	}
-
+	// 2. Deploy workload WL1, and verify 10 newly created pods
 	// Deploy workload1.yaml
 	workloadNamespace := "default"
 	workloadConfig := &utils.WorkloadConfig{
 		YAMLFilePath: "../yaml/workload1.yaml",
 		Namespace:    workloadNamespace,
 		RestConfig:   restConfig,
-		Timeout:      2 * time.Minute, // Short timeout since we expect pods to be pending
+		Timeout:      1 * time.Minute, // Short timeout since we expect pods to be pending
 	}
 
 	fmt.Printf("🚀 Applying workload1.yaml...\n")
@@ -267,6 +144,7 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 
 	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
 
+	// 3. Verify all workload pods are pending due to insufficient resources
 	// Verify all pods are pending due to unschedulable nodes
 	pendingPods := 0
 	for _, pod := range pods.Items {
@@ -305,6 +183,7 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 
 	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
 
+	// 4. Uncordon the node and verify all pods get scheduled
 	// Uncordon the node to provide sufficient resources
 	fmt.Printf("✅ Uncordoning agent node: %s\n", agentNodeToCordon)
 	if err := cordonNode(ctx, clientset, agentNodeToCordon, false); err != nil {
@@ -339,6 +218,7 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 	if runningPods != len(pods.Items) {
 		t.Errorf("Expected all %d pods to be running, but only %d are running", len(pods.Items), runningPods)
 	}
+	assertPodsOnDistinctNodes(t, pods.Items)
 
 	fmt.Printf("🎉 Gang-scheduling test completed successfully! Grove, Kai, and NVIDIA GPU Operator installed, all workload pods transitioned from pending to running after uncordoning.\n")
 
@@ -348,6 +228,933 @@ func TestGangSchedulingWithFullReplicas(t *testing.T) {
 		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
 		// Note: Cleanup is handled by the cluster cleanup function
 	}
+}
+
+// Test_GS2_GangSchedulingWithScalingFullReplicas verifies gang-scheduling behavior when scaling a PodCliqueScalingGroup
+// Scenario GS-2:
+// 1. Initialize a 14-node Grove cluster, then cordon 5 nodes
+// 2. Deploy workload WL1, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node to allow scheduling and verify pods get scheduled
+// 5. Wait for pods to become ready
+// 6. Scale PCSG replicas to 3 and verify 4 new pending pods
+// 7. Uncordon remaining nodes and verify all pods get scheduled
+func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
+	ctx := context.Background()
+
+	logger := utils.NewCILogger(nil)
+
+	customCfg := utils.ClusterConfig{
+		Name:             "gang-scheduling-pcsg-scaling-test-cluster",
+		Servers:          3,
+		Agents:           14,
+		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6553",
+		LoadBalancerPort: "8083:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent",
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCSG scaling test with k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 14-node Grove cluster, then cordon 5 nodes
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
+			continue
+		}
+		agentNodes = append(agentNodes, node.Name)
+	}
+
+	if len(agentNodes) < 5 {
+		t.Fatalf("expected at least 5 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	nodesToCordon := agentNodes[:5]
+	fmt.Printf("🚫 Cordoning %d agent nodes: %v\n", len(nodesToCordon), nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL1, and verify 10 newly created pods
+	workloadNamespace := "default"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload1.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute,
+		PodLabelSelector: "app.kubernetes.io/part-of=workload1",
+	}
+
+	fmt.Printf("🚀 Applying workload1.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// 4. Uncordon 1 node to allow scheduling and verify pods get scheduled
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// 5. Wait for pods to become ready
+	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	runningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			runningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
+
+	if runningPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be running, but only %d are running", len(pods.Items), runningPods)
+	}
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	// 6. Scale PCSG replicas to 3 and verify 4 new pending pods
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	pcsgGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquescalinggroups"}
+	pcsgName := "workload1-0-sg-x"
+
+	fmt.Printf("🔍 Waiting for PodCliqueScalingGroup %s to become available...\n", pcsgName)
+	err = pollForCondition(ctx, 3*time.Minute, 5*time.Second, func() (bool, error) {
+		_, err := dynamicClient.Resource(pcsgGVR).Namespace(workloadNamespace).Get(ctx, pcsgName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to find PodCliqueScalingGroup %s: %v", pcsgName, err)
+	}
+
+	scalePatch := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"replicas": 3,
+		},
+	}
+	patchBytes, err := json.Marshal(scalePatch)
+	if err != nil {
+		t.Fatalf("Failed to marshal scale patch: %v", err)
+	}
+
+	fmt.Printf("📈 Scaling PodCliqueScalingGroup %s to replicas=3...\n", pcsgName)
+	if _, err := dynamicClient.Resource(pcsgGVR).Namespace(workloadNamespace).Patch(ctx, pcsgName, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		t.Fatalf("Failed to scale PodCliqueScalingGroup %s: %v", pcsgName, err)
+	}
+
+	fmt.Printf("🔄 Waiting for scaled pods to be created...\n")
+	expectedScaledPods := 14
+	err = pollForCondition(ctx, 3*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods after scaling (waiting for %d)\n", len(pods.Items), expectedScaledPods)
+		return len(pods.Items) == expectedScaledPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for scaled pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods after scaling as expected\n", len(pods.Items))
+
+	runningPods = 0
+	pendingPods = 0
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodRunning:
+			runningPods++
+		case v1.PodPending:
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending\n", runningPods, pendingPods)
+	if pendingPods != 4 {
+		t.Fatalf("Expected 4 pending pods after scaling, but found %d", pendingPods)
+	}
+	if runningPods != expectedPods {
+		t.Fatalf("Expected %d running pods after scaling, but found %d", expectedPods, runningPods)
+	}
+
+	// 7. Uncordon remaining nodes and verify all pods get scheduled
+	remainingNodesToUncordon := nodesToCordon[1:]
+	fmt.Printf("✅ Uncordoning remaining agent nodes: %v\n", remainingNodesToUncordon)
+	for _, nodeName := range remainingNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all scaled pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 15 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for scaled pods to be ready: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods after final uncordon: %v", err)
+	}
+
+	runningPods = 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			runningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running after scaling (expected all %d to be running)\n", runningPods, len(pods.Items))
+	if runningPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be running after scaling, but only %d are running", len(pods.Items), runningPods)
+	}
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCSG scaling test completed successfully!\n")
+
+	fmt.Printf("🧹 Cleaning up applied resources...\n")
+	for _, resource := range appliedResources {
+		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+	}
+}
+
+// TestGangSchedulingWithPCSScalingFullReplicas verifies gang-scheduling behavior when scaling a PodCliqueSet
+// Scenario GS-3:
+// 1. Initialize a 20-node Grove cluster, then cordon 11 nodes
+// 2. Deploy workload WL1, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node to allow scheduling and verify pods get scheduled
+// 5. Wait for pods to become ready
+// 6. Scale PCS replicas to 2 and verify 10 new pending pods
+// 7. Uncordon remaining nodes and verify all pods get scheduled
+func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
+	ctx := context.Background()
+
+	logger := utils.NewCILogger(nil)
+
+	customCfg := utils.ClusterConfig{
+		Name:             "gang-scheduling-pcs-scaling-test-cluster",
+		Servers:          3,
+		Agents:           20,
+		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6554",
+		LoadBalancerPort: "8084:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent",
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCS scaling test with k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 20-node Grove cluster, then cordon 11 nodes
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
+			continue
+		}
+		agentNodes = append(agentNodes, node.Name)
+	}
+
+	if len(agentNodes) < 11 {
+		t.Fatalf("expected at least 11 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	// Step 1 (continued): Cordon 11 nodes
+	nodesToCordon := agentNodes[:11]
+	fmt.Printf("🚫 Cordoning %d agent nodes: %v\n", len(nodesToCordon), nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL1, and verify 10 newly created pods
+	workloadNamespace := "default"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload1.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute,
+		PodLabelSelector: "app.kubernetes.io/part-of=workload1",
+	}
+
+	fmt.Printf("🚀 Applying workload1.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// 4. Uncordon 1 node to allow scheduling and verify pods get scheduled
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// 5. Wait for pods to become ready
+	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	runningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			runningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
+
+	if runningPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be running, but only %d are running", len(pods.Items), runningPods)
+	}
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	// 6. Scale PCS replicas to 2 and verify 10 new pending pods
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	replicas := int32(2)
+	pcsPatch := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"replicas": replicas,
+		},
+	}
+	pcsPatchBytes, err := json.Marshal(pcsPatch)
+	if err != nil {
+		t.Fatalf("Failed to marshal PodCliqueSet patch: %v", err)
+	}
+
+	pcsGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquesets"}
+	pcsName := "workload1"
+
+	fmt.Printf("📈 Scaling PodCliqueSet %s to replicas=%d...\n", pcsName, replicas)
+	if _, err := dynamicClient.Resource(pcsGVR).Namespace(workloadNamespace).Patch(ctx, pcsName, types.MergePatchType, pcsPatchBytes, metav1.PatchOptions{}); err != nil {
+		t.Fatalf("Failed to scale PodCliqueSet %s: %v", pcsName, err)
+	}
+
+	expectedScaledPods := int(replicas) * expectedPods
+
+	fmt.Printf("🔄 Waiting for workload pods to be created after scaling (expect %d)...\n", expectedScaledPods)
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods after scaling (waiting for %d)\n", len(pods.Items), expectedScaledPods)
+		return len(pods.Items) == expectedScaledPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for scaled pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods after scaling as expected\n", len(pods.Items))
+
+	runningPods = 0
+	pendingPods = 0
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodRunning:
+			runningPods++
+		case v1.PodPending:
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	expectedNewPending := expectedScaledPods - expectedPods
+	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending\n", runningPods, pendingPods)
+	if pendingPods != expectedNewPending {
+		t.Fatalf("Expected %d pending pods after scaling, but found %d", expectedNewPending, pendingPods)
+	}
+	if runningPods != expectedPods {
+		t.Fatalf("Expected %d running pods after scaling, but found %d", expectedPods, runningPods)
+	}
+
+	// 7. Uncordon remaining nodes and verify all pods get scheduled
+	remainingNodesToUncordon := nodesToCordon[1:]
+	fmt.Printf("✅ Uncordoning remaining agent nodes: %v\n", remainingNodesToUncordon)
+	for _, nodeName := range remainingNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready after final uncordon...\n")
+	workloadConfig.Timeout = 15 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for scaled pods to be ready: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods after final uncordon: %v", err)
+	}
+
+	runningPods = 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			runningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running after scaling (expected all %d to be running)\n", runningPods, len(pods.Items))
+	if runningPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be running after scaling, but only %d are running", len(pods.Items), runningPods)
+	}
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCS scaling test completed successfully!\n")
+
+	fmt.Printf("🧹 Cleaning up applied resources...\n")
+	for _, resource := range appliedResources {
+		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+	}
+}
+
+// TestGangSchedulingWithPCSAndPCSGScalingFullReplicas verifies gang scheduling while scaling both PodCliqueSet and PodCliqueScalingGroup replicas
+// Scenario GS-4:
+// 1. Initialize a 28-node Grove cluster, then cordon 19 nodes
+// 2. Deploy workload WL1, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node to allow scheduling and verify pods get scheduled
+// 5. Wait for pods to become ready
+// 6. Scale PCSG replicas to 3 and verify 4 new pending pods
+// 7. Uncordon 4 nodes and verify scaled pods get scheduled
+// 8. Scale PCS replicas to 2 and verify 10 new pending pods
+// 9. Scale PCSG replicas to 3 and verify 4 new pending pods
+// 10. Uncordon remaining nodes and verify all pods get scheduled
+func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
+	ctx := context.Background()
+
+	logger := utils.NewCILogger(nil)
+
+	customCfg := utils.ClusterConfig{
+		Name:             "gang-scheduling-pcs-pcsg-scaling-test-cluster",
+		Servers:          3,
+		Agents:           28,
+		WorkerMemory:     "150m",
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6555",
+		LoadBalancerPort: "8085:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent",
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCS+PCSG scaling test with k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 28-node Grove cluster, then cordon 19 nodes
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
+			continue
+		}
+		agentNodes = append(agentNodes, node.Name)
+	}
+
+	if len(agentNodes) != 28 {
+		t.Fatalf("expected at least 28 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	// cordon 19 noes
+	nodesToCordon := agentNodes[:19]
+	fmt.Printf("🚫 Cordoning %d agent nodes: %v\n", len(nodesToCordon), nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL1, and verify 10 newly created pods
+	workloadNamespace := "default"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload1.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute,
+		PodLabelSelector: workloadLabelSelector,
+	}
+
+	fmt.Printf("🚀 Applying workload1.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	defer func() {
+		fmt.Printf("🧹 Cleaning up applied resources...\n")
+		for _, resource := range appliedResources {
+			fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		}
+	}()
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// 4. Uncordon 1 node to allow scheduling and verify pods get scheduled
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// 5. Wait for pods to become ready
+	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	runningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			runningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
+
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// 6. Scale PCSG replicas to 3 and verify 4 new pending pods
+	pcsgName := "workload1-0-sg-x"
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, pcsgName, 3, 14, 4)
+
+	fmt.Printf("✅ PCSG %s scaled to 3 replicas with expected pending pods\n", pcsgName)
+
+	// 7. Uncordon 4 nodes and verify scaled pods get scheduled
+	remainingNodesAfterFirstUncordon := nodesToCordon[1:5]
+	fmt.Printf("✅ Uncordoning nodes for PCSG scale readiness: %v\n", remainingNodesAfterFirstUncordon)
+	for _, nodeName := range remainingNodesAfterFirstUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready after PCSG scale...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready after PCSG scale: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods after PCSG scale: %v", err)
+	}
+
+	fmt.Printf("✅ Verified %d pods are running after PCSG scale\n", len(pods.Items))
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	// 8. Scale PCS replicas to 2 and verify 10 new pending pods
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 24, 10)
+
+	fmt.Printf("✅ PCS scaled to 2 replicas with expected pending pods\n")
+
+	remainingNodesAfterPCSScale := nodesToCordon[5:15]
+	fmt.Printf("✅ Uncordoning nodes for PCS scale readiness: %v\n", remainingNodesAfterPCSScale)
+	for _, nodeName := range remainingNodesAfterPCSScale {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready after PCS scale...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready after PCS scale: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods after PCS scale: %v", err)
+	}
+
+	fmt.Printf("✅ Verified %d pods are running after PCS scale\n", len(pods.Items))
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	// 9. Scale PCSG replicas to 3 and verify 4 new pending pods
+	secondReplicaPCSGName := "workload1-1-sg-x"
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, secondReplicaPCSGName, 3, 28, 4)
+
+	fmt.Printf("✅ PCSG %s scaled to 3 replicas with expected pending pods\n", secondReplicaPCSGName)
+
+	// 10. Uncordon remaining nodes and verify all pods get scheduled
+	finalNodes := nodesToCordon[15:19]
+	fmt.Printf("✅ Uncordoning final nodes for PCSG scale readiness: %v\n", finalNodes)
+	for _, nodeName := range finalNodes {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready after final PCSG scale...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready after final PCSG scale: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods after final PCSG scale: %v", err)
+	}
+
+	fmt.Printf("✅ Verified %d pods are running after final PCSG scale\n", len(pods.Items))
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCS+PCSG scaling test completed successfully!\n")
+}
+
+func assertPodsOnDistinctNodes(t *testing.T, pods []v1.Pod) {
+	t.Helper()
+
+	assignedNodes := make(map[string]string, len(pods))
+	podPlacements := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		nodeName := pod.Spec.NodeName
+		if nodeName == "" {
+			t.Fatalf("Pod %s is running but has no assigned node", pod.Name)
+		}
+		if existingPod, exists := assignedNodes[nodeName]; exists {
+			t.Fatalf("Pods %s and %s are scheduled on the same node %s; expected unique nodes", existingPod, pod.Name, nodeName)
+		}
+		assignedNodes[nodeName] = pod.Name
+		podPlacements = append(podPlacements, fmt.Sprintf("%s->%s", pod.Name, nodeName))
+	}
+
+	fmt.Printf("✅ All %d pods scheduled on distinct nodes: %s\n", len(pods), strings.Join(podPlacements, ", "))
 }
 
 // pollForCondition polls a condition function until it returns true or times out
@@ -403,4 +1210,3681 @@ func cordonNode(ctx context.Context, clientset kubernetes.Interface, nodeName st
 	}
 	fmt.Printf("✅ Successfully %s node %s\n", action, nodeName)
 	return nil
+}
+
+func scalePCSGAndWait(t *testing.T, ctx context.Context, clientset kubernetes.Interface, dynamicClient dynamic.Interface, namespace, labelSelector, pcsgName string, replicas int32, expectedTotalPods, expectedPending int) {
+	t.Helper()
+
+	pcsgGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquescalinggroups"}
+	patchBytes, err := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"replicas": replicas,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to marshal PCSG patch: %v", err)
+	}
+
+	fmt.Printf("📈 Scaling PodCliqueScalingGroup %s to replicas=%d...\n", pcsgName, replicas)
+	if _, err := dynamicClient.Resource(pcsgGVR).Namespace(namespace).Patch(ctx, pcsgName, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		t.Fatalf("Failed to scale PodCliqueScalingGroup %s: %v", pcsgName, err)
+	}
+
+	fmt.Printf("🔄 Waiting for workload pods to be created after scaling PCSG %s (expect %d)...\n", pcsgName, expectedTotalPods)
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false, err
+		}
+		fmt.Printf("Found %d workload pods after PCSG scaling (waiting for %d)\n", len(pods.Items), expectedTotalPods)
+		return len(pods.Items) == expectedTotalPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods after PCSG scaling: %v", err)
+	}
+
+	evaluatePodStates(t, ctx, clientset, namespace, labelSelector, expectedTotalPods, expectedPending)
+}
+
+func scalePCSAndWait(t *testing.T, ctx context.Context, clientset kubernetes.Interface, dynamicClient dynamic.Interface, namespace, labelSelector, pcsName string, replicas int32, expectedTotalPods, expectedPending int) {
+	t.Helper()
+
+	pcsGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquesets"}
+	patchBytes, err := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"replicas": replicas,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to marshal PCS patch: %v", err)
+	}
+
+	fmt.Printf("📈 Scaling PodCliqueSet %s to replicas=%d...\n", pcsName, replicas)
+	if _, err := dynamicClient.Resource(pcsGVR).Namespace(namespace).Patch(ctx, pcsName, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		t.Fatalf("Failed to scale PodCliqueSet %s: %v", pcsName, err)
+	}
+
+	fmt.Printf("🔄 Waiting for workload pods to be created after scaling PCS %s (expect %d)...\n", pcsName, expectedTotalPods)
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false, err
+		}
+		fmt.Printf("Found %d workload pods after PCS scaling (waiting for %d)\n", len(pods.Items), expectedTotalPods)
+		return len(pods.Items) == expectedTotalPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods after PCS scaling: %v", err)
+	}
+
+	evaluatePodStates(t, ctx, clientset, namespace, labelSelector, expectedTotalPods, expectedPending)
+}
+
+func evaluatePodStates(t *testing.T, ctx context.Context, clientset kubernetes.Interface, namespace, labelSelector string, expectedTotalPods, expectedPending int) {
+	t.Helper()
+
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	runningPods := 0
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodRunning:
+			runningPods++
+		case v1.PodPending:
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("📊 Pod states: %d running, %d pending (expected %d pending)\n", runningPods, pendingPods, expectedPending)
+
+	if len(pods.Items) != expectedTotalPods {
+		t.Fatalf("Expected %d total pods, but found %d", expectedTotalPods, len(pods.Items))
+	}
+
+	if pendingPods != expectedPending {
+		t.Fatalf("Expected %d pending pods, but found %d", expectedPending, pendingPods)
+	}
+
+	if runningPods != expectedTotalPods-expectedPending {
+		t.Fatalf("Expected %d running pods, but found %d", expectedTotalPods-expectedPending, runningPods)
+	}
+}
+
+// Test_GS5_GangSchedulingWithMinReplicas tests gang-scheduling behavior with min-replicas
+// Scenario GS-5:
+// 1. Initialize a 10-node Grove cluster, then cordon 8 nodes
+// 2. Deploy workload WL2, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 5. Wait for scheduled pods to become ready
+// 6. Uncordon 7 nodes and verify all remaining workload pods get scheduled
+func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a CILogger for this test
+	logger := utils.NewCILogger(nil)
+
+	// Custom configuration for 10-node k3d cluster (3 servers + 10 agents)
+	customCfg := utils.ClusterConfig{
+		Name:             "gs-min-replicas-test",
+		Servers:          3,
+		Agents:           10,     // 10 agents (worker nodes)
+		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6554",
+		LoadBalancerPort: "8084:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling min-replicas test with 10-node k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 10-node Grove cluster, then cordon 8 nodes
+	// Setup cluster with custom config and core components
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup() // always call cleanup
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	// Verify we have exactly 13 nodes (3 servers + 10 agents)
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	// Collect agent nodes and cordon 8 of them to simulate insufficient resources
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		// Find agent nodes (not server/control-plane)
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
+			agentNodes = append(agentNodes, node.Name)
+		}
+	}
+
+	if len(agentNodes) < 8 {
+		t.Fatalf("expected at least 8 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	// Cordon 8 agent nodes
+	nodesToCordon := agentNodes[:8]
+	fmt.Printf("🚫 Cordoning 8 agent nodes: %v\n", nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL2, and verify 10 newly created pods
+	// 2. Deploy workload WL2, and verify 10 newly created pods
+	// Deploy workload2.yaml
+	workloadNamespace := "default"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload2.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute, // Short timeout since we expect pods to be pending
+		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
+	}
+
+	fmt.Printf("🚀 Applying workload2.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	// workload2 creates: 1 PCS replica * (pc-a: 2 + pc-b: 1 + pc-c: 3) + sg-x: 2 replicas * (pc-b: 1 + pc-c: 3) = 6 + 8 = 14 pods
+	// But the test description says 10 pods, so let me check the actual workload2 structure more carefully
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	if pendingPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be pending, but only %d are pending", len(pods.Items), pendingPods)
+	}
+
+	// Verify pods remain pending due to gang scheduling constraints
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+	// Based on workload2 min-replicas: pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1}
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning 1 agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// Wait for exactly 3 pods to be scheduled (min-replicas)
+	fmt.Printf("⏳ Waiting for exactly 3 pods to be scheduled (min-replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 3 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-3)
+
+		// We expect exactly 3 pods to be running (min-replicas) and the rest pending
+		return runningPods == 3 && pendingPods == len(pods.Items)-3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 3 pods to be scheduled: %v", err)
+	}
+
+	// Verify the scheduled pods and their distribution
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	runningPods := 0
+	pendingPods = 0
+	runningPodNames := make([]string, 0)
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodRunning:
+			runningPods++
+			runningPodNames = append(runningPodNames, pod.Name)
+		case v1.PodPending:
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified exactly 3 pods are running: %v\n", runningPodNames)
+	fmt.Printf("✅ Verified %d pods remain pending\n", pendingPods)
+
+	if runningPods != 3 {
+		t.Fatalf("Expected exactly 3 pods to be running (min-replicas), but found %d", runningPods)
+	}
+
+	if pendingPods != len(pods.Items)-3 {
+		t.Fatalf("Expected %d pods to remain pending, but found %d", len(pods.Items)-3, pendingPods)
+	}
+
+	// 5. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 3 scheduled pods to become ready...\n")
+	workloadConfig.Timeout = 5 * time.Minute
+	// Note: WaitForPods waits for ALL pods, but we only want the running ones to be ready
+	// We'll verify readiness manually
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/3\n", readyRunningPods)
+		return readyRunningPods == 3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 3 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 3 scheduled pods are now ready\n")
+
+	// 6. Uncordon 7 nodes and verify all remaining workload pods get scheduled
+	remainingNodesToUncordon := nodesToCordon[1:]
+	fmt.Printf("✅ Uncordoning remaining 7 agent nodes: %v\n", remainingNodesToUncordon)
+	for _, nodeName := range remainingNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Final verification - all pods should be running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	finalRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			finalRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
+
+	if finalRunningPods != len(pods.Items) {
+		t.Errorf("Expected all %d pods to be running, but only %d are running", len(pods.Items), finalRunningPods)
+	}
+
+	// Verify pods are distributed across distinct nodes
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling min-replicas test (GS-5) completed successfully! All workload pods transitioned correctly through min-replicas scheduling.\n")
+
+	// Cleanup applied resources
+	fmt.Printf("🧹 Cleaning up applied resources...\n")
+	for _, resource := range appliedResources {
+		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		// Note: Cleanup is handled by the cluster cleanup function
+	}
+}
+
+// Test_GS6_GangSchedulingWithPCSGScalingMinReplicas tests gang-scheduling behavior with PCSG scaling and min-replicas
+// Scenario GS-6:
+// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
+// 2. Deploy workload WL2, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 5. Wait for scheduled pods to become ready
+// 6. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+// 7. Wait for scheduled pods to become ready
+// 8. Set pcs-0-sg-x resource replicas equal to 3, then verify 4 newly created pods
+// 9. Verify all newly created pods are pending due to insufficient resources
+// 10. Uncordon 2 nodes and verify 2 more pods get scheduled (pcs-0-{sg-x-2-pc-b=1, sg-x-2-pc-c=1})
+// 11. Wait for scheduled pods to become ready
+// 12. Uncordon 2 nodes and verify remaining workload pods get scheduled
+func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a CILogger for this test
+	logger := utils.NewCILogger(nil)
+
+	// Custom configuration for 14-node k3d cluster (3 servers + 14 agents)
+	customCfg := utils.ClusterConfig{
+		Name:             "gs-pcsg-scaling-min-replicas-test",
+		Servers:          5,
+		Agents:           14,     // 14 agents (worker nodes)
+		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6555",
+		LoadBalancerPort: "8085:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCSG scaling min-replicas test with 14-node k3d cluster: %+v\n", customCfg)
+
+	// Setup cluster with custom config and core components
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup() // always call cleanup
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	// Verify we have exactly 17 nodes (3 servers + 14 agents)
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	// Collect agent nodes and cordon 12 of them to simulate insufficient resources
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		// Find agent nodes (not server/control-plane)
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
+			agentNodes = append(agentNodes, node.Name)
+		}
+	}
+
+	if len(agentNodes) < 12 {
+		t.Fatalf("expected at least 12 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	// Cordon 12 agent nodes
+	nodesToCordon := agentNodes[:12]
+	fmt.Printf("🚫 Cordoning 12 agent nodes: %v\n", nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Deploy workload2.yaml
+	workloadNamespace := "default"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload2.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute, // Short timeout since we expect pods to be pending
+		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
+	}
+
+	fmt.Printf("🚀 Applying workload2.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	// workload2 initially creates 10 pods
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	if pendingPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be pending, but only %d are pending", len(pods.Items), pendingPods)
+	}
+
+	// Verify pods remain pending due to gang scheduling constraints
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+	// Based on workload2 min-replicas: pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1}
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning 1 agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// Wait for exactly 3 pods to be scheduled (min-replicas)
+	fmt.Printf("⏳ Waiting for exactly 3 pods to be scheduled (min-replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 3 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-3)
+
+		// We expect exactly 3 pods to be running (min-replicas) and the rest pending
+		return runningPods == 3 && pendingPods == len(pods.Items)-3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 3 pods to be scheduled: %v", err)
+	}
+
+	// Verify the scheduled pods and their distribution
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	runningPods := 0
+	pendingPods = 0
+	runningPodNames := make([]string, 0)
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodRunning:
+			runningPods++
+			runningPodNames = append(runningPodNames, pod.Name)
+		case v1.PodPending:
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified exactly 3 pods are running: %v\n", runningPodNames)
+	fmt.Printf("✅ Verified %d pods remain pending\n", pendingPods)
+
+	if runningPods != 3 {
+		t.Fatalf("Expected exactly 3 pods to be running (min-replicas), but found %d", runningPods)
+	}
+
+	if pendingPods != len(pods.Items)-3 {
+		t.Fatalf("Expected %d pods to remain pending, but found %d", len(pods.Items)-3, pendingPods)
+	}
+
+	// 5. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 3 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/3\n", readyRunningPods)
+		return readyRunningPods == 3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 3 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 3 scheduled pods are now ready\n")
+
+	// 6. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+	sevenNodesToUncordon := nodesToCordon[1:8]
+	fmt.Printf("✅ Uncordoning 7 agent nodes: %v\n", sevenNodesToUncordon)
+	for _, nodeName := range sevenNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Verify all 10 initial pods are running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	allRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			allRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
+
+	if allRunningPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be running, but only %d are running", len(pods.Items), allRunningPods)
+	}
+
+	fmt.Printf("✅ All initial workload pods are now ready\n")
+
+	// 7. Wait for scheduled pods to become ready
+	// Create dynamic client for PCSG scaling operations
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// 8. Set pcs-0-sg-x resource replicas equal to 3, then verify 4 newly created pods
+	// Scale PCSG sg-x to 3 replicas and verify 4 newly created pods
+	pcsgName := "workload2-0-sg-x"
+	fmt.Printf("📈 Scaling PodCliqueScalingGroup %s to 3 replicas...\n", pcsgName)
+
+	// Expected total pods after scaling: 10 (initial) + 4 (new from scaling sg-x from 2 to 3) = 14
+	expectedPodsAfterScaling := 14
+	expectedNewPendingPods := 4
+
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadConfig.PodLabelSelector, pcsgName, 3, expectedPodsAfterScaling, expectedNewPendingPods)
+
+	// 9. Verify all newly created pods are pending due to insufficient resources
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods after PCSG scaling: %v", err)
+	}
+
+	runningAfter := 0
+	pendingAfter := 0
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodRunning:
+			runningAfter++
+		case v1.PodPending:
+			pendingAfter++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected %d pending)\n", runningAfter, pendingAfter, expectedNewPendingPods)
+	if len(pods.Items) != expectedPodsAfterScaling {
+		t.Fatalf("Expected %d total pods after scaling, but found %d", expectedPodsAfterScaling, len(pods.Items))
+	}
+	if pendingAfter != expectedNewPendingPods {
+		t.Fatalf("Expected %d pending pods after scaling, but found %d", expectedNewPendingPods, pendingAfter)
+	}
+	if runningAfter != expectedPodsAfterScaling-expectedNewPendingPods {
+		t.Fatalf("Expected %d running pods after scaling, but found %d", expectedPodsAfterScaling-expectedNewPendingPods, runningAfter)
+	}
+
+	fmt.Printf("✅ PCSG %s scaled to 3 replicas with %d new pending pods\n", pcsgName, expectedNewPendingPods)
+
+	// 10. Uncordon 2 nodes and verify 2 more pods get scheduled (pcs-0-{sg-x-2-pc-b=1, sg-x-2-pc-c=1})
+	// Uncordon 2 nodes and verify exactly 2 more pods get scheduled
+	// pcs-0-{sg-x-2-pc-b = 1, sg-x-2-pc-c = 1} (min-replicas for the new PCSG replica)
+	twoNodesToUncordon := nodesToCordon[8:10]
+	fmt.Printf("✅ Uncordoning 2 agent nodes: %v\n", twoNodesToUncordon)
+	for _, nodeName := range twoNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for exactly 2 more pods to be scheduled (min-replicas for new PCSG replica)
+	fmt.Printf("⏳ Waiting for exactly 2 more pods to be scheduled (min-replicas for new PCSG replica)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states after PCSG scaling: %d running, %d pending (expecting 12 running, 2 pending)\n",
+			runningPods, pendingPods)
+
+		// We expect 12 pods running (10 initial + 2 from min-replicas) and 2 pending
+		return runningPods == 12 && pendingPods == 2, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 2 more pods to be scheduled after PCSG scaling: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 2 more pods are running after PCSG scaling\n")
+
+	// 11. Wait for scheduled pods to become ready
+	// Wait for the 2 newly scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 2 newly scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/12\n", readyRunningPods)
+		return readyRunningPods == 12, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 12 pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 12 scheduled pods are now ready\n")
+
+	// 12. Uncordon 2 nodes and verify remaining workload pods get scheduled
+	// Uncordon remaining 2 nodes and verify all remaining workload pods get scheduled
+	remainingNodesToUncordon := nodesToCordon[10:12]
+	fmt.Printf("✅ Uncordoning remaining 2 agent nodes: %v\n", remainingNodesToUncordon)
+	for _, nodeName := range remainingNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Final verification - all 14 pods should be running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	finalRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			finalRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
+
+	if finalRunningPods != expectedPodsAfterScaling {
+		t.Errorf("Expected all %d pods to be running, but only %d are running", expectedPodsAfterScaling, finalRunningPods)
+	}
+
+	// Verify pods are distributed across distinct nodes
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCSG scaling min-replicas test (GS-6) completed successfully! All workload pods transitioned correctly through PCSG scaling with min-replicas.\n")
+
+	// Cleanup applied resources
+	fmt.Printf("🧹 Cleaning up applied resources...\n")
+	for _, resource := range appliedResources {
+		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		// Note: Cleanup is handled by the cluster cleanup function
+	}
+}
+
+// Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1 tests advanced gang-scheduling behavior with PCSG scaling and min-replicas
+// Scenario GS-7:
+// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
+// 2. Deploy workload WL2, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 5. Wait for scheduled pods to become ready
+// 6. Uncordon 2 nodes and verify 2 more pods get scheduled (pcs-0-{sg-x-1-pc-b=1, sg-x-1-pc-c=1})
+// 7. Wait for scheduled pods to become ready
+// 8. Uncordon 5 nodes and verify the remaining workload pods get scheduled
+// 9. Wait for scheduled pods to become ready
+// 10. Set pcs-0-sg-x resource replicas equal to 3, then verify 4 newly created pods
+// 11. Verify all newly created pods are pending due to insufficient resources
+// 12. Uncordon 2 nodes and verify 2 more pods get scheduled (pcs-0-{sg-x-2-pc-b=1, sg-x-2-pc-c=1})
+// 13. Wait for scheduled pods to become ready
+// 14. Uncordon 2 nodes and verify remaining workload pods get scheduled
+func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a CILogger for this test
+	logger := utils.NewCILogger(nil)
+
+	// Custom configuration for 14-node k3d cluster (3 servers + 14 agents)
+	customCfg := utils.ClusterConfig{
+		Name:             "gs-pcsg-scaling-min-replicas-advanced1-test",
+		Servers:          3,
+		Agents:           14,     // 14 agents (worker nodes)
+		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6556",
+		LoadBalancerPort: "8086:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCSG scaling min-replicas advanced1 test with 14-node k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
+	// Setup cluster with custom config and core components
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup() // always call cleanup
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	// Verify we have exactly 17 nodes (3 servers + 14 agents)
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	// Collect agent nodes and cordon 12 of them to simulate insufficient resources
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		// Find agent nodes (not server/control-plane)
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
+			agentNodes = append(agentNodes, node.Name)
+		}
+	}
+
+	if len(agentNodes) < 12 {
+		t.Fatalf("expected at least 12 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	// Cordon 12 agent nodes
+	nodesToCordon := agentNodes[:12]
+	fmt.Printf("🚫 Cordoning 12 agent nodes: %v\n", nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL2, and verify 10 newly created pods
+	// Deploy workload2.yaml
+	workloadNamespace := "default"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload2.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute, // Short timeout since we expect pods to be pending
+		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
+	}
+
+	fmt.Printf("🚀 Applying workload2.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	// workload2 initially creates 10 pods
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	if pendingPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be pending, but only %d are pending", len(pods.Items), pendingPods)
+	}
+
+	// Verify pods remain pending due to gang scheduling constraints
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+	// Based on workload2 min-replicas: pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1}
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning 1 agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// Wait for exactly 3 pods to be scheduled (min-replicas)
+	fmt.Printf("⏳ Waiting for exactly 3 pods to be scheduled (min-replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 3 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-3)
+
+		// We expect exactly 3 pods to be running (min-replicas) and the rest pending
+		return runningPods == 3 && pendingPods == len(pods.Items)-3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 3 pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 3 pods are running (min-replicas)\n")
+
+	// 5. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 3 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/3\n", readyRunningPods)
+		return readyRunningPods == 3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 3 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 3 scheduled pods are now ready\n")
+
+	// 6. Uncordon 2 nodes and verify 2 more pods get scheduled (pcs-0-{sg-x-1-pc-b=1, sg-x-1-pc-c=1})
+	twoNodesToUncordon := nodesToCordon[1:3]
+	fmt.Printf("✅ Uncordoning 2 agent nodes: %v\n", twoNodesToUncordon)
+	for _, nodeName := range twoNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for exactly 2 more pods to be scheduled (sg-x-1 min-replicas)
+	fmt.Printf("⏳ Waiting for exactly 2 more pods to be scheduled (sg-x-1 min-replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 5 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-5)
+
+		// We expect 5 pods running (3 + 2 new) and the rest pending
+		return runningPods == 5 && pendingPods == len(pods.Items)-5, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 2 more pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 2 more pods are running (sg-x-1 min-replicas)\n")
+
+	// 7. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 5 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/5\n", readyRunningPods)
+		return readyRunningPods == 5, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 5 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 5 scheduled pods are now ready\n")
+
+	// 8. Uncordon 5 nodes and verify the remaining workload pods get scheduled
+	fiveNodesToUncordon := nodesToCordon[3:8]
+	fmt.Printf("✅ Uncordoning 5 agent nodes: %v\n", fiveNodesToUncordon)
+	for _, nodeName := range fiveNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Verify all 10 initial pods are running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	allRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			allRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
+
+	if allRunningPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be running, but only %d are running", len(pods.Items), allRunningPods)
+	}
+
+	fmt.Printf("✅ All initial workload pods are now ready\n")
+
+	// 9. Wait for scheduled pods to become ready (already verified above)
+
+	// Create dynamic client for PCSG scaling operations
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// 10. Set pcs-0-sg-x resource replicas equal to 3, then verify 4 newly created pods
+	// Scale PCSG sg-x to 3 replicas and verify 4 newly created pods
+	pcsgName := "workload2-0-sg-x"
+	fmt.Printf("📈 Scaling PodCliqueScalingGroup %s to 3 replicas...\n", pcsgName)
+
+	// Expected total pods after scaling: 10 (initial) + 4 (new from scaling sg-x from 2 to 3) = 14
+	expectedPodsAfterScaling := 14
+	expectedNewPendingPods := 4
+
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadConfig.PodLabelSelector, pcsgName, 3, expectedPodsAfterScaling, expectedNewPendingPods)
+
+	fmt.Printf("✅ PCSG %s scaled to 3 replicas with %d new pending pods\n", pcsgName, expectedNewPendingPods)
+
+	// 11. Verify all newly created pods are pending due to insufficient resources (verified in scalePCSGAndWait)
+
+	// 12. Uncordon 2 nodes and verify 2 more pods get scheduled (pcs-0-{sg-x-2-pc-b=1, sg-x-2-pc-c=1})
+	// Uncordon 2 nodes and verify exactly 2 more pods get scheduled
+	// pcs-0-{sg-x-2-pc-b = 1, sg-x-2-pc-c = 1} (min-replicas for the new PCSG replica)
+	twoMoreNodesToUncordon := nodesToCordon[8:10]
+	fmt.Printf("✅ Uncordoning 2 agent nodes: %v\n", twoMoreNodesToUncordon)
+	for _, nodeName := range twoMoreNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for exactly 2 more pods to be scheduled (min-replicas for new PCSG replica)
+	fmt.Printf("⏳ Waiting for exactly 2 more pods to be scheduled (min-replicas for new PCSG replica)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states after PCSG scaling: %d running, %d pending (expecting 12 running, 2 pending)\n",
+			runningPods, pendingPods)
+
+		// We expect 12 pods running (10 initial + 2 from min-replicas) and 2 pending
+		return runningPods == 12 && pendingPods == 2, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 2 more pods to be scheduled after PCSG scaling: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 2 more pods are running after PCSG scaling\n")
+
+	// 13. Wait for scheduled pods to become ready
+	// Wait for the 2 newly scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 2 newly scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/12\n", readyRunningPods)
+		return readyRunningPods == 12, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 12 pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 12 scheduled pods are now ready\n")
+
+	// 14. Uncordon 2 nodes and verify remaining workload pods get scheduled
+	// Uncordon remaining 2 nodes and verify all remaining workload pods get scheduled
+	remainingNodesToUncordon := nodesToCordon[10:12]
+	fmt.Printf("✅ Uncordoning remaining 2 agent nodes: %v\n", remainingNodesToUncordon)
+	for _, nodeName := range remainingNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Final verification - all 14 pods should be running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	finalRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			finalRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
+
+	if finalRunningPods != expectedPodsAfterScaling {
+		t.Errorf("Expected all %d pods to be running, but only %d are running", expectedPodsAfterScaling, finalRunningPods)
+	}
+
+	// Verify pods are distributed across distinct nodes
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCSG scaling min-replicas advanced1 test (GS-7) completed successfully! All workload pods transitioned correctly through advanced PCSG scaling with min-replicas.\n")
+
+	// Cleanup applied resources
+	fmt.Printf("🧹 Cleaning up applied resources...\n")
+	for _, resource := range appliedResources {
+		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		// Note: Cleanup is handled by the cluster cleanup function
+	}
+}
+
+// TestGangSchedulingWithPCSGScalingMinReplicasAdvanced2 tests advanced gang-scheduling behavior with early PCSG scaling and min-replicas
+// Scenario GS-8:
+// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
+// 2. Deploy workload WL2, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Set pcs-0-sg-x resource replicas equal to 3, verify 4 more newly created pods
+// 5. Verify all 14 newly created pods are pending due to insufficient resources
+// 6. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 7. Wait for scheduled pods to become ready
+// 8. Uncordon 4 nodes and verify 4 more pods get scheduled (pcs-0-{sg-x-1-pc-b=1, sg-x-1-pc-c=1}, pcs-0-{sg-x-2-pc-b=1, sg-x-2-pc-c=1})
+// 9. Wait for scheduled pods to become ready
+// 10. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a CILogger for this test
+	logger := utils.NewCILogger(nil)
+
+	// Custom configuration for 14-node k3d cluster (3 servers + 14 agents)
+	customCfg := utils.ClusterConfig{
+		Name:             "gs-pcsg-scaling-min-replicas-advanced2-test",
+		Servers:          3,
+		Agents:           14,     // 14 agents (worker nodes)
+		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6557",
+		LoadBalancerPort: "8087:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCSG scaling min-replicas advanced2 test with 14-node k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
+	// Setup cluster with custom config and core components
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup() // always call cleanup
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	// Verify we have exactly 17 nodes (3 servers + 14 agents)
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	// Collect agent nodes and cordon 12 of them to simulate insufficient resources
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		// Find agent nodes (not server/control-plane)
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
+			agentNodes = append(agentNodes, node.Name)
+		}
+	}
+
+	if len(agentNodes) < 12 {
+		t.Fatalf("expected at least 12 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	// Cordon 12 agent nodes
+	nodesToCordon := agentNodes[:12]
+	fmt.Printf("🚫 Cordoning 12 agent nodes: %v\n", nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL2, and verify 10 newly created pods
+	// Deploy workload2.yaml
+	workloadNamespace := "default"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload2.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute, // Short timeout since we expect pods to be pending
+		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
+	}
+
+	fmt.Printf("🚀 Applying workload2.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	// workload2 initially creates 10 pods
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	if pendingPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be pending, but only %d are pending", len(pods.Items), pendingPods)
+	}
+
+	// Verify pods remain pending due to gang scheduling constraints
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// Create dynamic client for PCSG scaling operations
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// 4. Set pcs-0-sg-x resource replicas equal to 3, verify 4 more newly created pods
+	pcsgName := "workload2-0-sg-x"
+	fmt.Printf("📈 Scaling PodCliqueScalingGroup %s to 3 replicas before uncordoning...\n", pcsgName)
+
+	// Expected total pods after scaling: 10 (initial) + 4 (new from scaling sg-x from 2 to 3) = 14
+	expectedPodsAfterScaling := 14
+
+	scalePatch := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"replicas": 3,
+		},
+	}
+	patchBytes, err := json.Marshal(scalePatch)
+	if err != nil {
+		t.Fatalf("Failed to marshal scale patch: %v", err)
+	}
+
+	pcsgGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquescalinggroups"}
+	if _, err := dynamicClient.Resource(pcsgGVR).Namespace(workloadNamespace).Patch(ctx, pcsgName, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		t.Fatalf("Failed to scale PodCliqueScalingGroup %s: %v", pcsgName, err)
+	}
+
+	fmt.Printf("🔄 Waiting for workload pods to be created after scaling (expect %d)...\n", expectedPodsAfterScaling)
+	err = pollForCondition(ctx, 3*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods after scaling (waiting for %d)\n", len(pods.Items), expectedPodsAfterScaling)
+		return len(pods.Items) == expectedPodsAfterScaling, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for scaled pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods after scaling as expected\n", len(pods.Items))
+
+	// 5. Verify all 14 newly created pods are pending due to insufficient resources
+	pendingPods = 0
+	runningPods := 0
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodPending:
+			pendingPods++
+		case v1.PodRunning:
+			runningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected 0 running, %d pending)\n", runningPods, pendingPods, expectedPodsAfterScaling)
+
+	if len(pods.Items) != expectedPodsAfterScaling {
+		t.Fatalf("Expected %d total pods after scaling, but found %d", expectedPodsAfterScaling, len(pods.Items))
+	}
+	if pendingPods != expectedPodsAfterScaling {
+		t.Fatalf("Expected all %d pods to be pending after scaling, but found %d pending", expectedPodsAfterScaling, pendingPods)
+	}
+	if runningPods != 0 {
+		t.Fatalf("Expected 0 running pods after scaling with all nodes cordoned, but found %d running", runningPods)
+	}
+
+	fmt.Printf("✅ Verified all %d pods are pending after PCSG scaling (gang scheduling working correctly)\n", len(pods.Items))
+
+	// 6. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning 1 agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// Wait for exactly 3 pods to be scheduled (min-replicas)
+	fmt.Printf("⏳ Waiting for exactly 3 pods to be scheduled (min-replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 3 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-3)
+
+		// We expect exactly 3 pods to be running (min-replicas) and the rest pending
+		return runningPods == 3 && pendingPods == len(pods.Items)-3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 3 pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 3 pods are running (min-replicas)\n")
+
+	// 7. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 3 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/3\n", readyRunningPods)
+		return readyRunningPods == 3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 3 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 3 scheduled pods are now ready\n")
+
+	// 8. Uncordon 4 nodes and verify 4 more pods get scheduled
+	fourNodesToUncordon := nodesToCordon[1:5]
+	fmt.Printf("✅ Uncordoning 4 agent nodes: %v\n", fourNodesToUncordon)
+	for _, nodeName := range fourNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for exactly 4 more pods to be scheduled (sg-x-1 and sg-x-2 min-replicas)
+	fmt.Printf("⏳ Waiting for exactly 4 more pods to be scheduled (sg-x-1 and sg-x-2 min-replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 7 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-7)
+
+		// We expect 7 pods running (3 + 4 new) and the rest pending
+		return runningPods == 7 && pendingPods == len(pods.Items)-7, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 4 more pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 4 more pods are running (sg-x-1 and sg-x-2 min-replicas)\n")
+
+	// 9. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 7 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/7\n", readyRunningPods)
+		return readyRunningPods == 7, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 7 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 7 scheduled pods are now ready\n")
+
+	// 10. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+	remainingNodesToUncordon := nodesToCordon[5:]
+	fmt.Printf("✅ Uncordoning remaining 7 agent nodes: %v\n", remainingNodesToUncordon)
+	for _, nodeName := range remainingNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Final verification - all 14 pods should be running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	finalRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			finalRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
+
+	if finalRunningPods != expectedPodsAfterScaling {
+		t.Errorf("Expected all %d pods to be running, but only %d are running", expectedPodsAfterScaling, finalRunningPods)
+	}
+
+	// Verify pods are distributed across distinct nodes
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCSG scaling min-replicas advanced2 test (GS-8) completed successfully! All workload pods transitioned correctly through early PCSG scaling with min-replicas.\n")
+
+	// Cleanup applied resources
+	fmt.Printf("🧹 Cleaning up applied resources...\n")
+	for _, resource := range appliedResources {
+		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		// Note: Cleanup is handled by the cluster cleanup function
+	}
+}
+
+// TestGangSchedulingWithPCSScalingMinReplicas tests gang-scheduling behavior with PodCliqueSet scaling and min-replicas
+// Scenario GS-9:
+// 1. Initialize a 20-node Grove cluster, then cordon 18 nodes
+// 2. Deploy workload WL2, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 5. Wait for scheduled pods to become ready
+// 6. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+// 7. Wait for scheduled pods to become ready
+// 8. Set PCS resource replicas equal to 2, then verify 10 more newly created pods
+// 9. Uncordon 3 nodes and verify another 3 pods get scheduled (pcs-1-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 10. Wait for scheduled pods to become ready
+// 11. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a CILogger for this test
+	logger := utils.NewCILogger(nil)
+
+	// Custom configuration for 20-node k3d cluster (3 servers + 20 agents)
+	customCfg := utils.ClusterConfig{
+		Name:             "gs-pcs-scaling-min-replicas-test",
+		Servers:          3,
+		Agents:           20,     // 20 agents (worker nodes)
+		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6558",
+		LoadBalancerPort: "8088:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCS scaling min-replicas test with 20-node k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 20-node Grove cluster, then cordon 18 nodes
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup() // always call cleanup
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	// Verify we have exactly 23 nodes (3 servers + 20 agents)
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	// Collect agent nodes and cordon 18 of them to simulate insufficient resources
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		// Find agent nodes (not server/control-plane)
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
+			agentNodes = append(agentNodes, node.Name)
+		}
+	}
+
+	if len(agentNodes) < 18 {
+		t.Fatalf("expected at least 18 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	// Cordon 18 agent nodes
+	nodesToCordon := agentNodes[:18]
+	fmt.Printf("🚫 Cordoning 18 agent nodes: %v\n", nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL2, and verify 10 newly created pods
+	workloadNamespace := "default"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload2.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute, // Short timeout since we expect pods to be pending
+		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
+	}
+
+	fmt.Printf("🚀 Applying workload2.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	// workload2 initially creates 10 pods
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	if pendingPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be pending, but only %d are pending", len(pods.Items), pendingPods)
+	}
+
+	// Verify pods remain pending due to gang scheduling constraints
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning 1 agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// Wait for exactly 3 pods to be scheduled (min-replicas)
+	fmt.Printf("⏳ Waiting for exactly 3 pods to be scheduled (min-replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 3 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-3)
+
+		// We expect exactly 3 pods to be running (min-replicas) and the rest pending
+		return runningPods == 3 && pendingPods == len(pods.Items)-3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 3 pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 3 pods are running (min-replicas)\n")
+
+	// 5. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 3 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/3\n", readyRunningPods)
+		return readyRunningPods == 3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 3 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 3 scheduled pods are now ready\n")
+
+	// 6. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+	sevenNodesToUncordon := nodesToCordon[1:8]
+	fmt.Printf("✅ Uncordoning 7 agent nodes: %v\n", sevenNodesToUncordon)
+	for _, nodeName := range sevenNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Verify all 10 initial pods are running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	allRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			allRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
+
+	if allRunningPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be running, but only %d are running", len(pods.Items), allRunningPods)
+	}
+
+	fmt.Printf("✅ All initial workload pods are now ready\n")
+
+	// 7. Wait for scheduled pods to become ready (already verified above)
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// 8. Set PCS resource replicas equal to 2, then verify 10 more newly created pods
+	// Scale PodCliqueSet to 2 replicas and verify 10 more newly created pods
+	pcsName := "workload2"
+	fmt.Printf("📈 Scaling PodCliqueSet %s to 2 replicas...\n", pcsName)
+
+	// Expected total pods after scaling: 10 (initial) + 10 (new from scaling PCS from 1 to 2) = 20
+	expectedPodsAfterScaling := 20
+	expectedNewPendingPods := 10
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadConfig.PodLabelSelector, pcsName, 2, expectedPodsAfterScaling, expectedNewPendingPods)
+
+	fmt.Printf("✅ PCS %s scaled to 2 replicas with %d new pending pods\n", pcsName, expectedNewPendingPods)
+
+	// 9. Uncordon 3 nodes and verify another 3 pods get scheduled (pcs-1-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+	threeNodesToUncordon := nodesToCordon[8:11]
+	fmt.Printf("✅ Uncordoning 3 agent nodes: %v\n", threeNodesToUncordon)
+	for _, nodeName := range threeNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for exactly 3 more pods to be scheduled (min-replicas for new PCS replica)
+	fmt.Printf("⏳ Waiting for exactly 3 more pods to be scheduled (min-replicas for new PCS replica)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states after PCS scaling: %d running, %d pending (expecting 13 running, 7 pending)\n",
+			runningPods, pendingPods)
+
+		// We expect 13 pods running (10 initial + 3 from min-replicas) and 7 pending
+		return runningPods == 13 && pendingPods == 7, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 3 more pods to be scheduled after PCS scaling: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 3 more pods are running after PCS scaling\n")
+
+	// 10. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 3 newly scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/13\n", readyRunningPods)
+		return readyRunningPods == 13, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 13 pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 13 scheduled pods are now ready\n")
+
+	// 11. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+	remainingNodesToUncordon := nodesToCordon[11:18]
+	fmt.Printf("✅ Uncordoning remaining 7 agent nodes: %v\n", remainingNodesToUncordon)
+	for _, nodeName := range remainingNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Final verification - all 20 pods should be running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	finalRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			finalRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
+
+	if finalRunningPods != expectedPodsAfterScaling {
+		t.Errorf("Expected all %d pods to be running, but only %d are running", expectedPodsAfterScaling, finalRunningPods)
+	}
+
+	// Verify pods are distributed across distinct nodes
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCS scaling min-replicas test (GS-9) completed successfully! All workload pods transitioned correctly through PCS scaling with min-replicas.\n")
+
+	// Cleanup applied resources
+	fmt.Printf("🧹 Cleaning up applied resources...\n")
+	for _, resource := range appliedResources {
+		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		// Note: Cleanup is handled by the cluster cleanup function
+	}
+}
+
+// Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced tests advanced gang-scheduling behavior with early PCS scaling and min-replicas
+// Scenario GS-10:
+// 1. Initialize a 20-node Grove cluster, then cordon 18 nodes
+// 2. Deploy workload WL2, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Set PCS resource replicas equal to 2, then verify 10 more newly created pods
+// 5. Verify all 20 newly created pods are pending due to insufficient resources
+// 6. Uncordon 4 nodes and verify a total of 6 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1}, pcs-1-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 7. Wait for scheduled pods to become ready
+// 8. Uncordon 4 nodes and verify 4 more pods get scheduled (pcs-0-{sg-x-1-pc-b=1, sg-x-1-pc-c=1}, pcs-1-{sg-x-1-pc-b=1, sg-x-1-pc-c=1})
+// 9. Wait for scheduled pods to become ready
+// 10. Uncordon 10 nodes and verify the remaining workload pods get scheduled
+func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a CILogger for this test
+	logger := utils.NewCILogger(nil)
+
+	// Custom configuration for 20-node k3d cluster (3 servers + 20 agents)
+	customCfg := utils.ClusterConfig{
+		Name:             "gs-pcs-scaling-min-replicas-advanced-test",
+		Servers:          5,
+		Agents:           20,     // 20 agents (worker nodes)
+		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6559",
+		LoadBalancerPort: "8089:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCS scaling min-replicas advanced test with 20-node k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 20-node Grove cluster, then cordon 18 nodes
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup() // always call cleanup
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	// Verify we have exactly 23 nodes (3 servers + 20 agents)
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	// Collect agent nodes and cordon 18 of them to simulate insufficient resources
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		// Find agent nodes (not server/control-plane)
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
+			agentNodes = append(agentNodes, node.Name)
+		}
+	}
+
+	if len(agentNodes) < 18 {
+		t.Fatalf("expected at least 18 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	// Cordon 18 agent nodes
+	nodesToCordon := agentNodes[:18]
+	fmt.Printf("🚫 Cordoning 18 agent nodes: %v\n", nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL2, and verify 10 newly created pods
+	workloadNamespace := "default"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload2.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute, // Short timeout since we expect pods to be pending
+		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
+	}
+
+	fmt.Printf("🚀 Applying workload2.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	// workload2 initially creates 10 pods
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodPending {
+			pendingPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+
+	if pendingPods != len(pods.Items) {
+		t.Fatalf("Expected all %d pods to be pending, but only %d are pending", len(pods.Items), pendingPods)
+	}
+
+	// Verify pods remain pending due to gang scheduling constraints
+	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Still pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+
+	// Create dynamic client for PCS scaling operations
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// 4. Set PCS resource replicas equal to 2, then verify 10 more newly created pods
+	pcsName := "workload2"
+	fmt.Printf("📈 Scaling PodCliqueSet %s to 2 replicas before uncordoning...\n", pcsName)
+
+	// Expected total pods after scaling: 10 (initial) + 10 (new from scaling PCS from 1 to 2) = 20
+	expectedPodsAfterScaling := 20
+
+	scalePatch := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"replicas": 2,
+		},
+	}
+	patchBytes, err := json.Marshal(scalePatch)
+	if err != nil {
+		t.Fatalf("Failed to marshal scale patch: %v", err)
+	}
+
+	pcsGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquesets"}
+	if _, err := dynamicClient.Resource(pcsGVR).Namespace(workloadNamespace).Patch(ctx, pcsName, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		t.Fatalf("Failed to scale PodCliqueSet %s: %v", pcsName, err)
+	}
+
+	fmt.Printf("🔄 Waiting for workload pods to be created after scaling (expect %d)...\n", expectedPodsAfterScaling)
+	err = pollForCondition(ctx, 3*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods after scaling (waiting for %d)\n", len(pods.Items), expectedPodsAfterScaling)
+		return len(pods.Items) == expectedPodsAfterScaling, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for scaled pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods after scaling as expected\n", len(pods.Items))
+
+	// 5. Verify all 20 newly created pods are pending due to insufficient resources
+	pendingPods = 0
+	runningPods := 0
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodPending:
+			pendingPods++
+		case v1.PodRunning:
+			runningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected 0 running, %d pending)\n", runningPods, pendingPods, expectedPodsAfterScaling)
+
+	if len(pods.Items) != expectedPodsAfterScaling {
+		t.Fatalf("Expected %d total pods after scaling, but found %d", expectedPodsAfterScaling, len(pods.Items))
+	}
+	if pendingPods != expectedPodsAfterScaling {
+		t.Fatalf("Expected all %d pods to be pending after scaling, but found %d pending", expectedPodsAfterScaling, pendingPods)
+	}
+	if runningPods != 0 {
+		t.Fatalf("Expected 0 running pods after scaling with all nodes cordoned, but found %d running", runningPods)
+	}
+
+	fmt.Printf("✅ Verified all %d pods are pending after PCS scaling (gang scheduling working correctly)\n", len(pods.Items))
+
+	// 6. Uncordon 4 nodes and verify a total of 6 pods get scheduled
+	fourNodesToUncordon := nodesToCordon[0:4]
+	fmt.Printf("✅ Uncordoning 4 agent nodes: %v\n", fourNodesToUncordon)
+	for _, nodeName := range fourNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for exactly 6 pods to be scheduled (min-replicas for both PCS replicas)
+	fmt.Printf("⏳ Waiting for exactly 6 pods to be scheduled (min-replicas for both PCS replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 6 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-6)
+
+		// We expect exactly 6 pods to be running (min-replicas for both PCS replicas) and the rest pending
+		return runningPods == 6 && pendingPods == len(pods.Items)-6, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 6 pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 6 pods are running (min-replicas for both PCS replicas)\n")
+
+	// 7. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 6 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/6\n", readyRunningPods)
+		return readyRunningPods == 6, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 6 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 6 scheduled pods are now ready\n")
+
+	// 8. Uncordon 4 nodes and verify 4 more pods get scheduled
+	fourMoreNodesToUncordon := nodesToCordon[4:8]
+	fmt.Printf("✅ Uncordoning 4 more agent nodes: %v\n", fourMoreNodesToUncordon)
+	for _, nodeName := range fourMoreNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for exactly 4 more pods to be scheduled (sg-x-1 for both PCS replicas)
+	fmt.Printf("⏳ Waiting for exactly 4 more pods to be scheduled (sg-x-1 for both PCS replicas)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Pod states: %d running, %d pending (expecting 10 running, %d pending)\n",
+			runningPods, pendingPods, len(pods.Items)-10)
+
+		// We expect 10 pods running (6 + 4 new) and the rest pending
+		return runningPods == 10 && pendingPods == len(pods.Items)-10, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for exactly 4 more pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified exactly 4 more pods are running (sg-x-1 for both PCS replicas)\n")
+
+	// 9. Wait for scheduled pods to become ready
+	fmt.Printf("⏳ Waiting for the 10 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadConfig.PodLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		readyRunningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				// Check if pod is ready
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyRunningPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready running pods: %d/10\n", readyRunningPods)
+		return readyRunningPods == 10, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 10 scheduled pods to become ready: %v", err)
+	}
+
+	fmt.Printf("✅ All 10 scheduled pods are now ready\n")
+
+	// 10. Uncordon 10 nodes and verify the remaining workload pods get scheduled
+	remainingNodesToUncordon := nodesToCordon[8:18]
+	fmt.Printf("✅ Uncordoning remaining 10 agent nodes: %v\n", remainingNodesToUncordon)
+	for _, nodeName := range remainingNodesToUncordon {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// Wait for all remaining pods to be scheduled and ready
+	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
+	}
+
+	// Final verification - all 20 pods should be running
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadConfig.PodLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list workload pods: %v", err)
+	}
+
+	finalRunningPods := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			finalRunningPods++
+		}
+		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+	}
+
+	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
+
+	if finalRunningPods != expectedPodsAfterScaling {
+		t.Errorf("Expected all %d pods to be running, but only %d are running", expectedPodsAfterScaling, finalRunningPods)
+	}
+
+	// Verify pods are distributed across distinct nodes
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCS scaling min-replicas advanced test (GS-10) completed successfully! All workload pods transitioned correctly through early PCS scaling with min-replicas.\n")
+
+	// Cleanup applied resources
+	fmt.Printf("🧹 Cleaning up applied resources...\n")
+	for _, resource := range appliedResources {
+		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		// Note: Cleanup is handled by the cluster cleanup function
+	}
+}
+
+// waitForRegistry waits for the k3d registry to be available
+func waitForRegistry(t *testing.T, registryPort string, timeout time.Duration) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	registryURL := fmt.Sprintf("http://localhost:%s/v2/", registryPort)
+
+	fmt.Printf("⏳ Waiting for registry on port %s to be ready...\n", registryPort)
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("Registry on port %s did not become ready within %v", registryPort, timeout)
+		case <-ticker.C:
+			// Try to connect to the registry
+			resp, err := http.Get(registryURL)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == 200 || resp.StatusCode == 401 {
+					fmt.Printf("✅ Registry on port %s is ready\n", registryPort)
+					return
+				}
+			}
+		}
+	}
+}
+
+// setupRegistryTestImage pulls nginx:alpine-slim, tags it for the local registry, and pushes it
+// This helper function uses Docker Go client library to perform operations equivalent to:
+// docker pull nginx:alpine-slim
+// docker tag nginx:alpine-slim localhost:5001/nginx:alpine-slim
+// docker push localhost:5001/nginx:alpine-slim
+func setupRegistryTestImage(t *testing.T, registryPort string) {
+	t.Helper()
+
+	// Wait for registry to be ready first
+	waitForRegistry(t, registryPort, 2*time.Minute)
+
+	ctx := context.Background()
+	imageName := "nginx:alpine-slim"
+	registryImage := fmt.Sprintf("localhost:%s/nginx:alpine-slim", registryPort)
+
+	fmt.Printf("🐳 Setting up test image in registry on port %s...\n", registryPort)
+
+	// Initialize Docker client
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Fatalf("Failed to create Docker client: %v", err)
+	}
+	defer cli.Close()
+
+	// Step 1: Pull the nginx:alpine-slim image
+	fmt.Printf("📥 Pulling %s...\n", imageName)
+	pullReader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
+	if err != nil {
+		t.Fatalf("Failed to pull %s: %v", imageName, err)
+	}
+	defer pullReader.Close()
+
+	// Consume the pull output to avoid blocking
+	_, err = io.Copy(io.Discard, pullReader)
+	if err != nil {
+		t.Fatalf("Failed to read pull output for %s: %v", imageName, err)
+	}
+
+	// Step 2: Tag the image for the local registry
+	fmt.Printf("🏷️  Tagging %s as %s...\n", imageName, registryImage)
+	err = cli.ImageTag(ctx, imageName, registryImage)
+	if err != nil {
+		t.Fatalf("Failed to tag %s as %s: %v", imageName, registryImage, err)
+	}
+
+	// Step 3: Push the image to the local registry
+	fmt.Printf("📤 Pushing %s to registry...\n", registryImage)
+	// For local k3d registry, no authentication is typically required
+	pushReader, err := cli.ImagePush(ctx, registryImage, image.PushOptions{})
+	if err != nil {
+		t.Fatalf("Failed to push %s to registry: %v", registryImage, err)
+	}
+	defer pushReader.Close()
+
+	// Consume the push output to avoid blocking
+	_, err = io.Copy(io.Discard, pushReader)
+	if err != nil {
+		t.Fatalf("Failed to read push output for %s: %v", registryImage, err)
+	}
+
+	fmt.Printf("✅ Successfully set up test image %s in registry\n", registryImage)
+}
+
+// Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas tests gang-scheduling behavior with both PCS and PCSG scaling using min-replicas
+// Scenario GS-11:
+// 1. Initialize a 28-node Grove cluster, then cordon 26 nodes
+// 2. Deploy workload WL2, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node
+// 5. Wait for min-replicas pods to be scheduled and ready (should be 3 pods for min-available)
+// 6. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+// 7. Set pcs-0-sg-x resource replicas equal to 3, then verify 4 newly created pods
+// 8. Verify all newly created pods are pending due to insufficient resources
+// 9. Uncordon 2 nodes
+// 10. Wait for 2 more pods to be scheduled and ready (min-available for sg-x-2)
+// 11. Uncordon 2 nodes and verify remaining workload pods get scheduled
+// 12. Set pcs resource replicas equal to 2, then verify 10 more newly created pods
+// 13. Uncordon 3 nodes
+// 14. Wait for 3 more pods to be scheduled (min-available for pcs-1)
+// 15. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+// 16. Set pcs-1-sg-x resource replicas equal to 3, then verify 4 newly created pods
+// 17. Verify all newly created pods are pending due to insufficient resources
+// 18. Uncordon 2 nodes
+// 19. Wait for 2 more pods to be scheduled (min-available for pcs-1-sg-x-2)
+// 20. Uncordon 2 nodes and verify remaining workload pods get scheduled
+func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
+	ctx := context.Background()
+
+	logger := utils.NewCILogger(nil)
+
+	customCfg := utils.ClusterConfig{
+		Name:             "gs-pcs-pcsg-min-test",
+		Servers:          3,
+		Agents:           28,
+		WorkerMemory:     "150m",
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6556",
+		LoadBalancerPort: "8086:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent",
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling PCS+PCSG scaling with min-replicas test with k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 28-node Grove cluster, then cordon 26 nodes
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
+			continue
+		}
+		agentNodes = append(agentNodes, node.Name)
+	}
+
+	if len(agentNodes) < 26 {
+		t.Fatalf("expected at least 26 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	nodesToCordon := agentNodes[:26]
+	fmt.Printf("🚫 Cordoning %d agent nodes: %v\n", len(nodesToCordon), nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL2, and verify 10 newly created pods
+	workloadNamespace := "default"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload2"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload2.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute,
+		PodLabelSelector: workloadLabelSelector,
+	}
+
+	fmt.Printf("🚀 Applying workload2.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	defer func() {
+		fmt.Printf("🧹 Cleaning up applied resources...\n")
+		for _, resource := range appliedResources {
+			fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		}
+	}()
+
+	fmt.Printf("🔍 Polling for pods to be created...\n")
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	fmt.Printf("🔍 Verifying all workload pods are pending due to insufficient resources...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all workload pods are pending (gang scheduling working correctly)\n")
+
+	// 4. Uncordon 1 node
+	firstNodeToUncordon := nodesToCordon[0]
+	fmt.Printf("✅ Uncordoning agent node: %s\n", firstNodeToUncordon)
+	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+		t.Fatalf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
+	}
+
+	// 5. Wait for min-replicas pods to be scheduled and ready (should be 3 pods for min-available)
+	fmt.Printf("⏳ Waiting for min-replicas pods to be scheduled and ready (expecting 3 pods)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				runningPods++
+			}
+		}
+
+		fmt.Printf("Running pods: %d (waiting for 3)\n", runningPods)
+		return runningPods == 3, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for min-replicas pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified 3 pods are now running (min-available scheduling)\n")
+
+	// 6. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+	remainingNodesFirstWave := nodesToCordon[1:8]
+	fmt.Printf("✅ Uncordoning nodes for first wave completion: %v\n", remainingNodesFirstWave)
+	for _, nodeName := range remainingNodesFirstWave {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all first wave pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for first wave pods to be ready: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all first wave pods are running\n")
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// 7. Set pcs-0-sg-x resource replicas equal to 3, then verify 4 newly created pods
+	pcsgName := "workload2-0-sg-x"
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, pcsgName, 3, 14, 4)
+
+	fmt.Printf("✅ PCSG %s scaled to 3 replicas with expected pending pods\n", pcsgName)
+
+	// 8. Verify all newly created pods are pending due to insufficient resources
+	fmt.Printf("🔍 Verifying all newly created pods are pending due to insufficient resources...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		totalPods := len(pods.Items)
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		expectedRunning := 10 // Initial 10 pods from first wave
+		expectedPending := 4  // 4 new pods from PCSG scaling
+		fmt.Printf("Pod states after PCSG scaling: %d running, %d pending (expected %d running, %d pending)\n",
+			runningPods, pendingPods, expectedRunning, expectedPending)
+
+		return totalPods == 14 && runningPods == expectedRunning && pendingPods == expectedPending, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify newly created pods are pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all newly created pods are pending due to insufficient resources\n")
+
+	// 9. Uncordon 2 nodes
+	remainingNodesSecondWave := nodesToCordon[8:10]
+	fmt.Printf("✅ Uncordoning nodes for PCSG partial scheduling: %v\n", remainingNodesSecondWave)
+	for _, nodeName := range remainingNodesSecondWave {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 10. Wait for 2 more pods to be scheduled and ready (min-available for sg-x-2)
+	fmt.Printf("⏳ Waiting for 2 more pods to be scheduled and ready...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				runningPods++
+			}
+		}
+
+		fmt.Printf("Running pods: %d (waiting for 12)\n", runningPods)
+		return runningPods == 12, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for PCSG partial scheduling: %v", err)
+	}
+
+	fmt.Printf("✅ Verified 2 more pods are running (min-available for sg-x-2)\n")
+
+	// 11. Uncordon 2 nodes and verify remaining workload pods get scheduled
+	remainingNodesThirdWave := nodesToCordon[10:12]
+	fmt.Printf("✅ Uncordoning nodes for PCSG completion: %v\n", remainingNodesThirdWave)
+	for _, nodeName := range remainingNodesThirdWave {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all PCSG pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for PCSG completion pods to be ready: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all PCSG scaling pods are running\n")
+
+	// 12. Set pcs resource replicas equal to 2, then verify 10 more newly created pods
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload2", 2, 24, 10)
+
+	fmt.Printf("✅ PCS scaled to 2 replicas with expected pending pods\n")
+
+	// 13. Uncordon 3 nodes
+	remainingNodesFourthWave := nodesToCordon[12:15]
+	fmt.Printf("✅ Uncordoning nodes for PCS partial scheduling: %v\n", remainingNodesFourthWave)
+	for _, nodeName := range remainingNodesFourthWave {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 14. Wait for 3 more pods to be scheduled (min-available for pcs-1)
+	fmt.Printf("⏳ Waiting for 3 more pods to be scheduled for PCS partial...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				runningPods++
+			}
+		}
+
+		fmt.Printf("Running pods: %d (waiting for 17)\n", runningPods)
+		return runningPods == 17, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for PCS partial scheduling: %v", err)
+	}
+
+	fmt.Printf("✅ Verified 3 more pods are running (min-available for pcs-1)\n")
+
+	// 15. Uncordon 7 nodes and verify the remaining workload pods get scheduled
+	remainingNodesFifthWave := nodesToCordon[15:22]
+	fmt.Printf("✅ Uncordoning nodes for PCS completion: %v\n", remainingNodesFifthWave)
+	for _, nodeName := range remainingNodesFifthWave {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all PCS pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for PCS completion pods to be ready: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all PCS scaling pods are running\n")
+
+	// 16. Set pcs-1-sg-x resource replicas equal to 3, then verify 4 newly created pods
+	secondReplicaPCSGName := "workload2-1-sg-x"
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, secondReplicaPCSGName, 3, 28, 4)
+
+	fmt.Printf("✅ PCSG %s scaled to 3 replicas with expected pending pods\n", secondReplicaPCSGName)
+
+	// 17. Verify all newly created pods are pending due to insufficient resources
+	fmt.Printf("🔍 Verifying all newly created pods are pending due to insufficient resources...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		totalPods := len(pods.Items)
+		runningPods := 0
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningPods++
+			case v1.PodPending:
+				pendingPods++
+			}
+		}
+
+		expectedRunning := 24 // All previous pods should be running
+		expectedPending := 4  // 4 new pods from second PCSG scaling
+		fmt.Printf("Pod states after second PCSG scaling: %d running, %d pending (expected %d running, %d pending)\n",
+			runningPods, pendingPods, expectedRunning, expectedPending)
+
+		return totalPods == 28 && runningPods == expectedRunning && pendingPods == expectedPending, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify newly created pods are pending after second PCSG scaling: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all newly created pods are pending due to insufficient resources\n")
+
+	// 18. Uncordon 2 nodes
+	remainingNodesSixthWave := nodesToCordon[22:24]
+	fmt.Printf("✅ Uncordoning nodes for final PCSG partial scheduling: %v\n", remainingNodesSixthWave)
+	for _, nodeName := range remainingNodesSixthWave {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 19. Wait for 2 more pods to be scheduled (min-available for pcs-1-sg-x-2)
+	fmt.Printf("⏳ Waiting for 2 more pods to be scheduled for final PCSG partial...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				runningPods++
+			}
+		}
+
+		fmt.Printf("Running pods: %d (waiting for 26)\n", runningPods)
+		return runningPods == 26, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for final PCSG partial scheduling: %v", err)
+	}
+
+	fmt.Printf("✅ Verified 2 more pods are running (min-available for pcs-1-sg-x-2)\n")
+
+	// 20. Uncordon 2 nodes and verify remaining workload pods get scheduled
+	finalNodes := nodesToCordon[24:26]
+	fmt.Printf("✅ Uncordoning final nodes for complete scheduling: %v\n", finalNodes)
+	for _, nodeName := range finalNodes {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all final pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all final pods to be ready: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+	if err != nil {
+		t.Fatalf("Failed to list all final workload pods: %v", err)
+	}
+
+	fmt.Printf("✅ Verified %d pods are running after final scheduling completion\n", len(pods.Items))
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling PCS+PCSG scaling with min-replicas test (GS-11) completed successfully!\n")
+}
+
+// Test_GS12_GangSchedulingWithComplexPCSGScaling tests gang-scheduling behavior with complex PCSG scaling operations
+// Scenario GS-12:
+// 1. Initialize a 28-node Grove cluster, then cordon 26 nodes
+// 2. Deploy workload WL2, and verify 10 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Set pcs resource replicas equal to 2, then verify 10 more newly created pods
+// 5. Verify all 20 newly created pods are pending due to insufficient resources
+// 6. Set both pcs-0-sg-x and pcs-1-sg-x resource replicas equal to 3, verify 8 newly created pods
+// 7. Verify all 28 created pods are pending due to insufficient resources
+// 8. Uncordon 4 nodes and verify a total of 6 pods get scheduled (pcs-0 and pcs-1 min-available)
+// 9. Wait for scheduled pods to become ready
+// 10. Uncordon 8 nodes and verify 8 more pods get scheduled (remaining PCSG pods)
+// 11. Wait for scheduled pods to become ready
+// 12. Uncordon 14 nodes and verify the remaining workload pods get scheduled
+func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
+	ctx := context.Background()
+
+	logger := utils.NewCILogger(nil)
+
+	customCfg := utils.ClusterConfig{
+		Name:             "gs-complex-pcsg-test",
+		Servers:          3,
+		Agents:           28,
+		WorkerMemory:     "150m",
+		Image:            "rancher/k3s:v1.33.5-k3s1",
+		HostPort:         "6557",
+		LoadBalancerPort: "8087:80",
+		EnableRegistry:   true,
+		RegistryPort:     "5001",
+		AgentNodeLabels: map[string]string{
+			"node_role.e2e.grove.nvidia.com": "agent",
+		},
+		AgentNodeTaints: []utils.NodeTaint{
+			{
+				Key:    "node_role.e2e.grove.nvidia.com",
+				Value:  "agent",
+				Effect: "NoSchedule",
+			},
+		},
+	}
+
+	fmt.Printf("🚀 Starting gang-scheduling complex PCSG scaling test with k3d cluster: %+v\n", customCfg)
+
+	// 1. Initialize a 28-node Grove cluster, then cordon 26 nodes
+	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("Failed to setup k3d cluster: %v", err)
+	}
+
+	// Setup test image in registry
+	setupRegistryTestImage(t, customCfg.RegistryPort)
+
+	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
+
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("could not list nodes: %s", err)
+	}
+
+	expectedNodes := customCfg.Servers + customCfg.Agents
+	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
+
+	if len(nodes.Items) != expectedNodes {
+		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	}
+
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
+			continue
+		}
+		agentNodes = append(agentNodes, node.Name)
+	}
+
+	if len(agentNodes) < 26 {
+		t.Fatalf("expected at least 26 agent nodes to cordon, but found %d", len(agentNodes))
+	}
+
+	nodesToCordon := agentNodes[:26]
+	fmt.Printf("🚫 Cordoning %d agent nodes: %v\n", len(nodesToCordon), nodesToCordon)
+	for _, nodeName := range nodesToCordon {
+		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+			t.Fatalf("Failed to cordon node %s: %v", nodeName, err)
+		}
+	}
+
+	// 2. Deploy workload WL2, and verify 10 newly created pods
+	workloadNamespace := "default"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload2"
+	workloadConfig := &utils.WorkloadConfig{
+		YAMLFilePath:     "../yaml/workload2.yaml",
+		Namespace:        workloadNamespace,
+		RestConfig:       restConfig,
+		Timeout:          1 * time.Minute,
+		PodLabelSelector: workloadLabelSelector,
+	}
+
+	fmt.Printf("🚀 Applying workload2.yaml...\n")
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	defer func() {
+		fmt.Printf("🧹 Cleaning up applied resources...\n")
+		for _, resource := range appliedResources {
+			fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
+		}
+	}()
+
+	fmt.Printf("🔍 Polling for pods to be created...\n")
+	expectedPods := 10
+
+	var pods *v1.PodList
+	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		fmt.Printf("Found %d workload pods (waiting for %d)\n", len(pods.Items), expectedPods)
+		return len(pods.Items) == expectedPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be created: %v", err)
+	}
+
+	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+
+	// 3. Verify all workload pods are pending due to insufficient resources
+	fmt.Printf("🔍 Verifying all workload pods are pending due to insufficient resources...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		stillPending := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				stillPending++
+			}
+		}
+
+		fmt.Printf("Pending pods: %d/%d\n", stillPending, len(pods.Items))
+		return stillPending == len(pods.Items), nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify pods remain pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all workload pods are pending (gang scheduling working correctly)\n")
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// 4. Set pcs resource replicas equal to 2, then verify 10 more newly created pods
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload2", 2, 20, 20)
+
+	fmt.Printf("✅ PCS scaled to 2 replicas with expected pending pods\n")
+
+	// 5. Verify all 20 newly created pods are pending due to insufficient resources
+	fmt.Printf("🔍 Verifying all 20 pods are pending due to insufficient resources...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		totalPods := len(pods.Items)
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Total pods: %d, Pending pods: %d (expected all 20 to be pending)\n", totalPods, pendingPods)
+		return totalPods == 20 && pendingPods == 20, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify all 20 pods are pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all 20 pods are pending due to insufficient resources\n")
+
+	// 6. Set both pcs-0-sg-x and pcs-1-sg-x resource replicas equal to 3, verify 8 newly created pods
+	fmt.Printf("📈 Scaling both PCSGs to 3 replicas...\n")
+
+	pcsg1Name := "workload2-0-sg-x"
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, pcsg1Name, 3, 24, 24)
+
+	pcsg2Name := "workload2-1-sg-x"
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, pcsg2Name, 3, 28, 28)
+
+	fmt.Printf("✅ Both PCSGs scaled to 3 replicas with 8 total new pending pods\n")
+
+	// 7. Verify all 28 created pods are pending due to insufficient resources
+	fmt.Printf("🔍 Verifying all 28 pods are pending due to insufficient resources...\n")
+	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		totalPods := len(pods.Items)
+		pendingPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodPending {
+				pendingPods++
+			}
+		}
+
+		fmt.Printf("Total pods: %d, Pending pods: %d (expected all 28 to be pending)\n", totalPods, pendingPods)
+		return totalPods == 28 && pendingPods == 28, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify all 28 pods are pending: %v", err)
+	}
+
+	fmt.Printf("✅ Verified all 28 pods are pending due to insufficient resources\n")
+
+	// 8. Uncordon 4 nodes and verify a total of 6 pods get scheduled (pcs-0 and pcs-1 min-available)
+	firstWaveNodes := nodesToCordon[:4]
+	fmt.Printf("✅ Uncordoning 4 nodes for min-available scheduling: %v\n", firstWaveNodes)
+	for _, nodeName := range firstWaveNodes {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for 6 pods to be scheduled (min-available from both PCS instances)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				runningPods++
+			}
+		}
+
+		fmt.Printf("Running pods: %d (waiting for 6)\n", runningPods)
+		return runningPods == 6, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 6 pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified 6 pods are running (min-available from both PCS instances)\n")
+
+	// 9. Wait for scheduled pods to become ready (only the 6 that are scheduled)
+	fmt.Printf("⏳ Waiting for the 6 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 10*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		readyPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready pods: %d (waiting for 6)\n", readyPods)
+		return readyPods == 6, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 6 pods to be ready: %v", err)
+	}
+
+	// 10. Uncordon 8 nodes and verify 8 more pods get scheduled (remaining PCSG pods)
+	secondWaveNodes := nodesToCordon[4:12]
+	fmt.Printf("✅ Uncordoning 8 nodes for PCSG pods: %v\n", secondWaveNodes)
+	for _, nodeName := range secondWaveNodes {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for 8 more pods to be scheduled (remaining PCSG pods)...\n")
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		runningPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				runningPods++
+			}
+		}
+
+		fmt.Printf("Running pods: %d (waiting for 14)\n", runningPods)
+		return runningPods == 14, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 8 more pods to be scheduled: %v", err)
+	}
+
+	fmt.Printf("✅ Verified 8 more pods are running (remaining PCSG pods)\n")
+
+	// 11. Wait for scheduled pods to become ready (only the 14 that are scheduled)
+	fmt.Printf("⏳ Waiting for the 14 scheduled pods to become ready...\n")
+	err = pollForCondition(ctx, 10*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		readyPods := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == v1.PodRunning {
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+						readyPods++
+						break
+					}
+				}
+			}
+		}
+
+		fmt.Printf("Ready pods: %d (waiting for 14)\n", readyPods)
+		return readyPods == 14, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for 14 pods to be ready: %v", err)
+	}
+
+	// 12. Uncordon 14 nodes and verify the remaining workload pods get scheduled
+	finalWaveNodes := nodesToCordon[12:26]
+	fmt.Printf("✅ Uncordoning remaining 14 nodes for final scheduling: %v\n", finalWaveNodes)
+	for _, nodeName := range finalWaveNodes {
+		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+			t.Fatalf("Failed to uncordon node %s: %v", nodeName, err)
+		}
+	}
+
+	fmt.Printf("⏳ Waiting for all remaining pods to be scheduled and ready...\n")
+	workloadConfig.Timeout = 10 * time.Minute
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+		t.Fatalf("Failed to wait for all final pods to be ready: %v", err)
+	}
+
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{LabelSelector: workloadLabelSelector})
+	if err != nil {
+		t.Fatalf("Failed to list all final workload pods: %v", err)
+	}
+
+	fmt.Printf("✅ Verified %d pods are running after final scheduling completion\n", len(pods.Items))
+	assertPodsOnDistinctNodes(t, pods.Items)
+
+	fmt.Printf("🎉 Gang-scheduling complex PCSG scaling test (GS-12) completed successfully!\n")
 }
