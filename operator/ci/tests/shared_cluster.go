@@ -166,39 +166,20 @@ func (scm *SharedClusterManager) CleanupWorkloads(ctx context.Context, t *testin
 
 	t.Log("🧹 Cleaning up workloads from shared cluster...")
 
-	// Define all resource types to clean up
-	resourceTypes := []struct {
-		group    string
-		version  string
-		resource string
-		name     string
-	}{
-		{"grove.io", "v1alpha1", "podcliquesets", "PodCliqueSets"},
-		{"grove.io", "v1alpha1", "podcliquescalinggroups", "PodCliqueScalingGroups"},
-		{"grove.io", "v1alpha1", "podgangsets", "PodGangSets"},
-		{"scheduler.grove.io", "v1alpha1", "podgangs", "PodGangs"},
+	// Step 1: Delete PodCliqueSets first (should cascade delete other resources)
+	if err := scm.deleteAllResources(ctx, "grove.io", "v1alpha1", "podcliquesets"); err != nil {
+		t.Logf("Warning: failed to delete PodCliqueSets: %v", err)
 	}
 
-	// Delete all resources in order
-	for _, rt := range resourceTypes {
-		if err := scm.deleteAllResources(ctx, rt.group, rt.version, rt.resource); err != nil {
-			t.Logf("Warning: failed to delete %s: %v", rt.name, err)
-		}
-	}
-
-	// Also clean up any leftover pods directly (in case they weren't cleaned up by resource deletion)
-	if err := scm.deleteAllPods(ctx, "default"); err != nil {
-		t.Logf("Warning: failed to delete pods directly: %v", err)
-	}
-
-	// Wait for pods to be deleted with longer timeout
-	if err := scm.waitForPodsDeleted(ctx, "default", 5*time.Minute); err != nil {
-		t.Logf("Warning: timeout waiting for pods to be deleted: %v", err)
-		// List remaining pods for debugging
+	// Step 2: Poll for all resources and pods to be cleaned up (max 15 seconds)
+	if err := scm.waitForAllResourcesAndPodsDeleted(ctx, t, 15*time.Second); err != nil {
+		t.Logf("Warning: timeout waiting for resources and pods to be deleted: %v", err)
+		// List remaining resources and pods for debugging
+		scm.listRemainingResources(ctx, t)
 		scm.listRemainingPods(ctx, t, "default")
 	}
 
-	// Reset node cordoning state
+	// Step 3: Reset node cordoning state
 	if err := scm.resetNodeStates(ctx); err != nil {
 		t.Logf("Warning: failed to reset node states: %v", err)
 	}
@@ -235,40 +216,6 @@ func (scm *SharedClusterManager) deleteAllResources(ctx context.Context, group, 
 	return nil
 }
 
-// waitForPodsDeleted waits for all pods in a namespace to be deleted
-func (scm *SharedClusterManager) waitForPodsDeleted(ctx context.Context, namespace string, timeout time.Duration) error {
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	for {
-		select {
-		case <-timeoutCtx.Done():
-			return fmt.Errorf("timeout waiting for pods to be deleted")
-		default:
-			pods, err := scm.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
-			if err != nil {
-				return fmt.Errorf("failed to list pods: %w", err)
-			}
-
-			// Count non-system pods
-			nonSystemPods := 0
-			for _, pod := range pods.Items {
-				// Skip system pods (those managed by DaemonSets, etc.)
-				if !isSystemPod(&pod) {
-					nonSystemPods++
-				}
-			}
-
-			if nonSystemPods == 0 {
-				return nil
-			}
-
-			scm.logger.Infof("⏳ Waiting for %d pods to be deleted...", nonSystemPods)
-			time.Sleep(2 * time.Second)
-		}
-	}
-}
-
 // isSystemPod checks if a pod is a system pod that should be ignored during cleanup
 func isSystemPod(pod *v1.Pod) bool {
 	// Skip pods managed by DaemonSets or system namespaces
@@ -284,25 +231,6 @@ func isSystemPod(pod *v1.Pod) bool {
 	}
 
 	return false
-}
-
-// deleteAllPods deletes all non-system pods in a namespace
-func (scm *SharedClusterManager) deleteAllPods(ctx context.Context, namespace string) error {
-	pods, err := scm.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to list pods: %w", err)
-	}
-
-	for _, pod := range pods.Items {
-		if !isSystemPod(&pod) {
-			err := scm.clientset.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-			if err != nil {
-				scm.logger.Infof("Warning: failed to delete pod %s/%s: %v", namespace, pod.Name, err)
-			}
-		}
-	}
-
-	return nil
 }
 
 // listRemainingPods lists remaining pods for debugging
@@ -333,6 +261,116 @@ func (scm *SharedClusterManager) resetNodeStates(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// waitForAllResourcesAndPodsDeleted waits for all Grove resources and pods to be deleted
+func (scm *SharedClusterManager) waitForAllResourcesAndPodsDeleted(ctx context.Context, t *testing.T, timeout time.Duration) error {
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Define all resource types to check
+	resourceTypes := []struct {
+		group    string
+		version  string
+		resource string
+		name     string
+	}{
+		{"grove.io", "v1alpha1", "podcliquesets", "PodCliqueSets"},
+		{"grove.io", "v1alpha1", "podcliquescalinggroups", "PodCliqueScalingGroups"},
+		{"grove.io", "v1alpha1", "podgangsets", "PodGangSets"},
+		{"scheduler.grove.io", "v1alpha1", "podgangs", "PodGangs"},
+	}
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeoutCtx.Done():
+			return fmt.Errorf("timeout waiting for resources and pods to be deleted")
+		case <-ticker.C:
+			allResourcesDeleted := true
+			totalResources := 0
+
+			// Check Grove resources
+			for _, rt := range resourceTypes {
+				gvr := schema.GroupVersionResource{
+					Group:    rt.group,
+					Version:  rt.version,
+					Resource: rt.resource,
+				}
+
+				resourceList, err := scm.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
+				if err != nil {
+					// If we can't list the resource type, assume it doesn't exist or is being deleted
+					continue
+				}
+
+				if len(resourceList.Items) > 0 {
+					allResourcesDeleted = false
+					totalResources += len(resourceList.Items)
+				}
+			}
+
+			// Check pods
+			allPodsDeleted := true
+			nonSystemPods := 0
+			pods, err := scm.clientset.CoreV1().Pods("default").List(ctx, metav1.ListOptions{})
+			if err == nil {
+				for _, pod := range pods.Items {
+					if !isSystemPod(&pod) {
+						allPodsDeleted = false
+						nonSystemPods++
+					}
+				}
+			}
+
+			if allResourcesDeleted && allPodsDeleted {
+				return nil
+			}
+
+			if totalResources > 0 || nonSystemPods > 0 {
+				scm.logger.Infof("⏳ Waiting for %d Grove resources and %d pods to be deleted...", totalResources, nonSystemPods)
+			}
+		}
+	}
+}
+
+// listRemainingResources lists remaining Grove resources for debugging
+func (scm *SharedClusterManager) listRemainingResources(ctx context.Context, t *testing.T) {
+	resourceTypes := []struct {
+		group    string
+		version  string
+		resource string
+		name     string
+	}{
+		{"grove.io", "v1alpha1", "podcliquesets", "PodCliqueSets"},
+		{"grove.io", "v1alpha1", "podcliquescalinggroups", "PodCliqueScalingGroups"},
+		{"grove.io", "v1alpha1", "podgangsets", "PodGangSets"},
+		{"scheduler.grove.io", "v1alpha1", "podgangs", "PodGangs"},
+	}
+
+	for _, rt := range resourceTypes {
+		gvr := schema.GroupVersionResource{
+			Group:    rt.group,
+			Version:  rt.version,
+			Resource: rt.resource,
+		}
+
+		resourceList, err := scm.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			t.Logf("Failed to list %s: %v", rt.name, err)
+			continue
+		}
+
+		if len(resourceList.Items) > 0 {
+			resourceNames := make([]string, 0, len(resourceList.Items))
+			for _, item := range resourceList.Items {
+				resourceNames = append(resourceNames, fmt.Sprintf("%s/%s", item.GetNamespace(), item.GetName()))
+			}
+			t.Logf("Remaining %s: %v", rt.name, resourceNames)
+		}
+	}
 }
 
 // GetClients returns the kubernetes clients for tests to use

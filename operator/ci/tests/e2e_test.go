@@ -310,7 +310,6 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -366,7 +365,6 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -444,7 +442,6 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending\n", runningPods, pendingPods)
@@ -482,7 +479,6 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running after scaling (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -580,7 +576,6 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -701,7 +696,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		s
 	}
 
 	expectedNewPending := expectedScaledPods - expectedPods
@@ -740,7 +735,6 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running after scaling (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -847,7 +841,6 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -899,7 +892,6 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -1133,7 +1125,6 @@ func evaluatePodStates(t *testing.T, ctx context.Context, clientset kubernetes.I
 		case v1.PodPending:
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Pod states: %d running, %d pending (expected %d pending)\n", runningPods, pendingPods, expectedPending)
@@ -1235,7 +1226,6 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -1328,7 +1318,6 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified exactly 3 pods are running: %v\n", runningPodNames)
@@ -1406,7 +1395,6 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -1515,7 +1503,6 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -1608,7 +1595,6 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified exactly 3 pods are running: %v\n", runningPodNames)
@@ -1683,7 +1669,6 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			allRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
@@ -1729,7 +1714,6 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingAfter++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected %d pending)\n", runningAfter, pendingAfter, expectedNewPendingPods)
@@ -1852,7 +1836,6 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -1964,7 +1947,6 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -2175,7 +2157,6 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			allRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
@@ -2316,7 +2297,6 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -2424,7 +2404,6 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -2516,7 +2495,6 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 		case v1.PodRunning:
 			runningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected 0 running, %d pending)\n", runningPods, pendingPods, expectedPodsAfterScaling)
@@ -2708,7 +2686,6 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -2816,7 +2793,6 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -2952,7 +2928,6 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			allRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
@@ -3085,7 +3060,6 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -3192,7 +3166,6 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -3284,7 +3257,6 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 		case v1.PodRunning:
 			runningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected 0 running, %d pending)\n", runningPods, pendingPods, expectedPodsAfterScaling)
@@ -3478,7 +3450,6 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
