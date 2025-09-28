@@ -4,15 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"strings"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/NVIDIA/grove/operator/ci/utils"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/client"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,7 +16,69 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
+
+var (
+	// isRunningFullSuite tracks whether we're running the full test suite via TestMain
+	isRunningFullSuite bool
+)
+
+// TestMain manages the lifecycle of the shared cluster for all tests
+func TestMain(m *testing.M) {
+	ctx := context.Background()
+
+	// Mark that we're running the full test suite
+	isRunningFullSuite = true
+
+	// Setup shared cluster once for all tests
+	sharedCluster := GetSharedCluster()
+	if err := sharedCluster.Setup(ctx); err != nil {
+		fmt.Printf("❌ Failed to setup shared cluster: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Run all tests
+	code := m.Run()
+
+	// Teardown shared cluster
+	sharedCluster.Teardown()
+
+	os.Exit(code)
+}
+
+// setupTestCluster sets up the shared cluster for a test
+func setupTestCluster(ctx context.Context, t *testing.T, requiredAgents int) (*kubernetes.Clientset, *rest.Config, dynamic.Interface, func(), string) {
+	// Always use shared cluster approach
+	sharedCluster := GetSharedCluster()
+
+	// Setup shared cluster if not already done
+	if !sharedCluster.IsSetup() {
+		if err := sharedCluster.Setup(ctx); err != nil {
+			t.Fatalf("Failed to setup shared cluster: %v", err)
+		}
+	}
+
+	if err := sharedCluster.PrepareForTest(ctx, t, requiredAgents); err != nil {
+		t.Fatalf("Failed to prepare shared cluster for test: %v", err)
+	}
+
+	clientset, restConfig, dynamicClient := sharedCluster.GetClients()
+
+	// Cleanup function cleans workloads and handles teardown for individual tests
+	cleanup := func() {
+		if err := sharedCluster.CleanupWorkloads(ctx, t); err != nil {
+			t.Logf("Warning: failed to cleanup workloads: %v", err)
+		}
+
+		// If running individual test (not full suite), teardown the cluster completely
+		if !isRunningFullSuite {
+			sharedCluster.Teardown()
+		}
+	}
+
+	return clientset, restConfig, dynamicClient, cleanup, sharedCluster.GetRegistryPort()
+}
 
 // Test_GS1_GangSchedulingWithFullReplicas tests gang-scheduling behavior with insufficient resources
 // Scenario GS-1:
@@ -31,75 +89,24 @@ import (
 func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 10)
+	defer cleanup()
 
-	// Custom configuration for 10-node k3d cluster (1 server + 9 agents)
-	customCfg := utils.ClusterConfig{
-		Name:             "gang-scheduling-test-cluster",
-		Servers:          3,
-		Agents:           10, // 10 agents (worker nodes)
-		WorkerMemory:     "150m",
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6552",
-		LoadBalancerPort: "8082:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
+	t.Log("🚀 Starting gang-scheduling test with full replicas")
 
-	fmt.Printf("🚀 Starting gang-scheduling test with 10-node k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 10-node Grove cluster, then cordon 1 node
-	// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
-	// Setup cluster with custom config and core components
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
-	defer cleanup() // always call cleanup
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	// Verify we have exactly 10 nodes
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
+	if len(agentNodes) < 1 {
+		t.Fatalf("Need at least 1 agent node to cordon, but found %d", len(agentNodes))
 	}
 
-	// Cordon one agent node to simulate insufficient resources
-	agentNodeToCordon := ""
-	for _, node := range nodes.Items {
-		// Find an agent node (not a server/control-plane)
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
-			agentNodeToCordon = node.Name
-			break
-		}
-	}
-
-	if agentNodeToCordon == "" {
-		t.Fatalf("Could not find any agent nodes to cordon")
-	}
-
-	fmt.Printf("🚫 Cordoning agent node: %s\n", agentNodeToCordon)
+	agentNodeToCordon := agentNodes[0]
+	t.Logf("🚫 Cordoning agent node: %s", agentNodeToCordon)
 	if err := cordonNode(ctx, clientset, agentNodeToCordon, true); err != nil {
 		t.Fatalf("Failed to cordon node %s: %v", agentNodeToCordon, err)
 	}
@@ -114,14 +121,14 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 		Timeout:      1 * time.Minute, // Short timeout since we expect pods to be pending
 	}
 
-	fmt.Printf("🚀 Applying workload1.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	t.Log("🚀 Applying workload1.yaml...")
+	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
 
 	// Poll for pod creation and verify they are pending
-	fmt.Printf("🔍 Polling for pods to be created and verifying they remain pending...\n")
+	t.Log("🔍 Polling for pods to be created and verifying they remain pending...")
 	expectedPods := 10 // pc-a: 2 replicas, pc-b: 1*2 (scaling group), pc-c: 3*2 (scaling group) = 2+2+6=10
 
 	// Poll until we have the expected number of pods created
@@ -142,7 +149,7 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 		t.Fatalf("Failed to wait for pods to be created: %v", err)
 	}
 
-	fmt.Printf("✅ Found %d workload pods as expected\n", len(pods.Items))
+	t.Logf("✅ Found %d workload pods as expected", len(pods.Items))
 
 	// 3. Verify all workload pods are pending due to insufficient resources
 	// Verify all pods are pending due to unschedulable nodes
@@ -151,13 +158,12 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
-	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
+	t.Logf("✅ Verified %d pods are pending (expected all %d to be pending)", pendingPods, len(pods.Items))
 
 	// Poll to verify pods remain pending for a reasonable time (gang scheduling should prevent partial scheduling)
-	fmt.Printf("🔍 Verifying pods remain pending due to gang scheduling...\n")
+	t.Log("🔍 Verifying pods remain pending due to gang scheduling...")
 	err = pollForCondition(ctx, 2*time.Minute, 10*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: "app.kubernetes.io/part-of=workload1",
@@ -181,19 +187,19 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 		t.Fatalf("Failed to verify pods remain pending: %v", err)
 	}
 
-	fmt.Printf("✅ Verified pods remain pending (gang scheduling working correctly)\n")
+	t.Log("✅ Verified pods remain pending (gang scheduling working correctly)")
 
 	// 4. Uncordon the node and verify all pods get scheduled
 	// Uncordon the node to provide sufficient resources
-	fmt.Printf("✅ Uncordoning agent node: %s\n", agentNodeToCordon)
+	t.Logf("✅ Uncordoning agent node: %s", agentNodeToCordon)
 	if err := cordonNode(ctx, clientset, agentNodeToCordon, false); err != nil {
 		t.Fatalf("Failed to uncordon node %s: %v", agentNodeToCordon, err)
 	}
 
 	// Wait for all pods to be scheduled and ready
-	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready...\n")
+	t.Log("⏳ Waiting for all pods to be scheduled and ready...")
 	workloadConfig.Timeout = 10 * time.Minute // Allow more time for workload pods
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -210,24 +216,18 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
-	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
+	t.Logf("✅ Verified %d pods are now running (expected all %d to be running)", runningPods, len(pods.Items))
 
 	if runningPods != len(pods.Items) {
 		t.Errorf("Expected all %d pods to be running, but only %d are running", len(pods.Items), runningPods)
 	}
 	assertPodsOnDistinctNodes(t, pods.Items)
 
-	fmt.Printf("🎉 Gang-scheduling test completed successfully! Grove, Kai, and NVIDIA GPU Operator installed, all workload pods transitioned from pending to running after uncordoning.\n")
+	t.Log("🎉 Gang-scheduling test completed successfully! Grove, Kai, and NVIDIA GPU Operator installed, all workload pods transitioned from pending to running after uncordoning.")
 
-	// Cleanup applied resources
-	fmt.Printf("🧹 Cleaning up applied resources...\n")
-	for _, resource := range appliedResources {
-		fmt.Printf("Deleting %s %s/%s\n", resource.GVK.Kind, resource.Namespace, resource.Name)
-		// Note: Cleanup is handled by the cluster cleanup function
-	}
+	// Note: Cleanup is handled by the shared cluster cleanup function
 }
 
 // Test_GS2_GangSchedulingWithScalingFullReplicas verifies gang-scheduling behavior when scaling a PodCliqueScalingGroup
@@ -242,62 +242,16 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	logger := utils.NewCILogger(nil)
-
-	customCfg := utils.ClusterConfig{
-		Name:             "gang-scheduling-pcsg-scaling-test-cluster",
-		Servers:          3,
-		Agents:           14,
-		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6553",
-		LoadBalancerPort: "8083:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent",
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
-
-	fmt.Printf("🚀 Starting gang-scheduling PCSG scaling test with k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 14-node Grove cluster, then cordon 5 nodes
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 14)
 	defer cleanup()
+
+	t.Log("🚀 Starting gang-scheduling test with PCSG scaling (14 nodes)")
+
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
-			continue
-		}
-		agentNodes = append(agentNodes, node.Name)
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 5 {
@@ -323,7 +277,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload1.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -356,7 +310,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -396,7 +350,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 	// 5. Wait for pods to become ready
 	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -412,7 +366,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -490,7 +444,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending\n", runningPods, pendingPods)
@@ -512,7 +466,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all scaled pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 15 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for scaled pods to be ready: %v", err)
 	}
 
@@ -528,7 +482,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running after scaling (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -557,62 +511,16 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	logger := utils.NewCILogger(nil)
-
-	customCfg := utils.ClusterConfig{
-		Name:             "gang-scheduling-pcs-scaling-test-cluster",
-		Servers:          3,
-		Agents:           20,
-		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6554",
-		LoadBalancerPort: "8084:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent",
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
-
-	fmt.Printf("🚀 Starting gang-scheduling PCS scaling test with k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 20-node Grove cluster, then cordon 11 nodes
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 20)
 	defer cleanup()
+
+	t.Log("🚀 Starting gang-scheduling test with PCS scaling (20 nodes)")
+
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
-			continue
-		}
-		agentNodes = append(agentNodes, node.Name)
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 11 {
@@ -639,7 +547,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload1.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -672,7 +580,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -712,7 +620,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 	// 5. Wait for pods to become ready
 	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -728,7 +636,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -793,7 +701,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	expectedNewPending := expectedScaledPods - expectedPods
@@ -816,7 +724,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready after final uncordon...\n")
 	workloadConfig.Timeout = 15 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for scaled pods to be ready: %v", err)
 	}
 
@@ -832,7 +740,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running after scaling (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -864,69 +772,23 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	logger := utils.NewCILogger(nil)
-
-	customCfg := utils.ClusterConfig{
-		Name:             "gang-scheduling-pcs-pcsg-scaling-test-cluster",
-		Servers:          3,
-		Agents:           28,
-		WorkerMemory:     "150m",
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6555",
-		LoadBalancerPort: "8085:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent",
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
-
-	fmt.Printf("🚀 Starting gang-scheduling PCS+PCSG scaling test with k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 28-node Grove cluster, then cordon 19 nodes
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 28)
 	defer cleanup()
+
+	t.Log("🚀 Starting gang-scheduling test with PCS+PCSG scaling (28 nodes)")
+
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
+	if len(agentNodes) < 19 {
+		t.Fatalf("expected at least 19 agent nodes to cordon, but found %d", len(agentNodes))
 	}
 
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
-			continue
-		}
-		agentNodes = append(agentNodes, node.Name)
-	}
-
-	if len(agentNodes) != 28 {
-		t.Fatalf("expected at least 28 agent nodes to cordon, but found %d", len(agentNodes))
-	}
-
-	// cordon 19 noes
+	// cordon 19 nodes
 	nodesToCordon := agentNodes[:19]
 	fmt.Printf("🚫 Cordoning %d agent nodes: %v\n", len(nodesToCordon), nodesToCordon)
 	for _, nodeName := range nodesToCordon {
@@ -947,7 +809,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload1.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -985,7 +847,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -1023,7 +885,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	// 5. Wait for pods to become ready
 	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -1037,7 +899,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			runningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", runningPods, len(pods.Items))
@@ -1066,7 +928,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready after PCSG scale...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready after PCSG scale: %v", err)
 	}
 
@@ -1093,7 +955,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready after PCS scale...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready after PCS scale: %v", err)
 	}
 
@@ -1122,7 +984,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all pods to be scheduled and ready after final PCSG scale...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready after final PCSG scale: %v", err)
 	}
 
@@ -1154,7 +1016,7 @@ func assertPodsOnDistinctNodes(t *testing.T, pods []v1.Pod) {
 		podPlacements = append(podPlacements, fmt.Sprintf("%s->%s", pod.Name, nodeName))
 	}
 
-	fmt.Printf("✅ All %d pods scheduled on distinct nodes: %s\n", len(pods), strings.Join(podPlacements, ", "))
+	fmt.Println("✅ All pods scheduled on distinct nodes")
 }
 
 // pollForCondition polls a condition function until it returns true or times out
@@ -1184,32 +1046,6 @@ func pollForCondition(ctx context.Context, timeout, interval time.Duration, cond
 			}
 		}
 	}
-}
-
-// cordonNode cordons or uncordons a node by setting its Unschedulable field
-func cordonNode(ctx context.Context, clientset kubernetes.Interface, nodeName string, cordon bool) error {
-	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	if node.Spec.Unschedulable == cordon {
-		// Already in desired state
-		return nil
-	}
-
-	node.Spec.Unschedulable = cordon
-	_, err = clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to update node %s: %w", nodeName, err)
-	}
-
-	action := "uncordoned"
-	if cordon {
-		action = "cordoned"
-	}
-	fmt.Printf("✅ Successfully %s node %s\n", action, nodeName)
-	return nil
 }
 
 func scalePCSGAndWait(t *testing.T, ctx context.Context, clientset kubernetes.Interface, dynamicClient dynamic.Interface, namespace, labelSelector, pcsgName string, replicas int32, expectedTotalPods, expectedPending int) {
@@ -1297,7 +1133,7 @@ func evaluatePodStates(t *testing.T, ctx context.Context, clientset kubernetes.I
 		case v1.PodPending:
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Pod states: %d running, %d pending (expected %d pending)\n", runningPods, pendingPods, expectedPending)
@@ -1326,67 +1162,16 @@ func evaluatePodStates(t *testing.T, ctx context.Context, clientset kubernetes.I
 func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 10)
+	defer cleanup()
 
-	// Custom configuration for 10-node k3d cluster (3 servers + 10 agents)
-	customCfg := utils.ClusterConfig{
-		Name:             "gs-min-replicas-test",
-		Servers:          3,
-		Agents:           10,     // 10 agents (worker nodes)
-		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6554",
-		LoadBalancerPort: "8084:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
+	t.Log("🚀 Starting gang-scheduling test with min replicas (10 nodes)")
 
-	fmt.Printf("🚀 Starting gang-scheduling min-replicas test with 10-node k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 10-node Grove cluster, then cordon 8 nodes
-	// Setup cluster with custom config and core components
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
-	defer cleanup() // always call cleanup
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	// Verify we have exactly 13 nodes (3 servers + 10 agents)
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	// Collect agent nodes and cordon 8 of them to simulate insufficient resources
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		// Find agent nodes (not server/control-plane)
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
-			agentNodes = append(agentNodes, node.Name)
-		}
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 8 {
@@ -1415,7 +1200,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload2.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -1450,7 +1235,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -1543,7 +1328,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified exactly 3 pods are running: %v\n", runningPodNames)
@@ -1604,7 +1389,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -1621,7 +1406,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -1660,66 +1445,16 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 14)
+	defer cleanup()
 
-	// Custom configuration for 14-node k3d cluster (3 servers + 14 agents)
-	customCfg := utils.ClusterConfig{
-		Name:             "gs-pcsg-scaling-min-replicas-test",
-		Servers:          5,
-		Agents:           14,     // 14 agents (worker nodes)
-		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6555",
-		LoadBalancerPort: "8085:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
+	t.Log("🚀 Starting gang-scheduling test with PCSG scaling and min replicas (14 nodes)")
 
-	fmt.Printf("🚀 Starting gang-scheduling PCSG scaling min-replicas test with 14-node k3d cluster: %+v\n", customCfg)
-
-	// Setup cluster with custom config and core components
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
-	defer cleanup() // always call cleanup
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	// Verify we have exactly 17 nodes (3 servers + 14 agents)
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	// Collect agent nodes and cordon 12 of them to simulate insufficient resources
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		// Find agent nodes (not server/control-plane)
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
-			agentNodes = append(agentNodes, node.Name)
-		}
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 12 {
@@ -1746,7 +1481,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload2.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -1780,7 +1515,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -1873,7 +1608,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified exactly 3 pods are running: %v\n", runningPodNames)
@@ -1931,7 +1666,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -1948,7 +1683,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			allRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
@@ -1994,7 +1729,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		case v1.PodPending:
 			pendingAfter++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected %d pending)\n", runningAfter, pendingAfter, expectedNewPendingPods)
@@ -2100,7 +1835,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -2117,7 +1852,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -2158,67 +1893,16 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 14)
+	defer cleanup()
 
-	// Custom configuration for 14-node k3d cluster (3 servers + 14 agents)
-	customCfg := utils.ClusterConfig{
-		Name:             "gs-pcsg-scaling-min-replicas-advanced1-test",
-		Servers:          3,
-		Agents:           14,     // 14 agents (worker nodes)
-		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6556",
-		LoadBalancerPort: "8086:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
+	t.Log("🚀 Starting gang-scheduling test with PCSG scaling min replicas advanced1 (14 nodes)")
 
-	fmt.Printf("🚀 Starting gang-scheduling PCSG scaling min-replicas advanced1 test with 14-node k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
-	// Setup cluster with custom config and core components
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
-	defer cleanup() // always call cleanup
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	// Verify we have exactly 17 nodes (3 servers + 14 agents)
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	// Collect agent nodes and cordon 12 of them to simulate insufficient resources
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		// Find agent nodes (not server/control-plane)
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
-			agentNodes = append(agentNodes, node.Name)
-		}
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 12 {
@@ -2246,7 +1930,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload2.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -2280,7 +1964,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -2474,7 +2158,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -2491,7 +2175,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			allRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
@@ -2615,7 +2299,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -2632,7 +2316,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -2669,66 +2353,16 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 14)
+	defer cleanup()
 
-	// Custom configuration for 14-node k3d cluster (3 servers + 14 agents)
-	customCfg := utils.ClusterConfig{
-		Name:             "gs-pcsg-scaling-min-replicas-advanced2-test",
-		Servers:          3,
-		Agents:           14,     // 14 agents (worker nodes)
-		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6557",
-		LoadBalancerPort: "8087:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
+	t.Log("🚀 Starting gang-scheduling test with PCSG scaling min replicas advanced2 (14 nodes)")
 
-	fmt.Printf("🚀 Starting gang-scheduling PCSG scaling min-replicas advanced2 test with 14-node k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 14-node Grove cluster, then cordon 12 nodes
-	// Setup cluster with custom config and core components
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
-	defer cleanup() // always call cleanup
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	// Verify we have exactly 17 nodes (3 servers + 14 agents)
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	// Collect agent nodes and cordon 12 of them to simulate insufficient resources
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		// Find agent nodes (not server/control-plane)
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
-			agentNodes = append(agentNodes, node.Name)
-		}
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 12 {
@@ -2756,7 +2390,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload2.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -2790,7 +2424,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -2882,7 +2516,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 		case v1.PodRunning:
 			runningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected 0 running, %d pending)\n", runningPods, pendingPods, expectedPodsAfterScaling)
@@ -3057,7 +2691,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -3074,7 +2708,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -3112,66 +2746,16 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 20)
+	defer cleanup()
 
-	// Custom configuration for 20-node k3d cluster (3 servers + 20 agents)
-	customCfg := utils.ClusterConfig{
-		Name:             "gs-pcs-scaling-min-replicas-test",
-		Servers:          3,
-		Agents:           20,     // 20 agents (worker nodes)
-		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6558",
-		LoadBalancerPort: "8088:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
+	t.Log("🚀 Starting gang-scheduling test with PCS scaling min replicas (20 nodes)")
 
-	fmt.Printf("🚀 Starting gang-scheduling PCS scaling min-replicas test with 20-node k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 20-node Grove cluster, then cordon 18 nodes
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
-	defer cleanup() // always call cleanup
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	// Verify we have exactly 23 nodes (3 servers + 20 agents)
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	// Collect agent nodes and cordon 18 of them to simulate insufficient resources
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		// Find agent nodes (not server/control-plane)
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
-			agentNodes = append(agentNodes, node.Name)
-		}
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 18 {
@@ -3198,7 +2782,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload2.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -3232,7 +2816,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -3351,7 +2935,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -3368,7 +2952,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			allRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", allRunningPods, len(pods.Items))
@@ -3484,7 +3068,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -3501,7 +3085,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -3538,66 +3122,16 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a CILogger for this test
-	logger := utils.NewCILogger(nil)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 20)
+	defer cleanup()
 
-	// Custom configuration for 20-node k3d cluster (3 servers + 20 agents)
-	customCfg := utils.ClusterConfig{
-		Name:             "gs-pcs-scaling-min-replicas-advanced-test",
-		Servers:          5,
-		Agents:           20,     // 20 agents (worker nodes)
-		WorkerMemory:     "150m", // each pod is 80Mi, so only 1 pod can run on each node
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6559",
-		LoadBalancerPort: "8089:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent", // Required for Grove workloads
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
+	t.Log("🚀 Starting gang-scheduling test with PCS scaling min replicas advanced (20 nodes)")
 
-	fmt.Printf("🚀 Starting gang-scheduling PCS scaling min-replicas advanced test with 20-node k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 20-node Grove cluster, then cordon 18 nodes
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
-	defer cleanup() // always call cleanup
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	// Verify we have exactly 23 nodes (3 servers + 20 agents)
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	// Collect agent nodes and cordon 18 of them to simulate insufficient resources
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		// Find agent nodes (not server/control-plane)
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
-			agentNodes = append(agentNodes, node.Name)
-		}
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 18 {
@@ -3624,7 +3158,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload2.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -3658,7 +3192,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 		if pod.Status.Phase == v1.PodPending {
 			pendingPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are pending (expected all %d to be pending)\n", pendingPods, len(pods.Items))
@@ -3750,7 +3284,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 		case v1.PodRunning:
 			runningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("📊 Post-scaling pod states: %d running, %d pending (expected 0 running, %d pending)\n", runningPods, pendingPods, expectedPodsAfterScaling)
@@ -3927,7 +3461,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 	// Wait for all remaining pods to be scheduled and ready
 	fmt.Printf("⏳ Waiting for all remaining workload pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -3944,7 +3478,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 		if pod.Status.Phase == v1.PodRunning {
 			finalRunningPods++
 		}
-		fmt.Printf("Pod %s: Phase=%s, Node=%s\n", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
+		t.Logf("Pod %s: Phase=%s, Node=%s", pod.Name, pod.Status.Phase, pod.Spec.NodeName)
 	}
 
 	fmt.Printf("✅ Verified %d pods are now running (expected all %d to be running)\n", finalRunningPods, len(pods.Items))
@@ -3966,100 +3500,26 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 	}
 }
 
-// waitForRegistry waits for the k3d registry to be available
-func waitForRegistry(t *testing.T, registryPort string, timeout time.Duration) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	registryURL := fmt.Sprintf("http://localhost:%s/v2/", registryPort)
-
-	fmt.Printf("⏳ Waiting for registry on port %s to be ready...\n", registryPort)
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			t.Fatalf("Registry on port %s did not become ready within %v", registryPort, timeout)
-		case <-ticker.C:
-			// Try to connect to the registry
-			resp, err := http.Get(registryURL)
-			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode == 200 || resp.StatusCode == 401 {
-					fmt.Printf("✅ Registry on port %s is ready\n", registryPort)
-					return
-				}
-			}
-		}
-	}
-}
-
-// setupRegistryTestImage pulls nginx:alpine-slim, tags it for the local registry, and pushes it
-// This helper function uses Docker Go client library to perform operations equivalent to:
-// docker pull nginx:alpine-slim
-// docker tag nginx:alpine-slim localhost:5001/nginx:alpine-slim
-// docker push localhost:5001/nginx:alpine-slim
-func setupRegistryTestImage(t *testing.T, registryPort string) {
-	t.Helper()
-
-	// Wait for registry to be ready first
-	waitForRegistry(t, registryPort, 2*time.Minute)
-
-	ctx := context.Background()
-	imageName := "nginx:alpine-slim"
-	registryImage := fmt.Sprintf("localhost:%s/nginx:alpine-slim", registryPort)
-
-	fmt.Printf("🐳 Setting up test image in registry on port %s...\n", registryPort)
-
-	// Initialize Docker client
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		t.Fatalf("Failed to create Docker client: %v", err)
-	}
-	defer cli.Close()
-
-	// Step 1: Pull the nginx:alpine-slim image
-	fmt.Printf("📥 Pulling %s...\n", imageName)
-	pullReader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
-	if err != nil {
-		t.Fatalf("Failed to pull %s: %v", imageName, err)
-	}
-	defer pullReader.Close()
-
-	// Consume the pull output to avoid blocking
-	_, err = io.Copy(io.Discard, pullReader)
-	if err != nil {
-		t.Fatalf("Failed to read pull output for %s: %v", imageName, err)
-	}
-
-	// Step 2: Tag the image for the local registry
-	fmt.Printf("🏷️  Tagging %s as %s...\n", imageName, registryImage)
-	err = cli.ImageTag(ctx, imageName, registryImage)
-	if err != nil {
-		t.Fatalf("Failed to tag %s as %s: %v", imageName, registryImage, err)
-	}
-
-	// Step 3: Push the image to the local registry
-	fmt.Printf("📤 Pushing %s to registry...\n", registryImage)
-	// For local k3d registry, no authentication is typically required
-	pushReader, err := cli.ImagePush(ctx, registryImage, image.PushOptions{})
-	if err != nil {
-		t.Fatalf("Failed to push %s to registry: %v", registryImage, err)
-	}
-	defer pushReader.Close()
-
-	// Consume the push output to avoid blocking
-	_, err = io.Copy(io.Discard, pushReader)
-	if err != nil {
-		t.Fatalf("Failed to read push output for %s: %v", registryImage, err)
-	}
-
-	fmt.Printf("✅ Successfully set up test image %s in registry\n", registryImage)
-}
+// Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas tests gang-scheduling behavior with both PCS and PCSG scaling using min-replicas
+// Scenario GS-11:
+// 1. Initialize a 28-node Grove cluster, then cordon 26 nodes
+// 2. Deploy workload WL6, and verify 6 newly created pods
+// 3. Verify all workload pods are pending due to insufficient resources
+// 4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 5. Scale pcs-0-sg-x replicas to 3, verify 4 newly created pods
+// 6. Verify all newly created pods are pending due to insufficient resources
+// 7. Scale pcs-0 replicas to 3, verify 6 newly created pods
+// 8. Verify all newly created pods are pending due to insufficient resources
+// 9. Uncordon 2 nodes
+// 10. Verify a total of 9 pods get scheduled (pcs-0, pcs-1, pcs-2 each with {pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})
+// 11. Scale pcs-0-sg-x replicas to 5, verify 8 newly created pods
+// 12. Verify all newly created pods are pending due to insufficient resources
+// 13. Scale pcs-1-sg-x replicas to 5, verify 8 newly created pods
+// 14. Verify all newly created pods are pending due to insufficient resources
+// 15. Scale pcs-2-sg-x replicas to 5, verify 8 newly created pods
+// 16. Verify all newly created pods are pending due to insufficient resources
+// 17. Uncordon 6 nodes
+// 18. Verify all pods get scheduled
 
 // Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas tests gang-scheduling behavior with both PCS and PCSG scaling using min-replicas
 // Scenario GS-11:
@@ -4086,62 +3546,16 @@ func setupRegistryTestImage(t *testing.T, registryPort string) {
 func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	logger := utils.NewCILogger(nil)
-
-	customCfg := utils.ClusterConfig{
-		Name:             "gs-pcs-pcsg-min-test",
-		Servers:          3,
-		Agents:           28,
-		WorkerMemory:     "150m",
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6556",
-		LoadBalancerPort: "8086:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent",
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
-
-	fmt.Printf("🚀 Starting gang-scheduling PCS+PCSG scaling with min-replicas test with k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 28-node Grove cluster, then cordon 26 nodes
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 28)
 	defer cleanup()
+
+	t.Log("🚀 Starting gang-scheduling test with PCS+PCSG scaling min replicas (28 nodes)")
+
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
-			continue
-		}
-		agentNodes = append(agentNodes, node.Name)
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 26 {
@@ -4168,7 +3582,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload2.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -4266,7 +3680,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all first wave pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for first wave pods to be ready: %v", err)
 	}
 
@@ -4360,7 +3774,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all PCSG pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for PCSG completion pods to be ready: %v", err)
 	}
 
@@ -4415,7 +3829,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all PCS pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for PCS completion pods to be ready: %v", err)
 	}
 
@@ -4504,7 +3918,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all final pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all final pods to be ready: %v", err)
 	}
 
@@ -4536,62 +3950,16 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 	ctx := context.Background()
 
-	logger := utils.NewCILogger(nil)
-
-	customCfg := utils.ClusterConfig{
-		Name:             "gs-complex-pcsg-test",
-		Servers:          3,
-		Agents:           28,
-		WorkerMemory:     "150m",
-		Image:            "rancher/k3s:v1.33.5-k3s1",
-		HostPort:         "6557",
-		LoadBalancerPort: "8087:80",
-		EnableRegistry:   true,
-		RegistryPort:     "5001",
-		AgentNodeLabels: map[string]string{
-			"node_role.e2e.grove.nvidia.com": "agent",
-		},
-		AgentNodeTaints: []utils.NodeTaint{
-			{
-				Key:    "node_role.e2e.grove.nvidia.com",
-				Value:  "agent",
-				Effect: "NoSchedule",
-			},
-		},
-	}
-
-	fmt.Printf("🚀 Starting gang-scheduling complex PCSG scaling test with k3d cluster: %+v\n", customCfg)
-
-	// 1. Initialize a 28-node Grove cluster, then cordon 26 nodes
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, logger)
+	// Setup cluster (shared or individual based on test run mode)
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 28)
 	defer cleanup()
+
+	t.Log("🚀 Starting gang-scheduling test with complex PCSG scaling (28 nodes)")
+
+	// Get agent nodes for cordoning
+	agentNodes, err := getAgentNodes(ctx, clientset)
 	if err != nil {
-		t.Fatalf("Failed to setup k3d cluster: %v", err)
-	}
-
-	// Setup test image in registry
-	setupRegistryTestImage(t, customCfg.RegistryPort)
-
-	fmt.Printf("✅ Cluster setup complete, verifying node count...\n")
-
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("could not list nodes: %s", err)
-	}
-
-	expectedNodes := customCfg.Servers + customCfg.Agents
-	fmt.Printf("✅ Found %d nodes in the cluster (expected %d)\n", len(nodes.Items), expectedNodes)
-
-	if len(nodes.Items) != expectedNodes {
-		t.Fatalf("expected %d nodes, but found %d", expectedNodes, len(nodes.Items))
-	}
-
-	agentNodes := make([]string, 0)
-	for _, node := range nodes.Items {
-		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; isServer {
-			continue
-		}
-		agentNodes = append(agentNodes, node.Name)
+		t.Fatalf("Failed to get agent nodes: %v", err)
 	}
 
 	if len(agentNodes) < 26 {
@@ -4618,7 +3986,7 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 	}
 
 	fmt.Printf("🚀 Applying workload2.yaml...\n")
-	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, logger)
+	appliedResources, err := utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
 	if err != nil {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
@@ -4874,7 +4242,7 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 
 	fmt.Printf("⏳ Waiting for all remaining pods to be scheduled and ready...\n")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
 		t.Fatalf("Failed to wait for all final pods to be ready: %v", err)
 	}
 
@@ -4887,4 +4255,21 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 	assertPodsOnDistinctNodes(t, pods.Items)
 
 	fmt.Printf("🎉 Gang-scheduling complex PCSG scaling test (GS-12) completed successfully!\n")
+}
+
+// getAgentNodes returns a list of agent node names from the cluster
+func getAgentNodes(ctx context.Context, clientset kubernetes.Interface) ([]string, error) {
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	agentNodes := make([]string, 0)
+	for _, node := range nodes.Items {
+		if _, isServer := node.Labels["node-role.kubernetes.io/control-plane"]; !isServer {
+			agentNodes = append(agentNodes, node.Name)
+		}
+	}
+
+	return agentNodes, nil
 }
