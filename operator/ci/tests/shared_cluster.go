@@ -160,7 +160,7 @@ func (scm *SharedClusterManager) CleanupWorkloads(ctx context.Context, t *testin
 		return nil
 	}
 
-	scm.logger.Info("🧹 Cleaning up workloads from shared cluster...")
+	scm.logger.Debug("🧹 Cleaning up workloads from shared cluster...")
 
 	// Step 1: Delete PodCliqueSets first (should cascade delete other resources)
 	if err := scm.deleteAllResources(ctx, "grove.io", "v1alpha1", "podcliquesets"); err != nil {
@@ -396,10 +396,8 @@ func (scm *SharedClusterManager) Teardown() {
 	defer scm.mu.Unlock()
 
 	if scm.cleanup != nil {
-		scm.logger.Info("🗑️ Tearing down shared cluster...")
 		scm.cleanup()
 		scm.isSetup = false
-		scm.logger.Info("✅ Shared cluster teardown complete")
 	}
 }
 

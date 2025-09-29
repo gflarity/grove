@@ -596,7 +596,7 @@ func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kub
 		for {
 			select {
 			case <-monitorCtx.Done():
-				logger.Info("🛑 Stopping node monitoring...")
+				logger.Debug("🛑 Stopping node monitoring...")
 				return
 			case <-ticker.C:
 				if err := checkAndReplaceNotReadyNodes(monitorCtx, clientset, logger); err != nil {
@@ -608,7 +608,6 @@ func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kub
 
 	// Return cleanup function
 	return func() {
-		logger.Info("🧹 Cleaning up node monitoring...")
 		cancel()
 	}
 }

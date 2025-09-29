@@ -179,7 +179,7 @@ func CreateDefaultKaiQueues(ctx context.Context, restConfig *rest.Config, logger
 
 	// Get the path to the queues.yaml file relative to this source file
 	_, currentFile, _, _ := runtime.Caller(0)
-	queuesPath := filepath.Join(filepath.Dir(currentFile), "queues.yaml")
+	queuesPath := filepath.Join(filepath.Dir(currentFile), "../yaml/queues.yaml")
 
 	// Read the queues YAML file content
 	yamlContent, err := os.ReadFile(queuesPath)
