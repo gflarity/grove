@@ -4,7 +4,7 @@ package utils
 //
 // Basic installation:
 //   config := NvidiaOperatorInstallConfigLatest("v25.3.4")
-//   logger := NewCILogger(nil)
+//   logger := NewCILogger(logrus.InfoLevel)
 //   release, err := InstallNvidiaOperator(config, logger)
 //
 // Custom installation:
@@ -19,7 +19,7 @@ package utils
 //           },
 //       },
 //   }
-//   logger := NewCILogger(nil)
+//   logger := NewCILogger(logrus.InfoLevel)
 //   release, err := InstallOrUpgradeNvidiaOperator(config, logger)
 
 import (
@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"helm.sh/helm/v3/pkg/release"
 	"k8s.io/client-go/rest"
 )
@@ -86,18 +87,18 @@ func NvidiaOperatorInstallConfigLatest(version string) *NvidiaOperatorInstallCon
 
 // InstallNvidiaOperator installs NVIDIA GPU Operator on a Kubernetes cluster using Helm
 // It returns the installed release and any error that occurred
-func InstallNvidiaOperator(config *NvidiaOperatorInstallConfig, logger *CILogger) (*release.Release, error) {
+func InstallNvidiaOperator(config *NvidiaOperatorInstallConfig, logger *logrus.Logger) (*release.Release, error) {
 	return InstallComponent(config, logger)
 }
 
 // InstallOrUpgradeNvidiaOperator installs NVIDIA GPU Operator if it doesn't exist, or upgrades it if it does
 // It returns the installed/upgraded release and any error that occurred
-func InstallOrUpgradeNvidiaOperator(config *NvidiaOperatorInstallConfig, logger *CILogger) (*release.Release, error) {
+func InstallOrUpgradeNvidiaOperator(config *NvidiaOperatorInstallConfig, logger *logrus.Logger) (*release.Release, error) {
 	return InstallOrUpgradeComponent(config, logger)
 }
 
 // WaitForNvidiaOperatorPodsReady waits for NVIDIA GPU Operator pods to be ready
-func WaitForNvidiaOperatorPodsReady(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
+func WaitForNvidiaOperatorPodsReady(ctx context.Context, restConfig *rest.Config, logger *logrus.Logger) error {
 	logger.Debug("⏳ Waiting for NVIDIA GPU Operator pods to be ready...")
 
 	// NVIDIA GPU operator is installed in gpu-operator namespace by default
@@ -113,7 +114,7 @@ func WaitForNvidiaOperatorPodsReady(ctx context.Context, restConfig *rest.Config
 
 // WaitForNvidiaOperatorReady waits for the NVIDIA GPU Operator to be fully ready
 // In test environments without GPUs, this simply waits for the operator pods to be ready
-func WaitForNvidiaOperatorReady(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
+func WaitForNvidiaOperatorReady(ctx context.Context, restConfig *rest.Config, logger *logrus.Logger) error {
 	logger.Debug("⏳ Waiting for NVIDIA GPU Operator to be ready...")
 
 	// For test environments, just wait for the operator pods to be ready

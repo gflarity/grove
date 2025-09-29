@@ -1,31 +1,5 @@
 package utils
 
-// Example usage:
-//
-// Basic installation:
-//   config := KaiInstallConfigLatest("v1.2.3")
-//   logger := NewCILogger(nil)
-//   release, err := InstallKai(config, logger)
-//
-// Custom installation:
-//   config := &KaiInstallConfig{
-//       ReleaseName:  "my-kai-scheduler",
-//       ChartRef:     "oci://ghcr.io/nvidia/kai-scheduler/kai-scheduler",
-//       ChartVersion: "v1.2.3",
-//       Namespace:    "kube-system",
-//       Values: map[string]interface{}{
-//           "replicas": 2,
-//           "resources": map[string]interface{}{
-//               "requests": map[string]interface{}{
-//                   "cpu": "100m",
-//                   "memory": "128Mi",
-//               },
-//           },
-//       },
-//   }
-//   logger := NewCILogger(nil)
-//   release, err := InstallOrUpgradeKai(config, logger)
-
 import (
 	"context"
 	"fmt"
@@ -34,6 +8,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"helm.sh/helm/v3/pkg/release"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -92,18 +67,18 @@ func KaiInstallConfigLatest(version string) *KaiInstallConfig {
 
 // InstallKai installs Kai Scheduler on a Kubernetes cluster using Helm
 // It returns the installed release and any error that occurred
-func InstallKai(config *KaiInstallConfig, logger *CILogger) (*release.Release, error) {
+func InstallKai(config *KaiInstallConfig, logger *logrus.Logger) (*release.Release, error) {
 	return InstallComponent(config, logger)
 }
 
 // InstallOrUpgradeKai installs Kai Scheduler if it doesn't exist, or upgrades it if it does
 // It returns the installed/upgraded release and any error that occurred
-func InstallOrUpgradeKai(config *KaiInstallConfig, logger *CILogger) (*release.Release, error) {
+func InstallOrUpgradeKai(config *KaiInstallConfig, logger *logrus.Logger) (*release.Release, error) {
 	return InstallOrUpgradeComponent(config, logger)
 }
 
 // WaitForKaiPodsReady waits for Kai Scheduler pods to be ready
-func WaitForKaiPodsReady(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
+func WaitForKaiPodsReady(ctx context.Context, restConfig *rest.Config, logger *logrus.Logger) error {
 	logger.Debug("⏳ Waiting for Kai Scheduler pods to be ready...")
 
 	// Kai scheduler is installed in kai-scheduler namespace by default
@@ -117,7 +92,7 @@ func WaitForKaiPodsReady(ctx context.Context, restConfig *rest.Config, logger *C
 }
 
 // WaitForKaiCRDs waits for the Queue CRD from scheduling.run.ai/v2 to be available
-func WaitForKaiCRDs(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
+func WaitForKaiCRDs(ctx context.Context, restConfig *rest.Config, logger *logrus.Logger) error {
 	logger.Debug("⏳ Waiting for Queue CRD (scheduling.run.ai/v2) to be available...")
 
 	// Create API extensions client to check CRDs
@@ -174,7 +149,7 @@ func hasKaiCRDVersion(crd *apiextensionsv1.CustomResourceDefinition, version str
 }
 
 // CreateDefaultKaiQueues creates queues using the k8s client YAML apply functionality
-func CreateDefaultKaiQueues(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
+func CreateDefaultKaiQueues(ctx context.Context, restConfig *rest.Config, logger *logrus.Logger) error {
 	logger.Debug("📄 Creating queues using k8s client...")
 
 	// Get the path to the queues.yaml file relative to this source file

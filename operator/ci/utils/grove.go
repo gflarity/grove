@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"helm.sh/helm/v3/pkg/release"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -90,18 +91,18 @@ func GroveInstallConfigV0_1_0_Alpha1() *GroveInstallConfig {
 
 // InstallGrove installs Grove on a Kubernetes cluster using Helm
 // It returns the installed release and any error that occurred
-func InstallGrove(config *GroveInstallConfig, logger *CILogger) (*release.Release, error) {
+func InstallGrove(config *GroveInstallConfig, logger *logrus.Logger) (*release.Release, error) {
 	return InstallComponent(config, logger)
 }
 
 // InstallOrUpgradeGrove installs Grove if it doesn't exist, or upgrades it if it does
 // It returns the installed/upgraded release and any error that occurred
-func InstallOrUpgradeGrove(config *GroveInstallConfig, logger *CILogger) (*release.Release, error) {
+func InstallOrUpgradeGrove(config *GroveInstallConfig, logger *logrus.Logger) (*release.Release, error) {
 	return InstallOrUpgradeComponent(config, logger)
 }
 
 // WaitForGrovePodsReady waits for Grove operator pods to be ready
-func WaitForGrovePodsReady(ctx context.Context, namespace string, restConfig *rest.Config, logger *CILogger) error {
+func WaitForGrovePodsReady(ctx context.Context, namespace string, restConfig *rest.Config, logger *logrus.Logger) error {
 	logger.Debug("⏳ Waiting for Grove operator pods to be ready...")
 
 	err := WaitForPodsInNamespace(ctx, namespace, restConfig, 5*time.Minute, logger)
@@ -114,7 +115,7 @@ func WaitForGrovePodsReady(ctx context.Context, namespace string, restConfig *re
 }
 
 // waitForGroveOperatorReady waits for the Grove operator to be ready before applying workloads
-func waitForGroveOperatorReady(ctx context.Context, config *WorkloadConfig, logger *CILogger) error {
+func waitForGroveOperatorReady(ctx context.Context, config *WorkloadConfig, logger *logrus.Logger) error {
 	clientset, err := kubernetes.NewForConfig(config.RestConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create clientset: %w", err)
@@ -173,7 +174,7 @@ func waitForGroveOperatorReady(ctx context.Context, config *WorkloadConfig, logg
 }
 
 // checkWebhookReadiness checks if the Grove operator webhook server is ready by verifying webhook configurations
-func checkWebhookReadiness(ctx context.Context, clientset *kubernetes.Clientset, restConfig *rest.Config, namespace string, logger *CILogger) bool {
+func checkWebhookReadiness(ctx context.Context, clientset *kubernetes.Clientset, restConfig *rest.Config, namespace string, logger *logrus.Logger) bool {
 	// Check that the webhook configurations are properly set up with CA bundles
 	// This indicates that the cert-manager has finished setting up certificates
 	// and the webhook server should be ready to accept requests
@@ -225,7 +226,7 @@ func checkWebhookReadiness(ctx context.Context, clientset *kubernetes.Clientset,
 }
 
 // testWebhookConnectivity tests if the webhook server is actually responding by attempting to create a test resource
-func testWebhookConnectivity(ctx context.Context, restConfig *rest.Config, namespace string, logger *CILogger) bool {
+func testWebhookConnectivity(ctx context.Context, restConfig *rest.Config, namespace string, logger *logrus.Logger) bool {
 	// Create clientset for testing
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
@@ -321,7 +322,7 @@ func testWebhookConnectivity(ctx context.Context, restConfig *rest.Config, names
 }
 
 // waitForPodCliqueSetPodsReady waits for all pods created by the PodCliqueSet resources to be ready
-func waitForPodCliqueSetPodsReady(ctx context.Context, config *WorkloadConfig, podCliqueSets []AppliedPodCliqueSet, logger *CILogger) error {
+func waitForPodCliqueSetPodsReady(ctx context.Context, config *WorkloadConfig, podCliqueSets []AppliedPodCliqueSet, logger *logrus.Logger) error {
 	// Create clientset for pod operations
 	clientset, err := kubernetes.NewForConfig(config.RestConfig)
 	if err != nil {

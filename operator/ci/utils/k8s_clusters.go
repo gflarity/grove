@@ -65,9 +65,9 @@ func DefaultClusterConfig() ClusterConfig {
 }
 
 // SetupK3DCluster creates a k3d cluster and returns a kubernetes clientset and REST config
-func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
+func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
 	// k3d is very verbose, we don't want the INFO level logs unless the logger is set to DEBUG
-	if logger.verbosity == logrus.DebugLevel {
+	if logger.GetLevel() == logrus.DebugLevel {
 		k3dlogger.Log().SetLevel(logrus.DebugLevel)
 	} else {
 		k3dlogger.Log().SetLevel(logrus.ErrorLevel)
@@ -141,7 +141,7 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 
 	// this is the cleanup function, we always return it now so the caller can decide to use it or not
 	cleanup := func() {
-		logger.Info("🗑️ Deleting cluster...")
+		logger.Debug("🗑️ Deleting cluster...")
 		if err := client.ClusterDelete(ctx, runtimes.Docker, &k3dConfig.Cluster, k3d.ClusterDeleteOpts{}); err != nil {
 			logger.Errorf("Failed to delete cluster: %v", err)
 		} else {
@@ -211,10 +211,10 @@ func DefaultKindClusterConfig() KindClusterConfig {
 // SetupKindCluster creates a kind cluster and returns a kubernetes clientset and REST config
 // Note that kind clsuters don't support total memory limits unlike k3d, this is here incase
 // we still want to use Kind for some reason
-func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, func(), error) {
-	// Provide our unified CILogger to kind with verbosity filtering
-	// This will suppress verbose node logs but keep kind's main status updates
-	provider := cluster.NewProvider(cluster.ProviderWithLogger(logger))
+func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *logrus.Logger) (*kubernetes.Clientset, *rest.Config, func(), error) {
+	// Create cluster provider using default kind logger
+	// Note: We use our own logger separately for our custom logging
+	provider := cluster.NewProvider()
 
 	// Create cluster configuration
 	kindConfig := &v1alpha4.Cluster{
@@ -330,7 +330,7 @@ nodeRegistration:
 }
 
 // retryInstallation retries an installation function up to maxRetries times with a delay between attempts
-func retryInstallation(installFunc func() error, componentName string, maxRetries int, retryDelay time.Duration, logger *CILogger) error {
+func retryInstallation(installFunc func() error, componentName string, maxRetries int, retryDelay time.Duration, logger *logrus.Logger) error {
 	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -354,7 +354,7 @@ func retryInstallation(installFunc func() error, componentName string, maxRetrie
 	return fmt.Errorf("%s installation failed after %d attempts: %w", componentName, maxRetries, lastErr)
 }
 
-func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, kaiConfig *KaiInstallConfig, nvidiaConfig *NvidiaOperatorInstallConfig) error {
+func InstallCoreComponents(logger *logrus.Logger, groveConfig *GroveInstallConfig, kaiConfig *KaiInstallConfig, nvidiaConfig *NvidiaOperatorInstallConfig) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, 3) // Buffer for up to 3 errors
 
@@ -438,7 +438,8 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 	return nil
 }
 
-func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
+// SetupCompleteK3DCluster creates a complete k3d cluster with Grove, Kai Scheduler, and NVIDIA GPU Operator
+func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
 
 	clientset, restConfig, k3dConfig, cleanup, err := SetupK3DCluster(ctx, cfg, logger)
 	if err != nil {
@@ -575,7 +576,7 @@ func ensureNamespace(ctx context.Context, clientset kubernetes.Interface, namesp
 // 3. Deletes the not ready node from Kubernetes
 // 4. Finds and restarts the corresponding Docker container (node names match container names exactly)
 // 5. The restarted container will rejoin the cluster as a new node
-func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kubernetes.Clientset, logger *CILogger) func() {
+func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kubernetes.Clientset, logger *logrus.Logger) func() {
 
 	logger.Info("🔍 Starting node monitoring for not ready nodes...")
 
@@ -613,7 +614,7 @@ func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kub
 }
 
 // checkAndReplaceNotReadyNodes checks for nodes that are not ready and replaces them
-func checkAndReplaceNotReadyNodes(ctx context.Context, clientset *kubernetes.Clientset, logger *CILogger) error {
+func checkAndReplaceNotReadyNodes(ctx context.Context, clientset *kubernetes.Clientset, logger *logrus.Logger) error {
 	// List all nodes
 	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -653,7 +654,7 @@ func isNodeReady(node *v1.Node) bool {
 }
 
 // replaceNotReadyNode handles the process of replacing a not ready node
-func replaceNotReadyNode(ctx context.Context, node *v1.Node, clientset *kubernetes.Clientset, logger *CILogger) error {
+func replaceNotReadyNode(ctx context.Context, node *v1.Node, clientset *kubernetes.Clientset, logger *logrus.Logger) error {
 	nodeName := node.Name
 
 	// Step 1: Delete the node from Kubernetes
@@ -672,7 +673,7 @@ func replaceNotReadyNode(ctx context.Context, node *v1.Node, clientset *kubernet
 }
 
 // restartNodeContainer finds and restarts the Docker container corresponding to a k3d node
-func restartNodeContainer(ctx context.Context, nodeName string, logger *CILogger) error {
+func restartNodeContainer(ctx context.Context, nodeName string, logger *logrus.Logger) error {
 	// Create Docker client
 	dockerClient, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if err != nil {

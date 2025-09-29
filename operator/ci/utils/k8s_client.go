@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -49,13 +50,13 @@ type WorkloadConfig struct {
 }
 
 // ApplyYAMLContent applies YAML content directly to Kubernetes
-func ApplyYAMLContent(ctx context.Context, yamlContent string, namespace string, restConfig *rest.Config, logger *CILogger) ([]AppliedResource, error) {
+func ApplyYAMLContent(ctx context.Context, yamlContent string, namespace string, restConfig *rest.Config, logger *logrus.Logger) ([]AppliedResource, error) {
 	logger.Debug("📄 Applying YAML content...")
 	return applyYAMLData(ctx, []byte(yamlContent), namespace, restConfig, logger)
 }
 
 // ApplyYAML applies a YAML file containing Kubernetes resources
-func ApplyYAML(ctx context.Context, config *WorkloadConfig, logger *CILogger) ([]AppliedResource, error) {
+func ApplyYAML(ctx context.Context, config *WorkloadConfig, logger *logrus.Logger) ([]AppliedResource, error) {
 	logger.Debugf("📄 Applying resources from %s...\n", config.YAMLFilePath)
 
 	// Read the YAML file
@@ -68,7 +69,7 @@ func ApplyYAML(ctx context.Context, config *WorkloadConfig, logger *CILogger) ([
 }
 
 // applyYAMLData is the common function that applies YAML data to Kubernetes
-func applyYAMLData(ctx context.Context, yamlData []byte, namespace string, restConfig *rest.Config, logger *CILogger) ([]AppliedResource, error) {
+func applyYAMLData(ctx context.Context, yamlData []byte, namespace string, restConfig *rest.Config, logger *logrus.Logger) ([]AppliedResource, error) {
 	dynamicClient, restMapper, err := createKubernetesClients(restConfig)
 	if err != nil {
 		return nil, err
@@ -202,7 +203,7 @@ func handleResourceNamespace(obj *unstructured.Unstructured, mapping *meta.RESTM
 }
 
 // logResourceApplication logs what resource is being applied
-func logResourceApplication(obj *unstructured.Unstructured, gvk *schema.GroupVersionKind, logger *CILogger) {
+func logResourceApplication(obj *unstructured.Unstructured, gvk *schema.GroupVersionKind, logger *logrus.Logger) {
 	if obj.GetNamespace() != "" {
 		logger.Infof("🔧 Applying %s: %s/%s", gvk.Kind, obj.GetNamespace(), obj.GetName())
 	} else {
@@ -241,7 +242,7 @@ func updateResource(ctx context.Context, dynamicClient dynamic.Interface, gvr sc
 }
 
 // WaitForPods waits for pods to be ready in the specified namespaces
-func WaitForPods(ctx context.Context, config *WorkloadConfig, namespaces []string, logger *CILogger) error {
+func WaitForPods(ctx context.Context, config *WorkloadConfig, namespaces []string, logger *logrus.Logger) error {
 	if config.Timeout == 0 {
 		config.Timeout = 5 * time.Minute
 	}
@@ -304,7 +305,7 @@ func WaitForPods(ctx context.Context, config *WorkloadConfig, namespaces []strin
 }
 
 // ApplyYAMLAndWaitForPods applies a YAML file and waits for all pods to be ready (backward compatibility)
-func ApplyYAMLAndWaitForPods(ctx context.Context, config *WorkloadConfig, logger *CILogger) error {
+func ApplyYAMLAndWaitForPods(ctx context.Context, config *WorkloadConfig, logger *logrus.Logger) error {
 	// Check if this is a Grove workload that needs the operator ready
 	needsGroveOperator := false
 	if yamlData, err := os.ReadFile(config.YAMLFilePath); err == nil {
@@ -362,7 +363,7 @@ func getGVRFromGVK(restMapper meta.RESTMapper, gvk schema.GroupVersionKind) (sch
 }
 
 // waitForRegularPods waits for regular pods (non-PodCliqueSet) to be ready
-func waitForRegularPods(ctx context.Context, clientset *kubernetes.Clientset, namespace string, logger *CILogger) error {
+func waitForRegularPods(ctx context.Context, clientset *kubernetes.Clientset, namespace string, logger *logrus.Logger) error {
 	if namespace == "" {
 		namespace = "default"
 	}
@@ -396,7 +397,7 @@ func waitForRegularPods(ctx context.Context, clientset *kubernetes.Clientset, na
 }
 
 // WaitForPodsInNamespace waits for all pods in a namespace to be ready
-func WaitForPodsInNamespace(ctx context.Context, namespace string, restConfig *rest.Config, timeout time.Duration, logger *CILogger) error {
+func WaitForPodsInNamespace(ctx context.Context, namespace string, restConfig *rest.Config, timeout time.Duration, logger *logrus.Logger) error {
 	workloadConfig := &WorkloadConfig{
 		RestConfig: restConfig,
 		Timeout:    timeout,

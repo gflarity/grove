@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sirupsen/logrus"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
@@ -68,7 +69,7 @@ func (c *HelmInstallConfig) Validate() error {
 	}
 	if c.Logger == nil {
 		// Create a default logger that writes to stdout
-		defaultLogger := NewCILogger(nil)
+		defaultLogger := NewCILogger(logrus.InfoLevel)
 		c.Logger = defaultLogger.Printf
 	}
 	return nil
@@ -242,7 +243,7 @@ func ValidateComponentConfig(config ComponentInstallConfig) error {
 		config.SetValues(make(map[string]interface{}))
 	}
 	if config.GetLogger() == nil {
-		defaultLogger := NewCILogger(nil)
+		defaultLogger := NewCILogger(logrus.InfoLevel)
 		config.SetLogger(defaultLogger.Printf)
 	}
 
@@ -251,7 +252,7 @@ func ValidateComponentConfig(config ComponentInstallConfig) error {
 }
 
 // InstallComponent installs a component using the common installation pattern
-func InstallComponent(config ComponentInstallConfig, logger *CILogger) (*release.Release, error) {
+func InstallComponent(config ComponentInstallConfig, logger *logrus.Logger) (*release.Release, error) {
 	if err := ValidateComponentConfig(config); err != nil {
 		return nil, err
 	}
@@ -308,7 +309,7 @@ func InstallComponent(config ComponentInstallConfig, logger *CILogger) (*release
 }
 
 // InstallOrUpgradeComponent installs a component if it doesn't exist, or upgrades it if it does
-func InstallOrUpgradeComponent(config ComponentInstallConfig, logger *CILogger) (*release.Release, error) {
+func InstallOrUpgradeComponent(config ComponentInstallConfig, logger *logrus.Logger) (*release.Release, error) {
 	if err := ValidateComponentConfig(config); err != nil {
 		return nil, err
 	}

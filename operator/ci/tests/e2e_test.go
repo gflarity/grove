@@ -25,13 +25,13 @@ var (
 	isRunningFullSuite bool
 
 	// logger for the tests
-	logger *utils.CILogger
+	logger *logrus.Logger
 )
 
 func init() {
 
 	// increase logger verbosity to debug
-	logger = utils.NewCILoggerWithVerbosity(os.Stdout, logrus.InfoLevel)
+	logger = utils.NewCILogger(logrus.InfoLevel)
 }
 
 // TestMain manages the lifecycle of the shared cluster for all tests
@@ -130,7 +130,7 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 		Timeout:      1 * time.Minute, // Short timeout since we expect pods to be pending
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -192,7 +192,7 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 
 	// Wait for all pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute // Allow more time for workload pods
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -264,7 +264,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 		PodLabelSelector: "app.kubernetes.io/part-of=workload1",
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -324,7 +324,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 
 	t.Log("5. Wait for pods to become ready")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -426,7 +426,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 15 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for scaled pods to be ready: %v", err)
 	}
 
@@ -497,7 +497,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 		PodLabelSelector: "app.kubernetes.io/part-of=workload1",
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -555,7 +555,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 
 	t.Log("5. Wait for pods to become ready")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -647,7 +647,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 15 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for scaled pods to be ready: %v", err)
 	}
 
@@ -721,7 +721,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 		Timeout:          1 * time.Minute,
 		PodLabelSelector: workloadLabelSelector,
 	}
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -777,7 +777,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 
 	t.Log("5. Wait for pods to become ready")
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -813,7 +813,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready after PCSG scale: %v", err)
 	}
 
@@ -835,7 +835,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready after PCS scale: %v", err)
 	}
 
@@ -859,7 +859,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready after final PCSG scale: %v", err)
 	}
 
@@ -1056,7 +1056,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -1218,7 +1218,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -1297,7 +1297,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -1455,7 +1455,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -1599,7 +1599,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -1680,7 +1680,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -1871,7 +1871,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -1982,7 +1982,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -2059,7 +2059,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -2311,7 +2311,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -2389,7 +2389,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -2517,7 +2517,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -2628,7 +2628,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -2705,7 +2705,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 		PodLabelSelector: "app.kubernetes.io/part-of=workload2",
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -2961,7 +2961,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 
 	// Wait for all remaining pods to be scheduled and ready
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all pods to be ready: %v", err)
 	}
 
@@ -3069,7 +3069,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 		PodLabelSelector: workloadLabelSelector,
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -3144,7 +3144,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for first wave pods to be ready: %v", err)
 	}
 
@@ -3220,7 +3220,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for PCSG completion pods to be ready: %v", err)
 	}
 
@@ -3264,7 +3264,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for PCS completion pods to be ready: %v", err)
 	}
 
@@ -3335,7 +3335,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all final pods to be ready: %v", err)
 	}
 
@@ -3400,7 +3400,7 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 		PodLabelSelector: workloadLabelSelector,
 	}
 
-	_, err = utils.ApplyYAML(ctx, workloadConfig, utils.NewCILogger(nil))
+	_, err = utils.ApplyYAML(ctx, workloadConfig, logger)
 	if err != nil {
 		t.Errorf("Failed to apply workload YAML: %v", err)
 	}
@@ -3611,7 +3611,7 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 	}
 
 	workloadConfig.Timeout = 10 * time.Minute
-	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, utils.NewCILogger(nil)); err != nil {
+	if err := utils.WaitForPods(ctx, workloadConfig, []string{workloadNamespace}, logger); err != nil {
 		t.Errorf("Failed to wait for all final pods to be ready: %v", err)
 	}
 

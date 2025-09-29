@@ -11,6 +11,7 @@ import (
 	"github.com/NVIDIA/grove/operator/ci/utils"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -25,7 +26,7 @@ type SharedClusterManager struct {
 	restConfig    *rest.Config
 	dynamicClient dynamic.Interface
 	cleanup       func()
-	logger        *utils.CILogger
+	logger        *logrus.Logger
 	mu            sync.Mutex
 	isSetup       bool
 	agentNodes    []string
@@ -38,7 +39,7 @@ var (
 )
 
 // GetSharedCluster returns the singleton shared cluster manager
-func GetSharedCluster(logger *utils.CILogger) *SharedClusterManager {
+func GetSharedCluster(logger *logrus.Logger) *SharedClusterManager {
 	once.Do(func() {
 		sharedCluster = &SharedClusterManager{
 			logger: logger,
