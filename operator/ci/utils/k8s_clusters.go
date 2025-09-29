@@ -517,31 +517,26 @@ func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CIL
 		return nil, nil, nil, nil, fmt.Errorf("component installation failed: %w", err)
 	}
 
-	logger.Debug("⏳ Waiting for Grove pods to be ready...")
 	if err := WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("Grove pods not ready: %w", err)
 	}
 
-	logger.Debug("⏳ Waiting for Kai Scheduler pods to be ready...")
 	if err := WaitForKaiPodsReady(ctx, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("Kai Scheduler pods not ready: %w", err)
 	}
 
-	logger.Debug("⏳ Waiting for Kai CRDs to be ready...")
 	if err := WaitForKaiCRDs(ctx, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("Failed to wait for Kai CRDs: %w", err)
 	}
 
-	logger.Debug("📄 Creating default Kai queues...")
 	if err := CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("Failed to create default Kai queue: %w", err)
 	}
 
-	logger.Debug("⏳ Waiting for NVIDIA GPU Operator to be ready...")
 	if err := WaitForNvidiaOperatorReady(ctx, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("NVIDIA GPU Operator not ready: %w", err)
