@@ -19,6 +19,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func TestWithK3DCluster(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a CILogger for this test
-	logger := NewCILogger(nil)
+	logger := NewCILogger(os.Stdout)
 
 	// Custom configuration
 	customCfg := ClusterConfig{
@@ -259,7 +260,7 @@ func InstallGroveWithTiming(t *testing.T, config *GroveInstallConfig, logger *CI
 	t.Helper()
 
 	start := time.Now()
-	logger.Info("🚀 Starting Grove installation...")
+	logger.Debug("🚀 Starting Grove installation...")
 
 	rel, err := InstallGrove(config, logger)
 	duration := time.Since(start)
@@ -273,7 +274,7 @@ func InstallGroveWithTiming(t *testing.T, config *GroveInstallConfig, logger *CI
 		logger.Errorf("❌ Grove installation failed after %v: %v", duration, err)
 		return result, err
 	} else {
-		logger.Infof("✅ Grove installation completed successfully in %v (release: %s, namespace: %s)",
+		logger.Debugf("✅ Grove installation completed successfully in %v (release: %s, namespace: %s)",
 			duration, rel.Name, rel.Namespace)
 	}
 
@@ -327,7 +328,7 @@ func InstallKaiWithTiming(t *testing.T, config *KaiInstallConfig, logger *CILogg
 		logger.Errorf("❌ Kai Scheduler installation failed after %v: %v", duration, err)
 		return result, err
 	} else {
-		logger.Infof("✅ Kai Scheduler installation completed successfully in %v (release: %s, namespace: %s)",
+		logger.Debugf("✅ Kai Scheduler installation completed successfully in %v (release: %s, namespace: %s)",
 			duration, rel.Name, rel.Namespace)
 	}
 

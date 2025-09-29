@@ -75,7 +75,7 @@ func (c *GroveInstallConfig) Validate() error {
 
 // GroveInstallConfigV0_1_0_Alpha1 returns a configuration for Grove v0.1.0-alpha.1 installation
 func GroveInstallConfigV0_1_0_Alpha1() *GroveInstallConfig {
-	defaultLogger := NewCILogger(nil)
+	// TODO logging function needs to be passed in properly
 	return &GroveInstallConfig{
 		BaseInstallConfig: BaseInstallConfig{
 			ReleaseName:  "grove",
@@ -83,7 +83,7 @@ func GroveInstallConfigV0_1_0_Alpha1() *GroveInstallConfig {
 			ChartVersion: "v0.1.0-alpha.1",
 			Namespace:    "default",
 			Values:       make(map[string]interface{}),
-			Logger:       defaultLogger.Printf,
+			Logger:       func(format string, args ...interface{}) {},
 		},
 	}
 }
@@ -102,14 +102,14 @@ func InstallOrUpgradeGrove(config *GroveInstallConfig, logger *CILogger) (*relea
 
 // WaitForGrovePodsReady waits for Grove operator pods to be ready
 func WaitForGrovePodsReady(ctx context.Context, namespace string, restConfig *rest.Config, logger *CILogger) error {
-	logger.Info("⏳ Waiting for Grove operator pods to be ready...")
+	logger.Debug("⏳ Waiting for Grove operator pods to be ready...")
 
 	err := WaitForPodsInNamespace(ctx, namespace, restConfig, 5*time.Minute, logger)
 	if err != nil {
 		return fmt.Errorf("failed waiting for Grove pods: %w", err)
 	}
 
-	logger.Info("✅ Grove operator pods are ready!")
+	logger.Debug("✅ Grove operator pods are ready!")
 	return nil
 }
 
@@ -123,7 +123,7 @@ func waitForGroveOperatorReady(ctx context.Context, config *WorkloadConfig, logg
 	// Grove operator is always installed in grove-system namespace
 	namespace := "grove-system"
 
-	logger.Infof("⏳ Waiting for Grove operator to be ready in namespace %s...", namespace)
+	logger.Debugf("⏳ Waiting for Grove operator to be ready in namespace %s...", namespace)
 
 	// Wait for the Grove operator deployment to be ready
 	return wait.PollUntilContextTimeout(ctx, 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
@@ -345,7 +345,7 @@ func waitForPodCliqueSetPodsReady(ctx context.Context, config *WorkloadConfig, p
 		namespaces = append(namespaces, namespace)
 	}
 
-	logger.Infof("⏳ Waiting for pods from PodCliqueSet resources: %v", podCliqueSetNames)
+	logger.Debugf("⏳ Waiting for pods from PodCliqueSet resources: %v", podCliqueSetNames)
 
 	// Wait for all pods to be ready
 	return wait.PollUntilContextTimeout(timeoutCtx, 5*time.Second, config.Timeout, true, func(ctx context.Context) (bool, error) {

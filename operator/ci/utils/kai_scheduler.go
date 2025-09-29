@@ -76,7 +76,8 @@ func (c *KaiInstallConfig) Validate() error {
 // KaiInstallConfigLatest returns a configuration for Kai Scheduler installation with latest defaults
 // Note: You must specify the version as it's required
 func KaiInstallConfigLatest(version string) *KaiInstallConfig {
-	defaultLogger := NewCILogger(nil)
+
+	// TODO fix this to pass in logger properl
 	return &KaiInstallConfig{
 		BaseInstallConfig: BaseInstallConfig{
 			ReleaseName:  "kai-scheduler",
@@ -84,7 +85,7 @@ func KaiInstallConfigLatest(version string) *KaiInstallConfig {
 			ChartVersion: version,
 			Namespace:    "kai-scheduler",
 			Values:       make(map[string]interface{}),
-			Logger:       defaultLogger.Printf,
+			Logger:       func(format string, args ...interface{}) {},
 		},
 	}
 }
@@ -103,7 +104,7 @@ func InstallOrUpgradeKai(config *KaiInstallConfig, logger *CILogger) (*release.R
 
 // WaitForKaiPodsReady waits for Kai Scheduler pods to be ready
 func WaitForKaiPodsReady(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
-	logger.Info("⏳ Waiting for Kai Scheduler pods to be ready...")
+	logger.Debug("⏳ Waiting for Kai Scheduler pods to be ready...")
 
 	// Kai scheduler is installed in kai-scheduler namespace by default
 	err := WaitForPodsInNamespace(ctx, "kai-scheduler", restConfig, 5*time.Minute, logger)
@@ -111,13 +112,13 @@ func WaitForKaiPodsReady(ctx context.Context, restConfig *rest.Config, logger *C
 		return fmt.Errorf("failed waiting for Kai Scheduler pods: %w", err)
 	}
 
-	logger.Info("✅ Kai Scheduler pods are ready!")
+	logger.Debug("✅ Kai Scheduler pods are ready!")
 	return nil
 }
 
 // WaitForKaiCRDs waits for the Queue CRD from scheduling.run.ai/v2 to be available
 func WaitForKaiCRDs(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
-	logger.Info("⏳ Waiting for Queue CRD (scheduling.run.ai/v2) to be available...")
+	logger.Debug("⏳ Waiting for Queue CRD (scheduling.run.ai/v2) to be available...")
 
 	// Create API extensions client to check CRDs
 	apiExtClient, err := apiextensionsclientset.NewForConfig(restConfig)
@@ -141,7 +142,7 @@ func WaitForKaiCRDs(ctx context.Context, restConfig *rest.Config, logger *CILogg
 
 		// Check if the CRD is established and has the v2 version
 		if isKaiCRDEstablished(crd) && hasKaiCRDVersion(crd, "v2") {
-			logger.Info("✅ Queue CRD (scheduling.run.ai/v2) is available and established!")
+			logger.Debug("✅ Queue CRD (scheduling.run.ai/v2) is available and established!")
 			return nil
 		}
 
@@ -174,7 +175,7 @@ func hasKaiCRDVersion(crd *apiextensionsv1.CustomResourceDefinition, version str
 
 // CreateDefaultKaiQueues creates queues using the k8s client YAML apply functionality
 func CreateDefaultKaiQueues(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
-	logger.Info("📄 Creating queues using k8s client...")
+	logger.Debug("📄 Creating queues using k8s client...")
 
 	// Get the path to the queues.yaml file relative to this source file
 	_, currentFile, _, _ := runtime.Caller(0)
@@ -192,6 +193,6 @@ func CreateDefaultKaiQueues(ctx context.Context, restConfig *rest.Config, logger
 		return fmt.Errorf("failed to apply queues YAML: %w", err)
 	}
 
-	logger.Infof("✅ Successfully applied %d queue resources", len(appliedResources))
+	logger.Debugf("✅ Successfully applied %d queue resources", len(appliedResources))
 	return nil
 }

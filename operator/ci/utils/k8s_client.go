@@ -50,14 +50,13 @@ type WorkloadConfig struct {
 
 // ApplyYAMLContent applies YAML content directly to Kubernetes
 func ApplyYAMLContent(ctx context.Context, yamlContent string, namespace string, restConfig *rest.Config, logger *CILogger) ([]AppliedResource, error) {
-	logger.Infof("📄 Applying YAML content...")
-
+	logger.Debug("📄 Applying YAML content...")
 	return applyYAMLData(ctx, []byte(yamlContent), namespace, restConfig, logger)
 }
 
 // ApplyYAML applies a YAML file containing Kubernetes resources
 func ApplyYAML(ctx context.Context, config *WorkloadConfig, logger *CILogger) ([]AppliedResource, error) {
-	logger.Infof("📄 Applying resources from %s...", config.YAMLFilePath)
+	logger.Debugf("📄 Applying resources from %s...\n", config.YAMLFilePath)
 
 	// Read the YAML file
 	yamlData, err := os.ReadFile(config.YAMLFilePath)
@@ -91,7 +90,7 @@ func applyYAMLData(ctx context.Context, yamlData []byte, namespace string, restC
 		}
 
 		// Apply the resource
-		appliedResource, err := applyResource(ctx, dynamicClient, restMapper, unstructuredObj, gvk, namespace, logger)
+		appliedResource, err := applyResource(ctx, dynamicClient, restMapper, unstructuredObj, gvk, namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -99,7 +98,7 @@ func applyYAMLData(ctx context.Context, yamlData []byte, namespace string, restC
 		appliedResources = append(appliedResources, *appliedResource)
 	}
 
-	logger.Infof("📋 Applied %d resources successfully", len(appliedResources))
+	logger.Debugf("📋 Applied %d resources successfully", len(appliedResources))
 	return appliedResources, nil
 }
 
@@ -147,7 +146,7 @@ func decodeNextYAMLObject(decoder *yamlutil.YAMLOrJSONDecoder) (*unstructured.Un
 }
 
 // applyResource applies a single Kubernetes resource
-func applyResource(ctx context.Context, dynamicClient dynamic.Interface, restMapper meta.RESTMapper, obj *unstructured.Unstructured, gvk *schema.GroupVersionKind, namespace string, logger *CILogger) (*AppliedResource, error) {
+func applyResource(ctx context.Context, dynamicClient dynamic.Interface, restMapper meta.RESTMapper, obj *unstructured.Unstructured, gvk *schema.GroupVersionKind, namespace string) (*AppliedResource, error) {
 	// Get resource mapping
 	gvr, mapping, err := getResourceMapping(restMapper, gvk)
 	if err != nil {
@@ -157,17 +156,11 @@ func applyResource(ctx context.Context, dynamicClient dynamic.Interface, restMap
 	// Handle namespace based on resource scope
 	handleResourceNamespace(obj, mapping, namespace)
 
-	// Log what we're applying
-	logResourceApplication(obj, gvk, logger)
-
 	// Apply the resource (create or update)
 	result, err := createOrUpdateResource(ctx, dynamicClient, gvr, mapping, obj)
 	if err != nil {
 		return nil, fmt.Errorf("failed to apply %s %s: %w", gvk.Kind, obj.GetName(), err)
 	}
-
-	// Log success
-	logResourceSuccess(result, gvk, logger)
 
 	return &AppliedResource{
 		Name:      result.GetName(),
@@ -247,15 +240,6 @@ func updateResource(ctx context.Context, dynamicClient dynamic.Interface, gvr sc
 	return dynamicClient.Resource(gvr).Update(ctx, obj, metav1.UpdateOptions{})
 }
 
-// logResourceSuccess logs successful resource application
-func logResourceSuccess(result *unstructured.Unstructured, gvk *schema.GroupVersionKind, logger *CILogger) {
-	if result.GetNamespace() != "" {
-		logger.Infof("✅ Applied %s: %s/%s", gvk.Kind, result.GetNamespace(), result.GetName())
-	} else {
-		logger.Infof("✅ Applied %s: %s", gvk.Kind, result.GetName())
-	}
-}
-
 // WaitForPods waits for pods to be ready in the specified namespaces
 func WaitForPods(ctx context.Context, config *WorkloadConfig, namespaces []string, logger *CILogger) error {
 	if config.Timeout == 0 {
@@ -275,7 +259,7 @@ func WaitForPods(ctx context.Context, config *WorkloadConfig, namespaces []strin
 		namespaces = []string{"default"}
 	}
 
-	logger.Infof("⏳ Waiting for pods to be ready in namespaces: %v", namespaces)
+	logger.Debugf("⏳ Waiting for pods to be ready in namespaces: %v", namespaces)
 
 	return wait.PollUntilContextTimeout(timeoutCtx, 5*time.Second, config.Timeout, true, func(ctx context.Context) (bool, error) {
 		allReady := true
@@ -306,15 +290,13 @@ func WaitForPods(ctx context.Context, config *WorkloadConfig, namespaces []strin
 			}
 		}
 
-		logger.Infof("📊 Pod status: %d/%d ready", readyPods, totalPods)
-
 		if totalPods == 0 {
-			logger.Info("⏳ No pods found yet, resources may still be creating pods...")
+			logger.Debug("⏳ No pods found yet, resources may still be creating pods...")
 			return false, nil
 		}
 
 		if !allReady {
-			logger.Infof("⏳ Waiting for %d more pods to become ready...", totalPods-readyPods)
+			logger.Debugf("⏳ Waiting for %d more pods to become ready...", totalPods-readyPods)
 		}
 
 		return allReady, nil
@@ -360,11 +342,11 @@ func ApplyYAMLAndWaitForPods(ctx context.Context, config *WorkloadConfig, logger
 
 	// Wait for pods if we have PodCliqueSet resources (for backward compatibility)
 	if len(appliedPodCliqueSets) > 0 {
-		logger.Infof("📋 Found %d PodCliqueSet resources, now waiting for pods to be ready...", len(appliedPodCliqueSets))
+		logger.Debugf("📋 Found %d PodCliqueSet resources, now waiting for pods to be ready...", len(appliedPodCliqueSets))
 		if err := waitForPodCliqueSetPodsReady(ctx, config, appliedPodCliqueSets, logger); err != nil {
 			return fmt.Errorf("failed waiting for pods to be ready: %w", err)
 		}
-		logger.Info("🎉 All pods are ready!")
+		logger.Debugf("🎉 All pods are ready!")
 	}
 
 	return nil
@@ -409,7 +391,6 @@ func waitForRegularPods(ctx context.Context, clientset *kubernetes.Clientset, na
 			}
 		}
 
-		logger.Infof("📊 Pod status: %d/%d ready", readyCount, len(pods.Items))
 		return allReady, nil
 	})
 }

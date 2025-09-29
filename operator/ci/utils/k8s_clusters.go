@@ -16,6 +16,7 @@ import (
 	k3dlogger "github.com/k3d-io/k3d/v5/pkg/logger"
 	"github.com/k3d-io/k3d/v5/pkg/runtimes"
 	k3d "github.com/k3d-io/k3d/v5/pkg/types"
+	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,10 +66,12 @@ func DefaultClusterConfig() ClusterConfig {
 
 // SetupK3DCluster creates a k3d cluster and returns a kubernetes clientset and REST config
 func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
-	logger.Infof("📝 Preparing k3d cluster configuration for '%s'...", cfg.Name)
-
-	// Route k3d internal logs to our logger writer
-	k3dlogger.Log().SetOutput(logger.Writer())
+	// k3d is very verbose, we don't want the INFO level logs unless the logger is set to DEBUG
+	if logger.verbosity == logrus.DebugLevel {
+		k3dlogger.Log().SetLevel(logrus.DebugLevel)
+	} else {
+		k3dlogger.Log().SetLevel(logrus.ErrorLevel)
+	}
 
 	// Create cluster configuration
 	clusterConfig := v1alpha5.SimpleConfig{
@@ -147,16 +150,15 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CILogger) (
 	}
 
 	// Create cluster
-	logger.Infof("🚀 Creating cluster '%s' with %d server(s) and %d agent(s)...",
+	logger.Debugf("🚀 Creating cluster '%s' with %d server(s) and %d agent(s)...",
 		k3dConfig.Name, cfg.Servers, cfg.Agents)
 
 	if err := client.ClusterRun(ctx, runtimes.Docker, k3dConfig); err != nil {
 		return nil, nil, nil, cleanup, fmt.Errorf("failed to create cluster: %w", err)
 	}
-	logger.Info("✅ Cluster created successfully!")
 
 	// Get kubeconfig
-	logger.Info("📄 Fetching kubeconfig...")
+	logger.Debug("📄 Fetching kubeconfig...")
 	cluster, err := client.ClusterGet(ctx, runtimes.Docker, &k3dConfig.Cluster)
 	if err != nil {
 		return nil, nil, nil, cleanup, fmt.Errorf("could not get cluster: %w", err)
@@ -210,8 +212,6 @@ func DefaultKindClusterConfig() KindClusterConfig {
 // Note that kind clsuters don't support total memory limits unlike k3d, this is here incase
 // we still want to use Kind for some reason
 func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *CILogger) (*kubernetes.Clientset, *rest.Config, func(), error) {
-	logger.Infof("📝 Preparing kind cluster configuration for '%s'...", cfg.Name)
-
 	// Provide our unified CILogger to kind with verbosity filtering
 	// This will suppress verbose node logs but keep kind's main status updates
 	provider := cluster.NewProvider(cluster.ProviderWithLogger(logger))
@@ -285,7 +285,7 @@ nodeRegistration:
 	}
 
 	// Create cluster
-	logger.Infof("🚀 Creating kind cluster '%s' with %d control-plane(s) and %d worker(s)...",
+	logger.Debugf("🚀 Creating kind cluster '%s' with %d control-plane(s) and %d worker(s)...",
 		cfg.Name, cfg.ControlPlanes, cfg.Workers)
 
 	// this is the cleanup funciton, we always return it now so the caller can decide to use it or not
@@ -305,10 +305,10 @@ nodeRegistration:
 	); err != nil {
 		return nil, nil, cleanup, fmt.Errorf("failed to create kind cluster: %w", err)
 	}
-	logger.Info("✅ Kind cluster created successfully!")
+	logger.Debug("✅ Kind cluster created successfully!")
 
 	// Get kubeconfig
-	logger.Info("📄 Fetching kubeconfig...")
+	logger.Debug("📄 Fetching kubeconfig...")
 	// ... (the rest of your function remains the same) ...
 	kubeConfigYaml, err := provider.KubeConfig(cfg.Name, false)
 	if err != nil {
@@ -335,14 +335,14 @@ func retryInstallation(installFunc func() error, componentName string, maxRetrie
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if attempt > 1 {
-			logger.Infof("🔄 Retrying %s installation (attempt %d/%d)...", componentName, attempt, maxRetries)
+			logger.Debugf("🔄 Retrying %s installation (attempt %d/%d)...", componentName, attempt, maxRetries)
 			time.Sleep(retryDelay)
 		}
 
 		err := installFunc()
 		if err == nil {
 			if attempt > 1 {
-				logger.Infof("✅ %s installation succeeded on attempt %d/%d", componentName, attempt, maxRetries)
+				logger.Debugf("✅ %s installation succeeded on attempt %d/%d", componentName, attempt, maxRetries)
 			}
 			return nil
 		}
@@ -367,7 +367,7 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			logger.Info("🚀 Starting Kai Scheduler installation...")
+			logger.Debug("🚀 Starting Kai Scheduler installation...")
 
 			installFunc := func() error {
 				_, err := InstallKai(kaiConfig, logger)
@@ -378,7 +378,7 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 			if err != nil {
 				errChan <- err
 			} else {
-				logger.Info("✅ Kai Scheduler installation completed successfully")
+				logger.Debug("✅ Kai Scheduler installation completed successfully")
 			}
 		}()
 	}
@@ -388,7 +388,7 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			logger.Info("🚀 Starting Grove installation...")
+			logger.Debug("🚀 Starting Grove installation...")
 
 			installFunc := func() error {
 				_, err := InstallGrove(groveConfig, logger)
@@ -399,7 +399,7 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 			if err != nil {
 				errChan <- err
 			} else {
-				logger.Info("✅ Grove installation completed successfully")
+				logger.Debug("✅ Grove installation completed successfully")
 			}
 		}()
 	}
@@ -409,7 +409,7 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			logger.Info("🚀 Starting NVIDIA GPU Operator installation...")
+			logger.Debug("🚀 Starting NVIDIA GPU Operator installation...")
 
 			installFunc := func() error {
 				_, err := InstallNvidiaOperator(nvidiaConfig, logger)
@@ -420,7 +420,7 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 			if err != nil {
 				errChan <- err
 			} else {
-				logger.Info("✅ NVIDIA GPU Operator installation completed successfully")
+				logger.Debug("✅ NVIDIA GPU Operator installation completed successfully")
 			}
 		}()
 	}
@@ -434,7 +434,7 @@ func InstallCoreComponents(logger *CILogger, groveConfig *GroveInstallConfig, ka
 		return err // Return the first error encountered
 	}
 
-	logger.Info("✅ All component installations completed successfully")
+	logger.Debug("✅ All component installations completed successfully")
 	return nil
 }
 
@@ -517,37 +517,36 @@ func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *CIL
 		return nil, nil, nil, nil, fmt.Errorf("component installation failed: %w", err)
 	}
 
-	logger.Info("⏳ Waiting for Grove pods to be ready...")
+	logger.Debug("⏳ Waiting for Grove pods to be ready...")
 	if err := WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("Grove pods not ready: %w", err)
 	}
 
-	logger.Info("⏳ Waiting for Kai Scheduler pods to be ready...")
+	logger.Debug("⏳ Waiting for Kai Scheduler pods to be ready...")
 	if err := WaitForKaiPodsReady(ctx, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("Kai Scheduler pods not ready: %w", err)
 	}
 
-	logger.Info("⏳ Waiting for Kai CRDs to be ready...")
+	logger.Debug("⏳ Waiting for Kai CRDs to be ready...")
 	if err := WaitForKaiCRDs(ctx, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("Failed to wait for Kai CRDs: %w", err)
 	}
 
-	logger.Info("📄 Creating default Kai queues...")
+	logger.Debug("📄 Creating default Kai queues...")
 	if err := CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("Failed to create default Kai queue: %w", err)
 	}
 
-	logger.Info("⏳ Waiting for NVIDIA GPU Operator to be ready...")
+	logger.Debug("⏳ Waiting for NVIDIA GPU Operator to be ready...")
 	if err := WaitForNvidiaOperatorReady(ctx, restConfig, logger); err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("NVIDIA GPU Operator not ready: %w", err)
 	}
 
-	logger.Info("🎉 Complete k3d cluster setup successful!")
 	return clientset, restConfig, k3dConfig, enhancedCleanup, nil
 }
 
@@ -582,6 +581,9 @@ func ensureNamespace(ctx context.Context, clientset kubernetes.Interface, namesp
 // 4. Finds and restarts the corresponding Docker container (node names match container names exactly)
 // 5. The restarted container will rejoin the cluster as a new node
 func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kubernetes.Clientset, logger *CILogger) func() {
+
+	logger.Info("🔍 Starting node monitoring for not ready nodes...")
+
 	// Create a context that can be cancelled to stop the monitoring
 	monitorCtx, cancel := context.WithCancel(ctx)
 
@@ -592,8 +594,6 @@ func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kub
 				logger.Errorf("Node monitoring goroutine panicked: %v", r)
 			}
 		}()
-
-		logger.Info("🔍 Starting node monitoring for not ready nodes...")
 
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -630,18 +630,18 @@ func checkAndReplaceNotReadyNodes(ctx context.Context, clientset *kubernetes.Cli
 		if !isNodeReady(&node) {
 			// Skip cordoned nodes (intentionally made unschedulable for maintenance)
 			if node.Spec.Unschedulable {
-				logger.Infof("⏭️ Skipping cordoned node: %s (intentionally unschedulable)", node.Name)
+				logger.Debugf("⏭️ Skipping cordoned node: %s (intentionally unschedulable)", node.Name)
 				continue
 			}
 
-			logger.Infof("🚨 Found not ready node: %s", node.Name)
+			logger.Warnf("🚨 Found not ready node: %s", node.Name)
 
 			if err := replaceNotReadyNode(ctx, &node, clientset, logger); err != nil {
 				logger.Errorf("Failed to replace not ready node %s: %v", node.Name, err)
 				continue
 			}
 
-			logger.Infof("✅ Successfully replaced not ready node: %s", node.Name)
+			logger.Warnf("✅ Successfully replaced not ready node: %s", node.Name)
 		}
 	}
 
@@ -663,13 +663,13 @@ func replaceNotReadyNode(ctx context.Context, node *v1.Node, clientset *kubernet
 	nodeName := node.Name
 
 	// Step 1: Delete the node from Kubernetes
-	logger.Infof("🗑️ Deleting node from Kubernetes: %s", nodeName)
+	logger.Debugf("🗑️ Deleting node from Kubernetes: %s", nodeName)
 	if err := clientset.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("failed to delete node %s: %w", nodeName, err)
 	}
 
 	// Step 2: Find and restart the corresponding Docker container
-	logger.Infof("🔄 Restarting Docker container for node: %s", nodeName)
+	logger.Debugf("🔄 Restarting Docker container for node: %s", nodeName)
 	if err := restartNodeContainer(ctx, nodeName, logger); err != nil {
 		return fmt.Errorf("failed to restart container for node %s: %w", nodeName, err)
 	}
@@ -703,7 +703,7 @@ func restartNodeContainer(ctx context.Context, nodeName string, logger *CILogger
 			// Direct name match - node names are the same as container names
 			if containerName == nodeName {
 				targetContainer = &c
-				logger.Infof("  🎯 Found matching container: %s (ID: %s)", containerName, c.ID[:12])
+				logger.Debugf("  🎯 Found matching container: %s (ID: %s)", containerName, c.ID[:12])
 				break
 			}
 		}
@@ -717,11 +717,11 @@ func restartNodeContainer(ctx context.Context, nodeName string, logger *CILogger
 	}
 
 	// Restart the container
-	logger.Infof("  🔄 Restarting container: %s", targetContainer.ID[:12])
+	logger.Debugf("  🔄 Restarting container: %s", targetContainer.ID[:12])
 	if err := dockerClient.ContainerRestart(ctx, targetContainer.ID, container.StopOptions{}); err != nil {
 		return fmt.Errorf("failed to restart container %s: %w", targetContainer.ID[:12], err)
 	}
 
-	logger.Infof("  ✅ Container restarted successfully: %s", targetContainer.ID[:12])
+	logger.Debugf("  ✅ Container restarted successfully: %s", targetContainer.ID[:12])
 	return nil
 }

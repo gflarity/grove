@@ -68,7 +68,8 @@ func (c *NvidiaOperatorInstallConfig) Validate() error {
 // NvidiaOperatorInstallConfigLatest returns a configuration for NVIDIA GPU Operator installation with latest defaults
 // Note: You must specify the version as it's required
 func NvidiaOperatorInstallConfigLatest(version string) *NvidiaOperatorInstallConfig {
-	defaultLogger := NewCILogger(nil)
+
+	// TODO logging function needs to be passed in
 	return &NvidiaOperatorInstallConfig{
 		BaseInstallConfig: BaseInstallConfig{
 			ReleaseName:  "", // Will be auto-generated
@@ -76,7 +77,7 @@ func NvidiaOperatorInstallConfigLatest(version string) *NvidiaOperatorInstallCon
 			ChartVersion: version,
 			Namespace:    "gpu-operator",
 			Values:       make(map[string]interface{}),
-			Logger:       defaultLogger.Printf,
+			Logger:       func(format string, args ...interface{}) {},
 		},
 		Wait:         false, // Disable wait for test environments without GPUs
 		GenerateName: true,
@@ -97,7 +98,7 @@ func InstallOrUpgradeNvidiaOperator(config *NvidiaOperatorInstallConfig, logger 
 
 // WaitForNvidiaOperatorPodsReady waits for NVIDIA GPU Operator pods to be ready
 func WaitForNvidiaOperatorPodsReady(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
-	logger.Info("⏳ Waiting for NVIDIA GPU Operator pods to be ready...")
+	logger.Debug("⏳ Waiting for NVIDIA GPU Operator pods to be ready...")
 
 	// NVIDIA GPU operator is installed in gpu-operator namespace by default
 	// Use shorter timeout for test environments with disabled components
@@ -106,14 +107,14 @@ func WaitForNvidiaOperatorPodsReady(ctx context.Context, restConfig *rest.Config
 		return fmt.Errorf("failed waiting for NVIDIA GPU Operator pods: %w", err)
 	}
 
-	logger.Info("✅ NVIDIA GPU Operator pods are ready!")
+	logger.Debug("✅ NVIDIA GPU Operator pods are ready!")
 	return nil
 }
 
 // WaitForNvidiaOperatorReady waits for the NVIDIA GPU Operator to be fully ready
 // In test environments without GPUs, this simply waits for the operator pods to be ready
 func WaitForNvidiaOperatorReady(ctx context.Context, restConfig *rest.Config, logger *CILogger) error {
-	logger.Info("⏳ Waiting for NVIDIA GPU Operator to be ready...")
+	logger.Debug("⏳ Waiting for NVIDIA GPU Operator to be ready...")
 
 	// For test environments, just wait for the operator pods to be ready
 	// The WaitForNvidiaOperatorPodsReady function already does comprehensive pod readiness checking
@@ -121,6 +122,6 @@ func WaitForNvidiaOperatorReady(ctx context.Context, restConfig *rest.Config, lo
 		return err
 	}
 
-	logger.Info("✅ NVIDIA GPU Operator is ready!")
+	logger.Debug("✅ NVIDIA GPU Operator is ready!")
 	return nil
 }

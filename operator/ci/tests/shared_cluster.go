@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -39,10 +38,10 @@ var (
 )
 
 // GetSharedCluster returns the singleton shared cluster manager
-func GetSharedCluster() *SharedClusterManager {
+func GetSharedCluster(logger *utils.CILogger) *SharedClusterManager {
 	once.Do(func() {
 		sharedCluster = &SharedClusterManager{
-			logger: utils.NewCILogger(nil),
+			logger: logger,
 		}
 	})
 	return sharedCluster
@@ -132,8 +131,6 @@ func (scm *SharedClusterManager) PrepareForTest(ctx context.Context, t *testing.
 		return fmt.Errorf("shared cluster not setup")
 	}
 
-	t.Logf("🔧 Preparing cluster for test %s (requires %d agents)", t.Name(), requiredAgents)
-
 	// First, uncordon all nodes to reset state
 	for _, nodeName := range scm.agentNodes {
 		if err := cordonNode(ctx, scm.clientset, nodeName, false); err != nil {
@@ -149,7 +146,6 @@ func (scm *SharedClusterManager) PrepareForTest(ctx context.Context, t *testing.
 				return fmt.Errorf("failed to cordon node %s: %w", nodeName, err)
 			}
 		}
-		t.Logf("🚫 Cordoned %d nodes, leaving %d available", len(nodesToCordon), requiredAgents)
 	}
 
 	return nil
@@ -164,7 +160,7 @@ func (scm *SharedClusterManager) CleanupWorkloads(ctx context.Context, t *testin
 		return nil
 	}
 
-	t.Log("🧹 Cleaning up workloads from shared cluster...")
+	scm.logger.Info("🧹 Cleaning up workloads from shared cluster...")
 
 	// Step 1: Delete PodCliqueSets first (should cascade delete other resources)
 	if err := scm.deleteAllResources(ctx, "grove.io", "v1alpha1", "podcliquesets"); err != nil {
@@ -184,7 +180,6 @@ func (scm *SharedClusterManager) CleanupWorkloads(ctx context.Context, t *testin
 		t.Logf("Warning: failed to reset node states: %v", err)
 	}
 
-	t.Log("✅ Workload cleanup complete")
 	return nil
 }
 
@@ -330,7 +325,7 @@ func (scm *SharedClusterManager) waitForAllResourcesAndPodsDeleted(ctx context.C
 			}
 
 			if totalResources > 0 || nonSystemPods > 0 {
-				scm.logger.Infof("⏳ Waiting for %d Grove resources and %d pods to be deleted...", totalResources, nonSystemPods)
+				scm.logger.Debugf("⏳ Waiting for %d Grove resources and %d pods to be deleted...", totalResources, nonSystemPods)
 			}
 		}
 	}
@@ -434,18 +429,9 @@ func setupRegistryTestImage(t *testing.T, registryPort string) {
 		t.Helper()
 	}
 
-	// Wait for registry to be ready first
-	waitForRegistry(t, registryPort, 2*time.Minute)
-
 	ctx := context.Background()
 	imageName := "nginx:alpine-slim"
 	registryImage := fmt.Sprintf("localhost:%s/nginx:alpine-slim", registryPort)
-
-	if t != nil {
-		t.Logf("🐳 Setting up test image in registry on port %s...", registryPort)
-	} else {
-		fmt.Printf("🐳 Setting up test image in registry on port %s...\n", registryPort)
-	}
 
 	// Initialize Docker client
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -459,11 +445,6 @@ func setupRegistryTestImage(t *testing.T, registryPort string) {
 	defer cli.Close()
 
 	// Step 1: Pull the nginx:alpine-slim image
-	if t != nil {
-		t.Logf("📥 Pulling %s...", imageName)
-	} else {
-		fmt.Printf("📥 Pulling %s...\n", imageName)
-	}
 	pullReader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
 	if err != nil {
 		if t != nil {
@@ -495,11 +476,6 @@ func setupRegistryTestImage(t *testing.T, registryPort string) {
 	}
 
 	// Step 3: Push the image to the local registry
-	if t != nil {
-		t.Logf("📤 Pushing %s to local registry...", registryImage)
-	} else {
-		fmt.Printf("📤 Pushing %s to local registry...\n", registryImage)
-	}
 	pushReader, err := cli.ImagePush(ctx, registryImage, image.PushOptions{})
 	if err != nil {
 		if t != nil {
@@ -517,55 +493,6 @@ func setupRegistryTestImage(t *testing.T, registryPort string) {
 			t.Fatalf("Failed to read push output: %v", err)
 		} else {
 			panic(fmt.Sprintf("Failed to read push output: %v", err))
-		}
-	}
-
-	if t != nil {
-		t.Log("✅ Test image setup complete in registry")
-	} else {
-		fmt.Println("✅ Test image setup complete in registry")
-	}
-}
-
-// waitForRegistry waits for the registry to be ready
-func waitForRegistry(t *testing.T, registryPort string, timeout time.Duration) {
-	if t != nil {
-		t.Helper()
-		t.Logf("⏳ Waiting for registry on port %s to be ready...", registryPort)
-	} else {
-		fmt.Printf("⏳ Waiting for registry on port %s to be ready...\n", registryPort)
-	}
-
-	registryURL := fmt.Sprintf("http://localhost:%s/v2/", registryPort)
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			if t != nil {
-				t.Fatalf("Registry on port %s did not become ready within %v", registryPort, timeout)
-			} else {
-				panic(fmt.Sprintf("Registry on port %s did not become ready within %v", registryPort, timeout))
-			}
-		case <-ticker.C:
-			resp, err := http.Get(registryURL)
-			if err == nil && resp.StatusCode == 200 {
-				resp.Body.Close()
-				if t != nil {
-					t.Log("✅ Registry is ready")
-				} else {
-					fmt.Println("✅ Registry is ready")
-				}
-				return
-			}
-			if resp != nil {
-				resp.Body.Close()
-			}
 		}
 	}
 }

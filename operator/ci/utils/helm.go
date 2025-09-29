@@ -197,8 +197,7 @@ func (c *BaseInstallConfig) ValidateBase() error {
 		c.Values = make(map[string]interface{})
 	}
 	if c.Logger == nil {
-		defaultLogger := NewCILogger(nil)
-		c.Logger = defaultLogger.Printf
+		c.Logger = func(format string, args ...interface{}) {}
 	}
 	return nil
 }
@@ -257,13 +256,10 @@ func InstallComponent(config ComponentInstallConfig, logger *CILogger) (*release
 		return nil, err
 	}
 
-	// Override the logger in config with the passed logger
-	config.SetLogger(logger.Printf)
-
 	// Convert to HelmInstallConfig
 	helmConfig := ToHelmInstallConfig(config)
 
-	config.GetLogger()("Setting up Helm and Kubernetes configuration...")
+	logger.Debugf("Setting up Helm and Kubernetes configuration for %s...", config.GetReleaseName())
 
 	// Set up Helm action configuration
 	actionConfig, _, err := setupHelmAction(helmConfig)
@@ -271,7 +267,7 @@ func InstallComponent(config ComponentInstallConfig, logger *CILogger) (*release
 		return nil, err
 	}
 
-	config.GetLogger()("Locating and pulling chart %s version %s...", config.GetChartRef(), config.GetChartVersion())
+	logger.Debugf("Locating and pulling chart %s version %s...", config.GetChartRef(), config.GetChartVersion())
 
 	// Create a new Install action client
 	installClient := action.NewInstall(actionConfig)
@@ -293,18 +289,12 @@ func InstallComponent(config ComponentInstallConfig, logger *CILogger) (*release
 	if err != nil {
 		return nil, fmt.Errorf("failed to locate chart: %w", err)
 	}
-	config.GetLogger()("Chart located at: %s", chartPath)
+	logger.Debugf("Chart located at: %s", chartPath)
 
 	// Load the chart from the located path
 	chart, err := loader.Load(chartPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load chart: %w", err)
-	}
-
-	if config.GetGenerateName() {
-		config.GetLogger()("Installing release with auto-generated name...")
-	} else {
-		config.GetLogger()("Installing release: %s", config.GetReleaseName())
 	}
 
 	// Perform the installation
@@ -313,7 +303,7 @@ func InstallComponent(config ComponentInstallConfig, logger *CILogger) (*release
 		return nil, fmt.Errorf("helm install failed: %w", err)
 	}
 
-	config.GetLogger()("Success! Release '%s' installed in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
+	logger.Debugf("Success! Release '%s' installed in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
 	return rel, nil
 }
 
@@ -323,13 +313,10 @@ func InstallOrUpgradeComponent(config ComponentInstallConfig, logger *CILogger) 
 		return nil, err
 	}
 
-	// Override the logger in config with the passed logger
-	config.SetLogger(logger.Printf)
-
 	// Convert to HelmInstallConfig
 	helmConfig := ToHelmInstallConfig(config)
 
-	config.GetLogger()("Setting up Helm and Kubernetes configuration...")
+	logger.Debug("Setting up Helm and Kubernetes configuration...")
 
 	// Set up Helm action configuration
 	actionConfig, _, err := setupHelmAction(helmConfig)
@@ -337,7 +324,7 @@ func InstallOrUpgradeComponent(config ComponentInstallConfig, logger *CILogger) 
 		return nil, err
 	}
 
-	config.GetLogger()("Locating and pulling chart %s version %s...", config.GetChartRef(), config.GetChartVersion())
+	logger.Debugf("Locating and pulling chart %s version %s...", config.GetChartRef(), config.GetChartVersion())
 
 	// Create upgrade client first to locate the chart
 	upgradeClient := action.NewUpgrade(actionConfig)
@@ -348,7 +335,7 @@ func InstallOrUpgradeComponent(config ComponentInstallConfig, logger *CILogger) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to locate chart: %w", err)
 	}
-	config.GetLogger()("Chart located at: %s", chartPath)
+	logger.Debugf("Chart located at: %s", chartPath)
 
 	// Load the chart from the located path
 	chart, err := loader.Load(chartPath)
@@ -363,15 +350,15 @@ func InstallOrUpgradeComponent(config ComponentInstallConfig, logger *CILogger) 
 	}
 
 	// Try upgrade first
-	config.GetLogger()("Attempting to upgrade release: %s", releaseName)
+	logger.Debugf("Attempting to upgrade release: %s", releaseName)
 	upgradeClient.Install = false
 	if rel, err := upgradeClient.Run(releaseName, chart, config.GetValues()); err == nil {
-		config.GetLogger()("Success! Release '%s' upgraded in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
+		logger.Debugf("Success! Release '%s' upgraded in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
 		return rel, nil
 	}
 
 	// If upgrade failed, try install
-	config.GetLogger()("Upgrade failed, attempting fresh install of release: %s", releaseName)
+	logger.Debugf("Upgrade failed, attempting fresh install of release: %s", releaseName)
 	installClient := action.NewInstall(actionConfig)
 	installClient.Namespace = config.GetNamespace()
 	installClient.ReleaseName = releaseName
@@ -384,7 +371,7 @@ func InstallOrUpgradeComponent(config ComponentInstallConfig, logger *CILogger) 
 		return nil, fmt.Errorf("both upgrade and install failed: %w", err)
 	}
 
-	config.GetLogger()("Success! Release '%s' installed in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
+	logger.Debugf("Success! Release '%s' installed in namespace '%s'. Status: %s", rel.Name, rel.Namespace, rel.Info.Status)
 	return rel, nil
 }
 

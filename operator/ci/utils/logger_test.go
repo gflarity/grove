@@ -80,38 +80,3 @@ func TestCILoggerLevels(t *testing.T) {
 		t.Errorf("Expected error message in output, got: %s", output)
 	}
 }
-
-func TestKindLoggerCompatibility(t *testing.T) {
-	// Test kind logger compatibility using unified CILogger
-	var buf bytes.Buffer
-	logger := NewCILoggerWithVerbosity(&buf, KindVerbosityFromEnv())
-
-	// Test kind.Logger interface methods
-	logger.Warn("kind warn message")
-	logger.Error("kind error message")
-
-	// Test kind.InfoLogger interface methods
-	logger.Info("kind info message")
-	logger.Infof("kind formatted message: %s", "test")
-
-	// Test verbosity filtering
-	infoLogger := logger.V(0) // Should be enabled
-	if !infoLogger.Enabled() {
-		t.Error("Expected V(0) logger to be enabled")
-	}
-	infoLogger.Info("verbose info message")
-
-	output := buf.String()
-	if !strings.Contains(output, "kind warn message") {
-		t.Errorf("Expected kind warn message in output, got: %s", output)
-	}
-	if !strings.Contains(output, "kind error message") {
-		t.Errorf("Expected kind error message in output, got: %s", output)
-	}
-	if !strings.Contains(output, "kind info message") {
-		t.Errorf("Expected kind info message in output, got: %s", output)
-	}
-	if !strings.Contains(output, "kind formatted message: test") {
-		t.Errorf("Expected formatted message in output, got: %s", output)
-	}
-}

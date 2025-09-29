@@ -3,7 +3,6 @@ package utils
 import (
 	"io"
 	"os"
-	"strconv"
 
 	"github.com/sirupsen/logrus"
 	kindlog "sigs.k8s.io/kind/pkg/log"
@@ -15,18 +14,16 @@ import (
 type CILogger struct {
 	*logrus.Logger
 	writer    io.Writer
-	verbosity kindlog.Level
+	verbosity logrus.Level
 }
 
 // NewCILogger creates a new CILogger that writes to the specified writer
-// If writer is nil, it defaults to stdout
-// verbosity controls kind logging verbosity (0 = only main messages, higher = more verbose)
 func NewCILogger(writer io.Writer) *CILogger {
-	return NewCILoggerWithVerbosity(writer, KindVerbosityFromEnv())
+	return NewCILoggerWithVerbosity(writer, logrus.InfoLevel)
 }
 
 // NewCILoggerWithVerbosity creates a new CILogger with custom verbosity
-func NewCILoggerWithVerbosity(writer io.Writer, verbosity kindlog.Level) *CILogger {
+func NewCILoggerWithVerbosity(writer io.Writer, verbosity logrus.Level) *CILogger {
 	if writer == nil {
 		writer = os.Stdout
 	}
@@ -37,12 +34,11 @@ func NewCILoggerWithVerbosity(writer io.Writer, verbosity kindlog.Level) *CILogg
 		FullTimestamp: true,
 		ForceColors:   true,
 	})
-	logger.SetLevel(logrus.InfoLevel)
+	logger.SetLevel(verbosity)
 
 	return &CILogger{
-		Logger:    logger,
-		writer:    writer,
-		verbosity: verbosity,
+		Logger: logger,
+		writer: writer,
 	}
 }
 
@@ -82,7 +78,7 @@ func (l *CILogger) Errorf(format string, args ...interface{}) {
 func (l *CILogger) V(level kindlog.Level) kindlog.InfoLogger {
 	// If the message's verbosity is higher than our configured level,
 	// return a no-op logger that discards the message.
-	if level > l.verbosity {
+	if kindlog.Level(l.verbosity) < level {
 		return noopInfoLogger{}
 	}
 	// Otherwise, return the logger itself to print the message.
@@ -110,14 +106,3 @@ type noopInfoLogger struct{}
 func (n noopInfoLogger) Info(message string)                      {}
 func (n noopInfoLogger) Infof(format string, args ...interface{}) {}
 func (n noopInfoLogger) Enabled() bool                            { return false }
-
-// KindVerbosityFromEnv returns the kind log verbosity level from environment
-func KindVerbosityFromEnv() kindlog.Level {
-	// Default to 0 (only user-facing messages)
-	if vStr := os.Getenv("GROVE_KIND_LOG_VERBOSITY"); vStr != "" {
-		if iv, err := strconv.Atoi(vStr); err == nil {
-			return kindlog.Level(iv)
-		}
-	}
-	return kindlog.Level(0)
-}
