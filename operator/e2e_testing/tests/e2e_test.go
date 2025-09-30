@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/grove/operator/ci/utils"
+	"github.com/NVIDIA/grove/operator/e2e_testing/utils"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
