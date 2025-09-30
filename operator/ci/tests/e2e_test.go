@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 )
 
 var (
@@ -26,11 +28,20 @@ var (
 
 	// logger for the tests
 	logger *logrus.Logger
+
+	// testImages are the Docker images to push to the test registry
+	testImages = []string{"nginx:alpine-slim"}
 )
 
 func init() {
+	// Initialize klog flags and set them to suppress stderr output.
+	// This prevents warning messages like "restartPolicy will be ignored" from appearing in test output.
+	// Comment this out if you want to see the warnings, but they all seem harmless and noisy.
+	klog.InitFlags(nil)
+	flag.Set("logtostderr", "false")
+	flag.Set("alsologtostderr", "false")
 
-	// increase logger verbosity to debug
+	// increase logger verbosity for debugging
 	logger = utils.NewCILogger(logrus.InfoLevel)
 }
 
@@ -42,8 +53,8 @@ func TestMain(m *testing.M) {
 	isRunningFullSuite = true
 
 	// Setup shared cluster once for all tests
-	sharedCluster := GetSharedCluster(logger)
-	if err := sharedCluster.Setup(ctx); err != nil {
+	sharedCluster := utils.SharedCluster(logger)
+	if err := sharedCluster.Setup(ctx, testImages); err != nil {
 		logger.Errorf("failed to setup shared cluster: %s", err)
 		os.Exit(1)
 	}
@@ -60,16 +71,16 @@ func TestMain(m *testing.M) {
 // setupTestCluster sets up the shared cluster for a test
 func setupTestCluster(ctx context.Context, t *testing.T, requiredAgents int) (*kubernetes.Clientset, *rest.Config, dynamic.Interface, func(), string) {
 	// Always use shared cluster approach
-	sharedCluster := GetSharedCluster(logger)
+	sharedCluster := utils.SharedCluster(logger)
 
 	// Setup shared cluster if not already done
 	if !sharedCluster.IsSetup() {
-		if err := sharedCluster.Setup(ctx); err != nil {
+		if err := sharedCluster.Setup(ctx, testImages); err != nil {
 			t.Errorf("Failed to setup shared cluster: %v", err)
 		}
 	}
 
-	if err := sharedCluster.PrepareForTest(ctx, t, requiredAgents); err != nil {
+	if err := sharedCluster.PrepareForTest(ctx, requiredAgents); err != nil {
 		t.Errorf("Failed to prepare shared cluster for test: %v", err)
 	}
 
@@ -77,7 +88,7 @@ func setupTestCluster(ctx context.Context, t *testing.T, requiredAgents int) (*k
 
 	// Cleanup function cleans workloads and handles teardown for individual tests
 	cleanup := func() {
-		if err := sharedCluster.CleanupWorkloads(ctx, t); err != nil {
+		if err := sharedCluster.CleanupWorkloads(ctx); err != nil {
 			t.Logf("Warning: failed to cleanup workloads: %v", err)
 		}
 
@@ -116,7 +127,7 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 
 	agentNodeToCordon := agentNodes[0]
 	logger.Debugf("🚫 Cordoning agent node: %s", agentNodeToCordon)
-	if err := cordonNode(ctx, clientset, agentNodeToCordon, true); err != nil {
+	if err := utils.CordonNode(ctx, clientset, agentNodeToCordon, true); err != nil {
 		t.Errorf("Failed to cordon node %s: %v", agentNodeToCordon, err)
 	}
 
@@ -186,7 +197,7 @@ func Test_GS1_GangSchedulingWithFullReplicas(t *testing.T) {
 	}
 
 	logger.Info("4. Uncordon the node and verify all pods get scheduled")
-	if err := cordonNode(ctx, clientset, agentNodeToCordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, agentNodeToCordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", agentNodeToCordon, err)
 	}
 
@@ -249,7 +260,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 
 	nodesToCordon := agentNodes[:5]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -318,7 +329,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 
 	t.Log("4. Uncordon 1 node to allow scheduling and verify pods get scheduled")
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -420,7 +431,7 @@ func Test_GS2_GangSchedulingWithScalingFullReplicas(t *testing.T) {
 	t.Log("7. Uncordon remaining nodes and verify all pods get scheduled")
 	remainingNodesToUncordon := nodesToCordon[1:]
 	for _, nodeName := range remainingNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -482,7 +493,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 	// Step 1 (continued): Cordon 11 nodes
 	nodesToCordon := agentNodes[:11]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -549,7 +560,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 
 	t.Log("4. Uncordon 1 node to allow scheduling and verify pods get scheduled")
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -641,7 +652,7 @@ func Test_GS3_GangSchedulingWithPCSScalingFullReplicas(t *testing.T) {
 	t.Log("7. Uncordon remaining nodes and verify all pods get scheduled")
 	remainingNodesToUncordon := nodesToCordon[1:]
 	for _, nodeName := range remainingNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -706,7 +717,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	// cordon 19 nodes
 	nodesToCordon := agentNodes[:19]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -771,7 +782,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 
 	t.Log("4. Uncordon 1 node to allow scheduling and verify pods get scheduled")
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -807,7 +818,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	t.Log("7. Uncordon 4 nodes and verify scaled pods get scheduled")
 	remainingNodesAfterFirstUncordon := nodesToCordon[1:5]
 	for _, nodeName := range remainingNodesAfterFirstUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -829,7 +840,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 
 	remainingNodesAfterPCSScale := nodesToCordon[5:15]
 	for _, nodeName := range remainingNodesAfterPCSScale {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -853,7 +864,7 @@ func Test_GS4_GangSchedulingWithPCSAndPCSGScalingFullReplicas(t *testing.T) {
 	t.Log("10. Uncordon remaining nodes and verify all pods get scheduled")
 	finalNodes := nodesToCordon[15:19]
 	for _, nodeName := range finalNodes {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1041,7 +1052,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 	// Cordon 8 agent nodes
 	nodesToCordon := agentNodes[:8]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1117,7 +1128,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 
 	t.Log("4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})")
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -1211,7 +1222,7 @@ func Test_GS5_GangSchedulingWithMinReplicas(t *testing.T) {
 	t.Log("6. Uncordon 7 nodes and verify all remaining workload pods get scheduled")
 	remainingNodesToUncordon := nodesToCordon[1:]
 	for _, nodeName := range remainingNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1282,7 +1293,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	// Cordon 12 agent nodes
 	nodesToCordon := agentNodes[:12]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1357,7 +1368,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})")
 	// Based on workload2 min-replicas: pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1}
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -1448,7 +1459,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("6. Uncordon 7 nodes and verify the remaining workload pods get scheduled")
 	sevenNodesToUncordon := nodesToCordon[1:8]
 	for _, nodeName := range sevenNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1528,7 +1539,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	// pcs-0-{sg-x-2-pc-b = 1, sg-x-2-pc-c = 1} (min-replicas for the new PCSG replica)
 	twoNodesToUncordon := nodesToCordon[8:10]
 	for _, nodeName := range twoNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1592,7 +1603,7 @@ func Test_GS6_GangSchedulingWithPCSGScalingMinReplicas(t *testing.T) {
 	// Uncordon remaining 2 nodes and verify all remaining workload pods get scheduled
 	remainingNodesToUncordon := nodesToCordon[10:12]
 	for _, nodeName := range remainingNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1665,7 +1676,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	// Cordon 12 agent nodes
 	nodesToCordon := agentNodes[:12]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1739,7 +1750,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 
 	t.Log("4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})")
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -1801,7 +1812,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	t.Log("6. Uncordon 2 nodes and verify 2 more pods get scheduled (pcs-0-{sg-x-1-pc-b=1, sg-x-1-pc-c=1})")
 	twoNodesToUncordon := nodesToCordon[1:3]
 	for _, nodeName := range twoNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1864,7 +1875,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	t.Log("8. Uncordon 5 nodes and verify the remaining workload pods get scheduled")
 	fiveNodesToUncordon := nodesToCordon[3:8]
 	for _, nodeName := range fiveNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1912,7 +1923,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	t.Log("12. Uncordon 2 nodes and verify 2 more pods get scheduled (pcs-0-{sg-x-2-pc-b=1, sg-x-2-pc-c=1})")
 	twoMoreNodesToUncordon := nodesToCordon[8:10]
 	for _, nodeName := range twoMoreNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -1975,7 +1986,7 @@ func Test_GS7_GangSchedulingWithPCSGScalingMinReplicasAdvanced1(t *testing.T) {
 	t.Log("14. Uncordon 2 nodes and verify remaining workload pods get scheduled")
 	remainingNodesToUncordon := nodesToCordon[10:12]
 	for _, nodeName := range remainingNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2044,7 +2055,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 	// Cordon 12 agent nodes
 	nodesToCordon := agentNodes[:12]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2180,7 +2191,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 
 	t.Log("6. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})")
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -2242,7 +2253,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 	t.Log("8. Uncordon 4 nodes and verify 4 more pods get scheduled")
 	fourNodesToUncordon := nodesToCordon[1:5]
 	for _, nodeName := range fourNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2304,7 +2315,7 @@ func Test_GS8_GangSchedulingWithPCSGScalingMinReplicasAdvanced2(t *testing.T) {
 	t.Log("10. Uncordon 7 nodes and verify the remaining workload pods get scheduled")
 	remainingNodesToUncordon := nodesToCordon[5:]
 	for _, nodeName := range remainingNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2374,7 +2385,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 	// Cordon 18 agent nodes
 	nodesToCordon := agentNodes[:18]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2449,7 +2460,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 
 	t.Log("4. Uncordon 1 node and verify a total of 3 pods get scheduled (pcs-0-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})")
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -2510,7 +2521,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 	t.Log("6. Uncordon 7 nodes and verify the remaining workload pods get scheduled")
 	sevenNodesToUncordon := nodesToCordon[1:8]
 	for _, nodeName := range sevenNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2559,7 +2570,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 	t.Log("9. Uncordon 3 nodes and verify another 3 pods get scheduled (pcs-1-{pc-a=1, sg-x-0-pc-b=1, sg-x-0-pc-c=1})")
 	threeNodesToUncordon := nodesToCordon[8:11]
 	for _, nodeName := range threeNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2621,7 +2632,7 @@ func Test_GS9_GangSchedulingWithPCSScalingMinReplicas(t *testing.T) {
 	t.Log("11. Uncordon 7 nodes and verify the remaining workload pods get scheduled")
 	remainingNodesToUncordon := nodesToCordon[11:18]
 	for _, nodeName := range remainingNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2690,7 +2701,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 	// Cordon 18 agent nodes
 	nodesToCordon := agentNodes[:18]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2830,7 +2841,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 	t.Log("6. Uncordon 4 nodes and verify a total of 6 pods get scheduled")
 	fourNodesToUncordon := nodesToCordon[0:4]
 	for _, nodeName := range fourNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2892,7 +2903,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 	t.Log("8. Uncordon 4 nodes and verify 4 more pods get scheduled")
 	fourMoreNodesToUncordon := nodesToCordon[4:8]
 	for _, nodeName := range fourMoreNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -2954,7 +2965,7 @@ func Test_GS10_GangSchedulingWithPCSScalingMinReplicasAdvanced(t *testing.T) {
 	t.Log("10. Uncordon 10 nodes and verify the remaining workload pods get scheduled")
 	remainingNodesToUncordon := nodesToCordon[8:18]
 	for _, nodeName := range remainingNodesToUncordon {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3053,7 +3064,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 
 	nodesToCordon := agentNodes[:26]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3111,7 +3122,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 
 	t.Log("4. Uncordon 1 node")
 	firstNodeToUncordon := nodesToCordon[0]
-	if err := cordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
+	if err := utils.CordonNode(ctx, clientset, firstNodeToUncordon, false); err != nil {
 		t.Errorf("Failed to uncordon node %s: %v", firstNodeToUncordon, err)
 	}
 
@@ -3138,7 +3149,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("6. Uncordon 7 nodes and verify the remaining workload pods get scheduled")
 	remainingNodesFirstWave := nodesToCordon[1:8]
 	for _, nodeName := range remainingNodesFirstWave {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3186,7 +3197,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("9. Uncordon 2 nodes")
 	remainingNodesSecondWave := nodesToCordon[8:10]
 	for _, nodeName := range remainingNodesSecondWave {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3214,7 +3225,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("11. Uncordon 2 nodes and verify remaining workload pods get scheduled")
 	remainingNodesThirdWave := nodesToCordon[10:12]
 	for _, nodeName := range remainingNodesThirdWave {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3230,7 +3241,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("13. Uncordon 3 nodes")
 	remainingNodesFourthWave := nodesToCordon[12:15]
 	for _, nodeName := range remainingNodesFourthWave {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3258,7 +3269,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("15. Uncordon 7 nodes and verify the remaining workload pods get scheduled")
 	remainingNodesFifthWave := nodesToCordon[15:22]
 	for _, nodeName := range remainingNodesFifthWave {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3301,7 +3312,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("18. Uncordon 2 nodes")
 	remainingNodesSixthWave := nodesToCordon[22:24]
 	for _, nodeName := range remainingNodesSixthWave {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3329,7 +3340,7 @@ func Test_GS11_GangSchedulingWithPCSAndPCSGScalingMinReplicas(t *testing.T) {
 	t.Log("20. Uncordon 2 nodes and verify remaining workload pods get scheduled")
 	finalNodes := nodesToCordon[24:26]
 	for _, nodeName := range finalNodes {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3384,7 +3395,7 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 
 	nodesToCordon := agentNodes[:26]
 	for _, nodeName := range nodesToCordon {
-		if err := cordonNode(ctx, clientset, nodeName, true); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, true); err != nil {
 			t.Errorf("Failed to cordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3501,7 +3512,7 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 	t.Log("8. Uncordon 4 nodes and verify a total of 6 pods get scheduled (pcs-0 and pcs-1 min-available)")
 	firstWaveNodes := nodesToCordon[:4]
 	for _, nodeName := range firstWaveNodes {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3553,7 +3564,7 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 	t.Log("10. Uncordon 8 nodes and verify 8 more pods get scheduled (remaining PCSG pods)")
 	secondWaveNodes := nodesToCordon[4:12]
 	for _, nodeName := range secondWaveNodes {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
@@ -3605,7 +3616,7 @@ func Test_GS12_GangSchedulingWithComplexPCSGScaling(t *testing.T) {
 	t.Log("12. Uncordon 14 nodes and verify the remaining workload pods get scheduled")
 	finalWaveNodes := nodesToCordon[12:26]
 	for _, nodeName := range finalWaveNodes {
-		if err := cordonNode(ctx, clientset, nodeName, false); err != nil {
+		if err := utils.CordonNode(ctx, clientset, nodeName, false); err != nil {
 			t.Errorf("Failed to uncordon node %s: %v", nodeName, err)
 		}
 	}

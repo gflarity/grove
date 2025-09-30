@@ -1,14 +1,12 @@
-package tests
+package utils
 
 import (
 	"context"
 	"fmt"
 	"io"
 	"sync"
-	"testing"
 	"time"
 
-	"github.com/NVIDIA/grove/operator/ci/utils"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	"github.com/sirupsen/logrus"
@@ -20,14 +18,13 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// SharedClusterManager manages a shared k3d cluster for all tests
+// SharedClusterManager manages a shared (singleton) k3d cluster for E2E tests
 type SharedClusterManager struct {
 	clientset     *kubernetes.Clientset
 	restConfig    *rest.Config
 	dynamicClient dynamic.Interface
 	cleanup       func()
 	logger        *logrus.Logger
-	mu            sync.Mutex
 	isSetup       bool
 	agentNodes    []string
 	registryPort  string
@@ -38,8 +35,8 @@ var (
 	once          sync.Once
 )
 
-// GetSharedCluster returns the singleton shared cluster manager
-func GetSharedCluster(logger *logrus.Logger) *SharedClusterManager {
+// SharedCluster returns the singleton shared cluster manager
+func SharedCluster(logger *logrus.Logger) *SharedClusterManager {
 	once.Do(func() {
 		sharedCluster = &SharedClusterManager{
 			logger: logger,
@@ -49,16 +46,13 @@ func GetSharedCluster(logger *logrus.Logger) *SharedClusterManager {
 }
 
 // Setup initializes the shared cluster with maximum required resources
-func (scm *SharedClusterManager) Setup(ctx context.Context) error {
-	scm.mu.Lock()
-	defer scm.mu.Unlock()
-
+func (scm *SharedClusterManager) Setup(ctx context.Context, testImages []string) error {
 	if scm.isSetup {
 		return nil
 	}
 
 	// Configuration for maximum cluster size needed (28 agents + 3 servers)
-	customCfg := utils.ClusterConfig{
+	customCfg := ClusterConfig{
 		Name:             "shared-e2e-test-cluster",
 		Servers:          3,
 		Agents:           28, // Maximum needed across all tests
@@ -71,7 +65,7 @@ func (scm *SharedClusterManager) Setup(ctx context.Context) error {
 		AgentNodeLabels: map[string]string{
 			"node_role.e2e.grove.nvidia.com": "agent",
 		},
-		AgentNodeTaints: []utils.NodeTaint{
+		AgentNodeTaints: []NodeTaint{
 			{
 				Key:    "node_role.e2e.grove.nvidia.com",
 				Value:  "agent",
@@ -84,16 +78,23 @@ func (scm *SharedClusterManager) Setup(ctx context.Context) error {
 
 	scm.logger.Info("🚀 Setting up shared k3d cluster for all e2e tests...")
 
-	clientset, restConfig, _, cleanup, err := utils.SetupCompleteK3DCluster(ctx, customCfg, scm.logger)
+	restConfig, cleanup, err := SetupCompleteK3DCluster(ctx, customCfg, scm.logger)
 	if err != nil {
 		return fmt.Errorf("failed to setup shared k3d cluster: %w", err)
 	}
 
-	scm.clientset = clientset
 	scm.restConfig = restConfig
 	scm.cleanup = cleanup
 
-	// Create dynamic client
+	// Create clientset from restConfig
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("failed to create clientset: %w", err)
+	}
+	scm.clientset = clientset
+
+	// Create dynamic client from restConfig
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		cleanup()
@@ -101,8 +102,11 @@ func (scm *SharedClusterManager) Setup(ctx context.Context) error {
 	}
 	scm.dynamicClient = dynamicClient
 
-	// Setup test image in registry
-	setupRegistryTestImage(nil, scm.registryPort)
+	// Setup test images in registry
+	if err := setupRegistryTestImages(scm.registryPort, testImages); err != nil {
+		cleanup()
+		return fmt.Errorf("failed to setup registry test images: %w", err)
+	}
 
 	// Get list of agent nodes for cordoning management
 	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -124,17 +128,14 @@ func (scm *SharedClusterManager) Setup(ctx context.Context) error {
 }
 
 // PrepareForTest prepares the cluster for a specific test by cordoning the appropriate nodes
-func (scm *SharedClusterManager) PrepareForTest(ctx context.Context, t *testing.T, requiredAgents int) error {
-	scm.mu.Lock()
-	defer scm.mu.Unlock()
-
+func (scm *SharedClusterManager) PrepareForTest(ctx context.Context, requiredAgents int) error {
 	if !scm.isSetup {
 		return fmt.Errorf("shared cluster not setup")
 	}
 
 	// First, uncordon all nodes to reset state
 	for _, nodeName := range scm.agentNodes {
-		if err := cordonNode(ctx, scm.clientset, nodeName, false); err != nil {
+		if err := CordonNode(ctx, scm.clientset, nodeName, false); err != nil {
 			return fmt.Errorf("failed to uncordon node %s: %w", nodeName, err)
 		}
 	}
@@ -143,7 +144,7 @@ func (scm *SharedClusterManager) PrepareForTest(ctx context.Context, t *testing.
 	if requiredAgents < len(scm.agentNodes) {
 		nodesToCordon := scm.agentNodes[requiredAgents:]
 		for _, nodeName := range nodesToCordon {
-			if err := cordonNode(ctx, scm.clientset, nodeName, true); err != nil {
+			if err := CordonNode(ctx, scm.clientset, nodeName, true); err != nil {
 				return fmt.Errorf("failed to cordon node %s: %w", nodeName, err)
 			}
 		}
@@ -153,10 +154,7 @@ func (scm *SharedClusterManager) PrepareForTest(ctx context.Context, t *testing.
 }
 
 // CleanupWorkloads removes all test workloads from the cluster
-func (scm *SharedClusterManager) CleanupWorkloads(ctx context.Context, t *testing.T) error {
-	scm.mu.Lock()
-	defer scm.mu.Unlock()
-
+func (scm *SharedClusterManager) CleanupWorkloads(ctx context.Context) error {
 	if !scm.isSetup {
 		return nil
 	}
@@ -165,20 +163,20 @@ func (scm *SharedClusterManager) CleanupWorkloads(ctx context.Context, t *testin
 
 	// Step 1: Delete PodCliqueSets first (should cascade delete other resources)
 	if err := scm.deleteAllResources(ctx, "grove.io", "v1alpha1", "podcliquesets"); err != nil {
-		t.Logf("Warning: failed to delete PodCliqueSets: %v", err)
+		scm.logger.Warnf("failed to delete PodCliqueSets: %v", err)
 	}
 
 	// Step 2: Poll for all resources and pods to be cleaned up (max 15 seconds)
-	if err := scm.waitForAllResourcesAndPodsDeleted(ctx, t, 15*time.Second); err != nil {
-		t.Logf("Warning: timeout waiting for resources and pods to be deleted: %v", err)
+	if err := scm.waitForAllResourcesAndPodsDeleted(ctx, 15*time.Second); err != nil {
+		scm.logger.Warnf("timeout waiting for resources and pods to be deleted: %v", err)
 		// List remaining resources and pods for debugging
-		scm.listRemainingResources(ctx, t)
-		scm.listRemainingPods(ctx, t, "default")
+		scm.listRemainingResources(ctx)
+		scm.listRemainingPods(ctx, "default")
 	}
 
 	// Step 3: Reset node cordoning state
 	if err := scm.resetNodeStates(ctx); err != nil {
-		t.Logf("Warning: failed to reset node states: %v", err)
+		scm.logger.Warnf("failed to reset node states: %v", err)
 	}
 
 	return nil
@@ -205,7 +203,7 @@ func (scm *SharedClusterManager) deleteAllResources(ctx context.Context, group, 
 
 		err := scm.dynamicClient.Resource(gvr).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 		if err != nil {
-			scm.logger.Infof("Warning: failed to delete %s %s/%s: %v", resource, namespace, name, err)
+			scm.logger.Warnf("failed to delete %s %s/%s: %v", resource, namespace, name, err)
 		}
 	}
 
@@ -230,10 +228,10 @@ func isSystemPod(pod *v1.Pod) bool {
 }
 
 // listRemainingPods lists remaining pods for debugging
-func (scm *SharedClusterManager) listRemainingPods(ctx context.Context, t *testing.T, namespace string) {
+func (scm *SharedClusterManager) listRemainingPods(ctx context.Context, namespace string) {
 	pods, err := scm.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		t.Logf("Failed to list remaining pods: %v", err)
+		scm.logger.Warnf("Failed to list remaining pods: %v", err)
 		return
 	}
 
@@ -245,22 +243,22 @@ func (scm *SharedClusterManager) listRemainingPods(ctx context.Context, t *testi
 	}
 
 	if len(nonSystemPods) > 0 {
-		t.Logf("Remaining non-system pods: %v", nonSystemPods)
+		scm.logger.Warnf("Remaining non-system pods: %v", nonSystemPods)
 	}
 }
 
 // resetNodeStates uncordons all agent nodes to reset cluster state
 func (scm *SharedClusterManager) resetNodeStates(ctx context.Context) error {
 	for _, nodeName := range scm.agentNodes {
-		if err := cordonNode(ctx, scm.clientset, nodeName, false); err != nil {
-			scm.logger.Infof("Warning: failed to uncordon node %s: %v", nodeName, err)
+		if err := CordonNode(ctx, scm.clientset, nodeName, false); err != nil {
+			scm.logger.Warnf("failed to uncordon node %s: %v", nodeName, err)
 		}
 	}
 	return nil
 }
 
 // waitForAllResourcesAndPodsDeleted waits for all Grove resources and pods to be deleted
-func (scm *SharedClusterManager) waitForAllResourcesAndPodsDeleted(ctx context.Context, t *testing.T, timeout time.Duration) error {
+func (scm *SharedClusterManager) waitForAllResourcesAndPodsDeleted(ctx context.Context, timeout time.Duration) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -333,7 +331,7 @@ func (scm *SharedClusterManager) waitForAllResourcesAndPodsDeleted(ctx context.C
 }
 
 // listRemainingResources lists remaining Grove resources for debugging
-func (scm *SharedClusterManager) listRemainingResources(ctx context.Context, t *testing.T) {
+func (scm *SharedClusterManager) listRemainingResources(ctx context.Context) {
 	resourceTypes := []struct {
 		group    string
 		version  string
@@ -355,7 +353,7 @@ func (scm *SharedClusterManager) listRemainingResources(ctx context.Context, t *
 
 		resourceList, err := scm.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			t.Logf("Failed to list %s: %v", rt.name, err)
+			scm.logger.Warnf("Failed to list %s: %v", rt.name, err)
 			continue
 		}
 
@@ -364,7 +362,7 @@ func (scm *SharedClusterManager) listRemainingResources(ctx context.Context, t *
 			for _, item := range resourceList.Items {
 				resourceNames = append(resourceNames, fmt.Sprintf("%s/%s", item.GetNamespace(), item.GetName()))
 			}
-			t.Logf("Remaining %s: %v", rt.name, resourceNames)
+			scm.logger.Warnf("Remaining %s: %v", rt.name, resourceNames)
 		}
 	}
 }
@@ -386,112 +384,68 @@ func (scm *SharedClusterManager) GetAgentNodes() []string {
 
 // IsSetup returns whether the shared cluster is setup
 func (scm *SharedClusterManager) IsSetup() bool {
-	scm.mu.Lock()
-	defer scm.mu.Unlock()
 	return scm.isSetup
 }
 
 // Teardown cleans up the shared cluster
 func (scm *SharedClusterManager) Teardown() {
-	scm.mu.Lock()
-	defer scm.mu.Unlock()
-
 	if scm.cleanup != nil {
 		scm.cleanup()
 		scm.isSetup = false
 	}
 }
 
-// cordonNode cordons or uncordons a Kubernetes node
-func cordonNode(ctx context.Context, clientset kubernetes.Interface, nodeName string, cordon bool) error {
-	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	if node.Spec.Unschedulable == cordon {
-		// Already in desired state
+// setupRegistryTestImages sets up test images in the registry
+func setupRegistryTestImages(registryPort string, images []string) error {
+	if len(images) == 0 {
 		return nil
 	}
 
-	node.Spec.Unschedulable = cordon
-	_, err = clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to update node %s: %w", nodeName, err)
-	}
-	return nil
-}
-
-// setupRegistryTestImage sets up a test image in the registry
-func setupRegistryTestImage(t *testing.T, registryPort string) {
-	if t != nil {
-		t.Helper()
-	}
-
 	ctx := context.Background()
-	imageName := "nginx:alpine-slim"
-	registryImage := fmt.Sprintf("localhost:%s/nginx:alpine-slim", registryPort)
 
 	// Initialize Docker client
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		if t != nil {
-			t.Fatalf("Failed to create Docker client: %v", err)
-		} else {
-			panic(fmt.Sprintf("Failed to create Docker client: %v", err))
-		}
+		return fmt.Errorf("failed to create Docker client: %w", err)
 	}
 	defer cli.Close()
 
-	// Step 1: Pull the nginx:alpine-slim image
-	pullReader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
-	if err != nil {
-		if t != nil {
-			t.Fatalf("Failed to pull %s: %v", imageName, err)
-		} else {
-			panic(fmt.Sprintf("Failed to pull %s: %v", imageName, err))
-		}
-	}
-	defer pullReader.Close()
+	// Process each image
+	for _, imageName := range images {
+		registryImage := fmt.Sprintf("localhost:%s/%s", registryPort, imageName)
 
-	// Consume the pull output to avoid blocking
-	_, err = io.Copy(io.Discard, pullReader)
-	if err != nil {
-		if t != nil {
-			t.Fatalf("Failed to read pull output: %v", err)
-		} else {
-			panic(fmt.Sprintf("Failed to read pull output: %v", err))
+		// Step 1: Pull the image
+		pullReader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to pull %s: %w", imageName, err)
+		}
+
+		// Consume the pull output to avoid blocking
+		_, err = io.Copy(io.Discard, pullReader)
+		pullReader.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read pull output for %s: %w", imageName, err)
+		}
+
+		// Step 2: Tag the image for the local registry
+		err = cli.ImageTag(ctx, imageName, registryImage)
+		if err != nil {
+			return fmt.Errorf("failed to tag image %s as %s: %w", imageName, registryImage, err)
+		}
+
+		// Step 3: Push the image to the local registry
+		pushReader, err := cli.ImagePush(ctx, registryImage, image.PushOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to push %s: %w", registryImage, err)
+		}
+
+		// Consume the push output to avoid blocking
+		_, err = io.Copy(io.Discard, pushReader)
+		pushReader.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read push output for %s: %w", registryImage, err)
 		}
 	}
 
-	// Step 2: Tag the image for the local registry
-	err = cli.ImageTag(ctx, imageName, registryImage)
-	if err != nil {
-		if t != nil {
-			t.Fatalf("Failed to tag image %s as %s: %v", imageName, registryImage, err)
-		} else {
-			panic(fmt.Sprintf("Failed to tag image %s as %s: %v", imageName, registryImage, err))
-		}
-	}
-
-	// Step 3: Push the image to the local registry
-	pushReader, err := cli.ImagePush(ctx, registryImage, image.PushOptions{})
-	if err != nil {
-		if t != nil {
-			t.Fatalf("Failed to push %s: %v", registryImage, err)
-		} else {
-			panic(fmt.Sprintf("Failed to push %s: %v", registryImage, err))
-		}
-	}
-	defer pushReader.Close()
-
-	// Consume the push output to avoid blocking
-	_, err = io.Copy(io.Discard, pushReader)
-	if err != nil {
-		if t != nil {
-			t.Fatalf("Failed to read push output: %v", err)
-		} else {
-			panic(fmt.Sprintf("Failed to read push output: %v", err))
-		}
-	}
+	return nil
 }

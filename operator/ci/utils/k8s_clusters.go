@@ -18,13 +18,10 @@ import (
 	k3d "github.com/k3d-io/k3d/v5/pkg/types"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"sigs.k8s.io/kind/pkg/apis/config/v1alpha4"
-	"sigs.k8s.io/kind/pkg/cluster"
 )
 
 // NodeTaint represents a Kubernetes node taint
@@ -64,8 +61,142 @@ func DefaultClusterConfig() ClusterConfig {
 	}
 }
 
-// SetupK3DCluster creates a k3d cluster and returns a kubernetes clientset and REST config
-func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
+// SetupCompleteK3DCluster creates a complete k3d cluster with Grove, Kai Scheduler, and NVIDIA GPU Operator
+func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logger) (*rest.Config, func(), error) {
+
+	restConfig, cleanup, err := SetupK3DCluster(ctx, cfg, logger)
+	if err != nil {
+		return nil, cleanup, err
+	}
+
+	// Create clientset for node monitoring
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
+	}
+
+	// Start node monitoring to handle not ready nodes (see StartNodeMonitoring for more details)
+	nodeMonitoringCleanup := StartNodeMonitoring(ctx, cfg.Name, clientset, logger)
+
+	// Create enhanced cleanup function that includes node monitoring
+	enhancedCleanup := func() {
+		// Stop node monitoring first
+		nodeMonitoringCleanup()
+		// Then run the original cleanup
+		cleanup()
+	}
+
+	tolerations := []map[string]interface{}{
+		{
+			"key":      "node-role.kubernetes.io/control-plane",
+			"operator": "Exists",
+			"effect":   "NoSchedule",
+		},
+		{
+			"key":      "node_role.e2e.grove.nvidia.com",
+			"operator": "Equal",
+			"value":    "agent",
+			"effect":   "NoSchedule",
+		},
+	}
+
+	groveConfig := &HelmInstallConfig{
+		ReleaseName:     "grove",
+		ChartRef:        "oci://ghcr.io/nvidia/grove/grove-charts",
+		ChartVersion:    "v0.1.0-alpha.1",
+		Namespace:       "grove-system",
+		RestConfig:      restConfig,
+		CreateNamespace: true,
+		Wait:            false,
+		Values: map[string]interface{}{
+			"tolerations": tolerations,
+		},
+		HelmLoggerFunc: logger.Debugf,
+		Logger:         logger,
+	}
+
+	kaiConfig := &HelmInstallConfig{
+		ReleaseName:     "kai-scheduler",
+		ChartRef:        "oci://ghcr.io/nvidia/kai-scheduler/kai-scheduler",
+		ChartVersion:    "v0.9.3",
+		Namespace:       "kai-scheduler",
+		RestConfig:      restConfig,
+		CreateNamespace: true,
+		Wait:            false,
+		Values: map[string]interface{}{
+			"global": map[string]interface{}{
+				"tolerations": tolerations,
+			},
+		},
+		HelmLoggerFunc: logger.Debugf,
+		Logger:         logger,
+	}
+
+	nvidiaConfig := &HelmInstallConfig{
+		ReleaseName:     "nvidia-gpu-operator",
+		ChartRef:        "nvidia/gpu-operator",
+		ChartVersion:    "v25.3.4",
+		Namespace:       "gpu-operator",
+		RestConfig:      restConfig,
+		CreateNamespace: true,
+		Wait:            false,
+		GenerateName:    false,
+		Values: map[string]interface{}{
+			"tolerations":        tolerations,
+			"driver":             map[string]interface{}{"enabled": false},
+			"toolkit":            map[string]interface{}{"enabled": false},
+			"devicePlugin":       map[string]interface{}{"enabled": false},
+			"dcgmExporter":       map[string]interface{}{"enabled": false},
+			"gfd":                map[string]interface{}{"enabled": false},
+			"migManager":         map[string]interface{}{"enabled": false},
+			"nodeStatusExporter": map[string]interface{}{"enabled": false},
+		},
+		HelmLoggerFunc: logger.Debugf,
+		Logger:         logger,
+	}
+
+	logger.Info("🚀 Installing Grove, Kai Scheduler, and NVIDIA GPU Operator...")
+	if err := InstallCoreComponents(groveConfig, kaiConfig, nvidiaConfig, logger); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("component installation failed: %w", err)
+	}
+
+	// Wait for Grove pods to be ready
+	if err := WaitForPodsInNamespace(ctx, groveConfig.Namespace, groveConfig.RestConfig, 5*time.Minute, groveConfig.Logger); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("Grove pods not ready: %w", err)
+	}
+
+	// Wait for Kai Scheduler pods to be ready
+	if err := WaitForPodsInNamespace(ctx, kaiConfig.Namespace, kaiConfig.RestConfig, 5*time.Minute, kaiConfig.Logger); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("Kai Scheduler pods not ready: %w", err)
+	}
+
+	// Wait for the Kai CRDs to be available (before creating queues)
+	if err := WaitForKaiCRDs(ctx, kaiConfig); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("Failed to wait for Kai CRDs: %w", err)
+	}
+
+	// need to create the default Kai queues
+	if err := CreateDefaultKaiQueues(ctx, kaiConfig); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("Failed to create default Kai queue: %w", err)
+	}
+
+	// Nvidia Operator seems to take the longest to be ready, so we wait for it last
+	// to get the most done while waiting.
+	if err := WaitForPodsInNamespace(ctx, nvidiaConfig.Namespace, nvidiaConfig.RestConfig, 5*time.Minute, nvidiaConfig.Logger); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("NVIDIA GPU Operator not ready: %w", err)
+	}
+
+	return restConfig, enhancedCleanup, nil
+}
+
+// SetupK3DCluster creates a k3d cluster and returns a REST config
+func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logger) (*rest.Config, func(), error) {
 	// k3d is very verbose, we don't want the INFO level logs unless the logger is set to DEBUG
 	if logger.GetLevel() == logrus.DebugLevel {
 		k3dlogger.Log().SetLevel(logrus.DebugLevel)
@@ -73,7 +204,7 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logg
 		k3dlogger.Log().SetLevel(logrus.ErrorLevel)
 	}
 
-	// Create cluster configuration
+	// Create simple cluster configuration
 	clusterConfig := v1alpha5.SimpleConfig{
 		ObjectMeta: types.ObjectMeta{
 			Name: cfg.Name,
@@ -133,10 +264,10 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logg
 		}
 	}
 
-	// Transform configuration
+	// Transform configuration into full cluster config that is ready to be used
 	k3dConfig, err := config.TransformSimpleToClusterConfig(ctx, runtimes.Docker, clusterConfig, "")
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to transform config: %w", err)
+		return nil, nil, fmt.Errorf("failed to transform config: %w", err)
 	}
 
 	// this is the cleanup function, we always return it now so the caller can decide to use it or not
@@ -154,179 +285,117 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logg
 		k3dConfig.Name, cfg.Servers, cfg.Agents)
 
 	if err := client.ClusterRun(ctx, runtimes.Docker, k3dConfig); err != nil {
-		return nil, nil, nil, cleanup, fmt.Errorf("failed to create cluster: %w", err)
+		return nil, cleanup, fmt.Errorf("failed to create cluster: %w", err)
 	}
 
 	// Get kubeconfig
 	logger.Debug("📄 Fetching kubeconfig...")
 	cluster, err := client.ClusterGet(ctx, runtimes.Docker, &k3dConfig.Cluster)
 	if err != nil {
-		return nil, nil, nil, cleanup, fmt.Errorf("could not get cluster: %w", err)
+		return nil, cleanup, fmt.Errorf("could not get cluster: %w", err)
 	}
 
 	kubeconfig, err := client.KubeconfigGet(ctx, runtimes.Docker, cluster)
 	if err != nil {
-		return nil, nil, nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
+		return nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
 	kubeconfigBytes, err := clientcmd.Write(*kubeconfig)
 	if err != nil {
-		return nil, nil, nil, cleanup, fmt.Errorf("failed to serialize kubeconfig: %w", err)
+		return nil, cleanup, fmt.Errorf("failed to serialize kubeconfig: %w", err)
 	}
 
-	// Create kubernetes clientset
+	// Create REST config
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
 	if err != nil {
-		return nil, nil, nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
+		return nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
 	}
 
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		return nil, nil, nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
-	}
-
-	return clientset, restConfig, k3dConfig, cleanup, nil
+	return restConfig, cleanup, nil
 }
 
-// KindClusterConfig holds configuration for creating a kind cluster
-type KindClusterConfig struct {
-	Name             string
-	ControlPlanes    int
-	Workers          int
-	Image            string
-	WorkerNodeLabels map[string]string // Labels to apply to worker nodes
-	WorkerNodeTaints []NodeTaint       // Taints to apply to worker nodes
-}
+func InstallCoreComponents(groveConfig *HelmInstallConfig, kaiConfig *HelmInstallConfig, nvidiaConfig *HelmInstallConfig, logger *logrus.Logger) error {
+	var wg sync.WaitGroup
+	errChan := make(chan error, 3) // Buffer for up to 3 errors
 
-// DefaultKindClusterConfig returns a sensible default kind cluster configuration
-func DefaultKindClusterConfig() KindClusterConfig {
-	return KindClusterConfig{
-		Name:          "test-kind-cluster",
-		ControlPlanes: 1,
-		Workers:       2,
-		Image:         "", // Empty means use kind's default
-	}
-}
+	// There's occasionally wierd races regarding CRDS, for test stability we retry a few times
+	const maxRetries = 3
+	const retryDelay = 5 * time.Second
 
-// SetupKindCluster creates a kind cluster and returns a kubernetes clientset and REST config
-// Note that kind clsuters don't support total memory limits unlike k3d, this is here incase
-// we still want to use Kind for some reason
-func SetupKindCluster(_ context.Context, cfg KindClusterConfig, logger *logrus.Logger) (*kubernetes.Clientset, *rest.Config, func(), error) {
-	// Create cluster provider using default kind logger
-	// Note: We use our own logger separately for our custom logging
-	provider := cluster.NewProvider()
+	// Install Kai Scheduler
+	if kaiConfig != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Debug("🚀 Starting Kai Scheduler installation...")
 
-	// Create cluster configuration
-	kindConfig := &v1alpha4.Cluster{
-		Nodes: []v1alpha4.Node{},
-	}
-
-	// ... (rest of your config setup is correct) ...
-	// Add control plane nodes
-	for i := 0; i < cfg.ControlPlanes; i++ {
-		node := v1alpha4.Node{
-			Role: v1alpha4.ControlPlaneRole,
-		}
-		if cfg.Image != "" {
-			node.Image = cfg.Image
-		}
-		kindConfig.Nodes = append(kindConfig.Nodes, node)
-	}
-
-	// Add worker nodes
-	for i := 0; i < cfg.Workers; i++ {
-		node := v1alpha4.Node{
-			Role: v1alpha4.WorkerRole,
-		}
-		if cfg.Image != "" {
-			node.Image = cfg.Image
-		}
-
-		// Build node labels string for kubelet
-		var allLabels []string
-
-		// Add custom worker node labels, if provided
-		if len(cfg.WorkerNodeLabels) > 0 {
-			for k, v := range cfg.WorkerNodeLabels {
-				allLabels = append(allLabels, fmt.Sprintf("%s=%s", k, v))
-			}
-		}
-
-		// Apply labels and taints via kubeadmConfigPatches if specified
-		if len(allLabels) > 0 || len(cfg.WorkerNodeTaints) > 0 {
-			var configParts []string
-
-			// Build kubeletExtraArgs section if labels are specified
-			if len(allLabels) > 0 {
-				nodeLabelsStr := strings.Join(allLabels, ",")
-				configParts = append(configParts, fmt.Sprintf(`  kubeletExtraArgs:
-    node-labels: "%s"`, nodeLabelsStr))
+			installFunc := func() error {
+				_, err := InstallHelmChart(kaiConfig)
+				return err
 			}
 
-			// Build taints section if taints are specified
-			if len(cfg.WorkerNodeTaints) > 0 {
-				taintLines := []string{"  taints:"}
-				for _, taint := range cfg.WorkerNodeTaints {
-					taintLines = append(taintLines, fmt.Sprintf(`  - key: "%s"
-    value: "%s"
-    effect: "%s"`, taint.Key, taint.Value, taint.Effect))
-				}
-				configParts = append(configParts, strings.Join(taintLines, "\n"))
+			err := retryInstallation(installFunc, "Kai Scheduler", maxRetries, retryDelay, logger)
+			if err != nil {
+				errChan <- err
+			} else {
+				logger.Debug("✅ Kai Scheduler installation completed successfully")
+			}
+		}()
+	}
+
+	// Install Grove
+	if groveConfig != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Debug("🚀 Starting Grove installation...")
+
+			installFunc := func() error {
+				_, err := InstallHelmChart(groveConfig)
+				return err
 			}
 
-			configPatch := fmt.Sprintf(`kind: JoinConfiguration
-nodeRegistration:
-%s`, strings.Join(configParts, "\n"))
-
-			node.KubeadmConfigPatches = []string{configPatch}
-		}
-
-		kindConfig.Nodes = append(kindConfig.Nodes, node)
+			err := retryInstallation(installFunc, "Grove", maxRetries, retryDelay, logger)
+			if err != nil {
+				errChan <- err
+			} else {
+				logger.Debug("✅ Grove installation completed successfully")
+			}
+		}()
 	}
 
-	// Create cluster
-	logger.Debugf("🚀 Creating kind cluster '%s' with %d control-plane(s) and %d worker(s)...",
-		cfg.Name, cfg.ControlPlanes, cfg.Workers)
+	// Install NVIDIA GPU Operator
+	if nvidiaConfig != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Debug("🚀 Starting NVIDIA GPU Operator installation...")
 
-	// this is the cleanup funciton, we always return it now so the caller can decide to use it or not
-	cleanup := func() {
-		logger.Info("🗑️ Deleting kind cluster...")
-		if err := provider.Delete(cfg.Name, ""); err != nil {
-			logger.Errorf("Failed to delete kind cluster: %v", err)
-		} else {
-			logger.Info("✅ Kind cluster deleted successfully")
-		}
+			installFunc := func() error {
+				_, err := InstallHelmChart(nvidiaConfig)
+				return err
+			}
+
+			err := retryInstallation(installFunc, "NVIDIA GPU Operator", maxRetries, retryDelay, logger)
+			if err != nil {
+				errChan <- err
+			} else {
+				logger.Debug("✅ NVIDIA GPU Operator installation completed successfully")
+			}
+		}()
 	}
 
-	// Create cluster
-	if err := provider.Create(
-		cfg.Name,
-		cluster.CreateWithV1Alpha4Config(kindConfig),
-	); err != nil {
-		return nil, nil, cleanup, fmt.Errorf("failed to create kind cluster: %w", err)
-	}
-	logger.Debug("✅ Kind cluster created successfully!")
+	// Wait for all installations to complete
+	wg.Wait()
+	close(errChan)
 
-	// Get kubeconfig
-	logger.Debug("📄 Fetching kubeconfig...")
-	// ... (the rest of your function remains the same) ...
-	kubeConfigYaml, err := provider.KubeConfig(cfg.Name, false)
-	if err != nil {
-		return nil, nil, cleanup, fmt.Errorf("failed to get kubeconfig: %w", err)
+	// Check for any errors
+	for err := range errChan {
+		return err // Return the first error encountered
 	}
 
-	// Create kubernetes clientset
-	restConfig, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeConfigYaml))
-	if err != nil {
-		return nil, nil, cleanup, fmt.Errorf("could not create rest config: %w", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		return nil, nil, cleanup, fmt.Errorf("could not create clientset: %w", err)
-	}
-
-	return clientset, restConfig, cleanup, nil
+	logger.Debug("✅ All component installations completed successfully")
+	return nil
 }
 
 // retryInstallation retries an installation function up to maxRetries times with a delay between attempts
@@ -354,221 +423,13 @@ func retryInstallation(installFunc func() error, componentName string, maxRetrie
 	return fmt.Errorf("%s installation failed after %d attempts: %w", componentName, maxRetries, lastErr)
 }
 
-func InstallCoreComponents(logger *logrus.Logger, groveConfig *GroveInstallConfig, kaiConfig *KaiInstallConfig, nvidiaConfig *NvidiaOperatorInstallConfig) error {
-	var wg sync.WaitGroup
-	errChan := make(chan error, 3) // Buffer for up to 3 errors
-
-	// There's occasionally wierd races regarding CRDS, for test stability we retry a few times
-	const maxRetries = 3
-	const retryDelay = 5 * time.Second
-
-	// Install Kai Scheduler
-	if kaiConfig != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			logger.Debug("🚀 Starting Kai Scheduler installation...")
-
-			installFunc := func() error {
-				_, err := InstallKai(kaiConfig, logger)
-				return err
-			}
-
-			err := retryInstallation(installFunc, "Kai Scheduler", maxRetries, retryDelay, logger)
-			if err != nil {
-				errChan <- err
-			} else {
-				logger.Debug("✅ Kai Scheduler installation completed successfully")
-			}
-		}()
-	}
-
-	// Install Grove
-	if groveConfig != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			logger.Debug("🚀 Starting Grove installation...")
-
-			installFunc := func() error {
-				_, err := InstallGrove(groveConfig, logger)
-				return err
-			}
-
-			err := retryInstallation(installFunc, "Grove", maxRetries, retryDelay, logger)
-			if err != nil {
-				errChan <- err
-			} else {
-				logger.Debug("✅ Grove installation completed successfully")
-			}
-		}()
-	}
-
-	// Install NVIDIA GPU Operator
-	if nvidiaConfig != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			logger.Debug("🚀 Starting NVIDIA GPU Operator installation...")
-
-			installFunc := func() error {
-				_, err := InstallNvidiaOperator(nvidiaConfig, logger)
-				return err
-			}
-
-			err := retryInstallation(installFunc, "NVIDIA GPU Operator", maxRetries, retryDelay, logger)
-			if err != nil {
-				errChan <- err
-			} else {
-				logger.Debug("✅ NVIDIA GPU Operator installation completed successfully")
-			}
-		}()
-	}
-
-	// Wait for all installations to complete
-	wg.Wait()
-	close(errChan)
-
-	// Check for any errors
-	for err := range errChan {
-		return err // Return the first error encountered
-	}
-
-	logger.Debug("✅ All component installations completed successfully")
-	return nil
-}
-
-// SetupCompleteK3DCluster creates a complete k3d cluster with Grove, Kai Scheduler, and NVIDIA GPU Operator
-func SetupCompleteK3DCluster(ctx context.Context, cfg ClusterConfig, logger *logrus.Logger) (*kubernetes.Clientset, *rest.Config, *v1alpha5.ClusterConfig, func(), error) {
-
-	clientset, restConfig, k3dConfig, cleanup, err := SetupK3DCluster(ctx, cfg, logger)
-	if err != nil {
-		return nil, nil, nil, cleanup, err
-	}
-
-	namespace := "grove-system"
-	if err := ensureNamespace(ctx, clientset, namespace); err != nil {
-		cleanup()
-		return nil, nil, nil, nil, err
-	}
-
-	// Start node monitoring by default
-	nodeMonitoringCleanup := StartNodeMonitoring(ctx, cfg.Name, clientset, logger)
-
-	// Create enhanced cleanup function that includes node monitoring
-	enhancedCleanup := func() {
-		// Stop node monitoring first
-		nodeMonitoringCleanup()
-		// Then run the original cleanup
-		cleanup()
-	}
-
-	tolerations := []map[string]interface{}{
-		{
-			"key":      "node-role.kubernetes.io/control-plane",
-			"operator": "Exists",
-			"effect":   "NoSchedule",
-		},
-		{
-			"key":      "node_role.e2e.grove.nvidia.com",
-			"operator": "Equal",
-			"value":    "agent",
-			"effect":   "NoSchedule",
-		},
-	}
-
-	groveConfig := GroveInstallConfigV0_1_0_Alpha1()
-	groveConfig.ReleaseName = "grove"
-	groveConfig.Namespace = namespace
-	groveConfig.RestConfig = restConfig
-	if groveConfig.Values == nil {
-		groveConfig.Values = make(map[string]interface{})
-	}
-	groveConfig.Values["tolerations"] = tolerations
-
-	kaiConfig := KaiInstallConfigLatest("v0.9.3")
-	kaiConfig.ReleaseName = "kai-scheduler"
-	kaiConfig.RestConfig = restConfig
-	if kaiConfig.Values == nil {
-		kaiConfig.Values = make(map[string]interface{})
-	}
-	kaiConfig.Values["global"] = map[string]interface{}{
-		"tolerations": tolerations,
-	}
-
-	nvidiaConfig := NvidiaOperatorInstallConfigLatest("v25.3.4")
-	nvidiaConfig.ReleaseName = "nvidia-gpu-operator"
-	nvidiaConfig.GenerateName = false
-	nvidiaConfig.RestConfig = restConfig
-	if nvidiaConfig.Values == nil {
-		nvidiaConfig.Values = make(map[string]interface{})
-	}
-	nvidiaConfig.Values["tolerations"] = tolerations
-	nvidiaConfig.Values["driver"] = map[string]interface{}{"enabled": false}
-	nvidiaConfig.Values["toolkit"] = map[string]interface{}{"enabled": false}
-	nvidiaConfig.Values["devicePlugin"] = map[string]interface{}{"enabled": false}
-	nvidiaConfig.Values["dcgmExporter"] = map[string]interface{}{"enabled": false}
-	nvidiaConfig.Values["gfd"] = map[string]interface{}{"enabled": false}
-	nvidiaConfig.Values["migManager"] = map[string]interface{}{"enabled": false}
-	nvidiaConfig.Values["nodeStatusExporter"] = map[string]interface{}{"enabled": false}
-
-	logger.Info("🚀 Installing Grove, Kai Scheduler, and NVIDIA GPU Operator...")
-	if err := InstallCoreComponents(logger, groveConfig, kaiConfig, nvidiaConfig); err != nil {
-		cleanup()
-		return nil, nil, nil, nil, fmt.Errorf("component installation failed: %w", err)
-	}
-
-	if err := WaitForGrovePodsReady(ctx, namespace, restConfig, logger); err != nil {
-		cleanup()
-		return nil, nil, nil, nil, fmt.Errorf("Grove pods not ready: %w", err)
-	}
-
-	if err := WaitForKaiPodsReady(ctx, restConfig, logger); err != nil {
-		cleanup()
-		return nil, nil, nil, nil, fmt.Errorf("Kai Scheduler pods not ready: %w", err)
-	}
-
-	if err := WaitForKaiCRDs(ctx, restConfig, logger); err != nil {
-		cleanup()
-		return nil, nil, nil, nil, fmt.Errorf("Failed to wait for Kai CRDs: %w", err)
-	}
-
-	if err := CreateDefaultKaiQueues(ctx, restConfig, logger); err != nil {
-		cleanup()
-		return nil, nil, nil, nil, fmt.Errorf("Failed to create default Kai queue: %w", err)
-	}
-
-	if err := WaitForNvidiaOperatorReady(ctx, restConfig, logger); err != nil {
-		cleanup()
-		return nil, nil, nil, nil, fmt.Errorf("NVIDIA GPU Operator not ready: %w", err)
-	}
-
-	return clientset, restConfig, k3dConfig, enhancedCleanup, nil
-}
-
-func ensureNamespace(ctx context.Context, clientset kubernetes.Interface, namespace string) error {
-	_, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
-	if err == nil {
-		return nil
-	}
-	if errors.IsNotFound(err) {
-		_, createErr := clientset.CoreV1().Namespaces().Create(ctx, &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}, metav1.CreateOptions{})
-		if createErr != nil {
-			return fmt.Errorf("failed to create namespace %s: %w", namespace, createErr)
-		}
-		return nil
-	}
-	return fmt.Errorf("failed to get namespace %s: %w", namespace, err)
-}
-
 // StartNodeMonitoring starts a goroutine that monitors k3d cluster nodes for not ready status
 // and automatically replaces them by deleting the node and restarting the corresponding Docker container.
 // Returns a cleanup function that should be deferred to stop the monitoring.
 //
-// Example usage:
-//
-//	cleanup := StartNodeMonitoring(ctx, "my-cluster", clientset, logger)
-//	defer cleanup()
+// Background: There's an intermitten issue where nodes go not ready which causes the tests to fail
+// occasional. This is an issue with either k3d or docker on mac. This is
+// a simple solution that is working flawlessly.
 //
 // The monitoring process:
 // 1. Checks for nodes that are not in Ready status every 5 seconds
@@ -578,18 +439,13 @@ func ensureNamespace(ctx context.Context, clientset kubernetes.Interface, namesp
 // 5. The restarted container will rejoin the cluster as a new node
 func StartNodeMonitoring(ctx context.Context, clusterName string, clientset *kubernetes.Clientset, logger *logrus.Logger) func() {
 
-	logger.Info("🔍 Starting node monitoring for not ready nodes...")
+	logger.Debug("🔍 Starting node monitoring for not ready nodes...")
 
 	// Create a context that can be cancelled to stop the monitoring
 	monitorCtx, cancel := context.WithCancel(ctx)
 
 	// Start the monitoring goroutine
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Errorf("Node monitoring goroutine panicked: %v", r)
-			}
-		}()
 
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -623,7 +479,9 @@ func checkAndReplaceNotReadyNodes(ctx context.Context, clientset *kubernetes.Cli
 
 	for _, node := range nodes.Items {
 		if !isNodeReady(&node) {
-			// Skip cordoned nodes (intentionally made unschedulable for maintenance)
+			// Skip cordoned nodes because even if they're also not ready, we don't want to replace
+			// them with an uncordoned node as it'll break tests. When/if the node becomes uncordoned,
+			// the node monitoring will automatically replace it then as it's needed.
 			if node.Spec.Unschedulable {
 				logger.Debugf("⏭️ Skipping cordoned node: %s (intentionally unschedulable)", node.Name)
 				continue
@@ -663,7 +521,7 @@ func replaceNotReadyNode(ctx context.Context, node *v1.Node, clientset *kubernet
 		return fmt.Errorf("failed to delete node %s: %w", nodeName, err)
 	}
 
-	// Step 2: Find and restart the corresponding Docker container
+	// Step 2: Find and restart the corresponding Docker container to bring it back
 	logger.Debugf("🔄 Restarting Docker container for node: %s", nodeName)
 	if err := restartNodeContainer(ctx, nodeName, logger); err != nil {
 		return fmt.Errorf("failed to restart container for node %s: %w", nodeName, err)
@@ -687,8 +545,8 @@ func restartNodeContainer(ctx context.Context, nodeName string, logger *logrus.L
 		return fmt.Errorf("failed to list Docker containers: %w", err)
 	}
 
-	// Find the container for this specific node
-	// Node names match container names exactly (e.g., k3d-gang-scheduling-pcs-pcsg-scaling-test-cluster-agent-24)
+	// Find the container for this specific node. The Node names match container names exactly
+	// (e.g., k3d-gang-scheduling-pcs-pcsg-scaling-test-cluster-agent-24).
 	var targetContainer *container.Summary
 	for _, c := range containers {
 		for _, name := range c.Names {

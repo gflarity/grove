@@ -202,15 +202,6 @@ func handleResourceNamespace(obj *unstructured.Unstructured, mapping *meta.RESTM
 	}
 }
 
-// logResourceApplication logs what resource is being applied
-func logResourceApplication(obj *unstructured.Unstructured, gvk *schema.GroupVersionKind, logger *logrus.Logger) {
-	if obj.GetNamespace() != "" {
-		logger.Infof("🔧 Applying %s: %s/%s", gvk.Kind, obj.GetNamespace(), obj.GetName())
-	} else {
-		logger.Infof("🔧 Applying %s: %s", gvk.Kind, obj.GetName())
-	}
-}
-
 // createOrUpdateResource creates or updates a resource
 func createOrUpdateResource(ctx context.Context, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, mapping *meta.RESTMapping, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	// Try to create first
@@ -239,6 +230,16 @@ func updateResource(ctx context.Context, dynamicClient dynamic.Interface, gvr sc
 		return dynamicClient.Resource(gvr).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{})
 	}
 	return dynamicClient.Resource(gvr).Update(ctx, obj, metav1.UpdateOptions{})
+}
+
+// WaitForPodsInNamespace waits for all pods in a namespace to be ready
+func WaitForPodsInNamespace(ctx context.Context, namespace string, restConfig *rest.Config, timeout time.Duration, logger *logrus.Logger) error {
+	workloadConfig := &WorkloadConfig{
+		RestConfig: restConfig,
+		Timeout:    timeout,
+	}
+
+	return WaitForPods(ctx, workloadConfig, []string{namespace}, logger)
 }
 
 // WaitForPods waits for pods to be ready in the specified namespaces
@@ -304,55 +305,6 @@ func WaitForPods(ctx context.Context, config *WorkloadConfig, namespaces []strin
 	})
 }
 
-// ApplyYAMLAndWaitForPods applies a YAML file and waits for all pods to be ready (backward compatibility)
-func ApplyYAMLAndWaitForPods(ctx context.Context, config *WorkloadConfig, logger *logrus.Logger) error {
-	// Check if this is a Grove workload that needs the operator ready
-	needsGroveOperator := false
-	if yamlData, err := os.ReadFile(config.YAMLFilePath); err == nil {
-		needsGroveOperator = strings.Contains(string(yamlData), "grove.io")
-	}
-
-	if needsGroveOperator {
-		if err := waitForGroveOperatorReady(ctx, config, logger); err != nil {
-			return fmt.Errorf("grove operator not ready: %w", err)
-		}
-	}
-
-	// Apply the YAML
-	appliedResources, err := ApplyYAML(ctx, config, logger)
-	if err != nil {
-		return err
-	}
-
-	// Extract namespaces from applied resources
-	namespaceSet := make(map[string]bool)
-	var appliedPodCliqueSets []AppliedPodCliqueSet // For backward compatibility
-
-	for _, resource := range appliedResources {
-		if resource.Namespace != "" {
-			namespaceSet[resource.Namespace] = true
-		}
-		// Maintain backward compatibility for PodCliqueSet resources
-		if resource.GVK.Kind == "PodCliqueSet" && resource.GVK.Group == "grove.io" {
-			appliedPodCliqueSets = append(appliedPodCliqueSets, AppliedPodCliqueSet{
-				Name:      resource.Name,
-				Namespace: resource.Namespace,
-			})
-		}
-	}
-
-	// Wait for pods if we have PodCliqueSet resources (for backward compatibility)
-	if len(appliedPodCliqueSets) > 0 {
-		logger.Debugf("📋 Found %d PodCliqueSet resources, now waiting for pods to be ready...", len(appliedPodCliqueSets))
-		if err := waitForPodCliqueSetPodsReady(ctx, config, appliedPodCliqueSets, logger); err != nil {
-			return fmt.Errorf("failed waiting for pods to be ready: %w", err)
-		}
-		logger.Debugf("🎉 All pods are ready!")
-	}
-
-	return nil
-}
-
 // getGVRFromGVK converts a GroupVersionKind to GroupVersionResource using REST mapper
 func getGVRFromGVK(restMapper meta.RESTMapper, gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
 	mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
@@ -360,50 +312,6 @@ func getGVRFromGVK(restMapper meta.RESTMapper, gvk schema.GroupVersionKind) (sch
 		return schema.GroupVersionResource{}, err
 	}
 	return mapping.Resource, nil
-}
-
-// waitForRegularPods waits for regular pods (non-PodCliqueSet) to be ready
-func waitForRegularPods(ctx context.Context, clientset *kubernetes.Clientset, namespace string, logger *logrus.Logger) error {
-	if namespace == "" {
-		namespace = "default"
-	}
-
-	logger.Infof("⏳ Waiting for regular pods in namespace %s...", namespace)
-
-	return wait.PollUntilContextTimeout(ctx, 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
-		pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			logger.Errorf("Failed to list pods: %v", err)
-			return false, nil
-		}
-
-		if len(pods.Items) == 0 {
-			logger.Info("⏳ No pods found yet, continuing to wait...")
-			return false, nil
-		}
-
-		allReady := true
-		readyCount := 0
-		for _, pod := range pods.Items {
-			if isPodReady(&pod) {
-				readyCount++
-			} else {
-				allReady = false
-			}
-		}
-
-		return allReady, nil
-	})
-}
-
-// WaitForPodsInNamespace waits for all pods in a namespace to be ready
-func WaitForPodsInNamespace(ctx context.Context, namespace string, restConfig *rest.Config, timeout time.Duration, logger *logrus.Logger) error {
-	workloadConfig := &WorkloadConfig{
-		RestConfig: restConfig,
-		Timeout:    timeout,
-	}
-
-	return WaitForPods(ctx, workloadConfig, []string{namespace}, logger)
 }
 
 // isPodReady checks if a pod is ready
@@ -414,4 +322,24 @@ func isPodReady(pod *v1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// CordonNode cordons or uncordons a Kubernetes node
+func CordonNode(ctx context.Context, clientset kubernetes.Interface, nodeName string, cordon bool) error {
+	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+
+	if node.Spec.Unschedulable == cordon {
+		// Already in desired state
+		return nil
+	}
+
+	node.Spec.Unschedulable = cordon
+	_, err = clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update node %s: %w", nodeName, err)
+	}
+	return nil
 }
