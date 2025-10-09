@@ -148,18 +148,26 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 			return false, nil
 		}
 
-		// All pods should be Pending (cordoned nodes) with new UIDs
-		recreatedPendingCount := 0
+		// Verify none of the original pod UIDs exist (all were deleted and recreated)
+		currentUIDs := make(map[string]bool)
+		pendingCount := 0
 		for _, pod := range pods.Items {
-			originalUID, existed := originalPodUIDs[pod.Name]
-			// Pod should exist in original list, have a different UID, and be Pending
-			if existed && string(pod.UID) != originalUID && pod.Status.Phase == v1.PodPending {
-				recreatedPendingCount++
+			currentUIDs[string(pod.UID)] = true
+			if pod.Status.Phase == v1.PodPending {
+				pendingCount++
 			}
 		}
 
-		// All pods should be recreated and pending
-		return recreatedPendingCount == expectedPods, nil
+		// Check that no original UIDs exist in current pods (all recreated)
+		for _, originalUID := range originalPodUIDs {
+			if currentUIDs[originalUID] {
+				// Found an old pod UID, recreation not complete
+				return false, nil
+			}
+		}
+
+		// All pods should be pending (cordoned nodes)
+		return pendingCount == expectedPods, nil
 	})
 	if err != nil {
 		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
@@ -272,18 +280,26 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 			return false, nil
 		}
 
-		// All pods should be Pending (cordoned nodes) with new UIDs
-		recreatedPendingCount := 0
+		// Verify none of the original pod UIDs exist (all were deleted and recreated)
+		currentUIDs := make(map[string]bool)
+		pendingCount := 0
 		for _, pod := range pods.Items {
-			originalUID, existed := originalPodUIDs[pod.Name]
-			// Pod should exist in original list, have a different UID, and be Pending
-			if existed && string(pod.UID) != originalUID && pod.Status.Phase == v1.PodPending {
-				recreatedPendingCount++
+			currentUIDs[string(pod.UID)] = true
+			if pod.Status.Phase == v1.PodPending {
+				pendingCount++
 			}
 		}
 
-		// All pods should be recreated and pending
-		return recreatedPendingCount == expectedPods, nil
+		// Check that no original UIDs exist in current pods (all recreated)
+		for _, originalUID := range originalPodUIDs {
+			if currentUIDs[originalUID] {
+				// Found an old pod UID, recreation not complete
+				return false, nil
+			}
+		}
+
+		// All pods should be pending (cordoned nodes)
+		return pendingCount == expectedPods, nil
 	})
 	if err != nil {
 		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
@@ -463,18 +479,26 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 			return false, nil
 		}
 
-		// All pods should be Pending (cordoned nodes) with new UIDs
-		recreatedPendingCount := 0
+		// Verify none of the original pod UIDs exist (all were deleted and recreated)
+		currentUIDs := make(map[string]bool)
+		pendingCount := 0
 		for _, pod := range pods.Items {
-			originalUID, existed := originalPodUIDs[pod.Name]
-			// Pod should exist in original list, have a different UID, and be Pending
-			if existed && string(pod.UID) != originalUID && pod.Status.Phase == v1.PodPending {
-				recreatedPendingCount++
+			currentUIDs[string(pod.UID)] = true
+			if pod.Status.Phase == v1.PodPending {
+				pendingCount++
 			}
 		}
 
-		// All pods should be recreated and pending
-		return recreatedPendingCount == expectedPods, nil
+		// Check that no original UIDs exist in current pods (all recreated)
+		for _, originalUID := range originalPodUIDs {
+			if currentUIDs[originalUID] {
+				// Found an old pod UID, recreation not complete
+				return false, nil
+			}
+		}
+
+		// All pods should be pending (cordoned nodes)
+		return pendingCount == expectedPods, nil
 	})
 	if err != nil {
 		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
@@ -654,18 +678,26 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 			return false, nil
 		}
 
-		// All pods should be Pending (cordoned nodes) with new UIDs
-		recreatedPendingCount := 0
+		// Verify none of the original pod UIDs exist (all were deleted and recreated)
+		currentUIDs := make(map[string]bool)
+		pendingCount := 0
 		for _, pod := range pods.Items {
-			originalUID, existed := originalPodUIDs[pod.Name]
-			// Pod should exist in original list, have a different UID, and be Pending
-			if existed && string(pod.UID) != originalUID && pod.Status.Phase == v1.PodPending {
-				recreatedPendingCount++
+			currentUIDs[string(pod.UID)] = true
+			if pod.Status.Phase == v1.PodPending {
+				pendingCount++
 			}
 		}
 
-		// All pods should be recreated and pending
-		return recreatedPendingCount == expectedPods, nil
+		// Check that no original UIDs exist in current pods (all recreated)
+		for _, originalUID := range originalPodUIDs {
+			if currentUIDs[originalUID] {
+				// Found an old pod UID, recreation not complete
+				return false, nil
+			}
+		}
+
+		// All pods should be pending (cordoned nodes)
+		return pendingCount == expectedPods, nil
 	})
 	if err != nil {
 		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
