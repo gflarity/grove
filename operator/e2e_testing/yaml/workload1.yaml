@@ -9,7 +9,7 @@ metadata:
 spec:
   replicas: 1
   template:
-    terminationDelay: 45s
+    terminationDelay: 10s
     cliques:
       - name: pc-a
         labels:

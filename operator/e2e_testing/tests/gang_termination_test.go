@@ -41,7 +41,7 @@ import (
 const (
 	// TerminationDelay is the time to wait for gang-termination to occur
 	// This should match the configuration in the operator
-	TerminationDelay = 45 * time.Second
+	TerminationDelay = 10 * time.Second
 )
 
 // Test_GT1_GangTerminationFullReplicasPCSOwned tests gang-termination behavior when a PCS-owned PodClique is breached
@@ -135,7 +135,7 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 
 	logger.Info("6. Verify that all pods in the workload get gang-terminated and recreated")
 	// After gang-termination, pods should be recreated with new UIDs and be in Pending state
-	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+	err = pollForCondition(ctx, 10*time.Second, 1*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
 		})
@@ -267,7 +267,7 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 
 	logger.Info("6. Verify that all pods in the workload get gang-terminated and recreated")
 	// After gang-termination, pods should be recreated with new UIDs and be in Pending state
-	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+	err = pollForCondition(ctx, 10*time.Second, 1*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
 		})
@@ -466,7 +466,7 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 
 	logger.Info("9. Verify that all pods in the workload get gang-terminated and recreated")
 	// After breaching min-replicas, gang-termination should occur
-	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+	err = pollForCondition(ctx, 10*time.Second, 1*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
 		})
@@ -665,7 +665,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 
 	logger.Info("15. Verify that all pods in the workload get gang-terminated and recreated")
 	// After breaching min-replicas at PCSG level, gang-termination should occur
-	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
+	err = pollForCondition(ctx, 10*time.Second, 1*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
 		})
