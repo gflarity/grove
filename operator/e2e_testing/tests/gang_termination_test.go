@@ -122,7 +122,7 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 	}
 
 	// Delete the target pod
-	logger.Infof("Deleting pod %s from node %s", targetPod.Name, targetPod.Spec.NodeName)
+	logger.Debugf("Deleting pod %s from node %s", targetPod.Name, targetPod.Spec.NodeName)
 	if err := clientset.CoreV1().Pods(workloadNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{}); err != nil {
 		t.Errorf("Failed to delete pod %s: %v", targetPod.Name, err)
 	}
