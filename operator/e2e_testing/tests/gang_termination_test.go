@@ -163,9 +163,8 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
-	}
-	else {
-		logger.Info("🎉 Gang-termination with full-replicas PCS-owned test (GT-1) completed successfully!")		
+	} else {
+		logger.Info("🎉 Gang-termination with full-replicas PCS-owned test (GT-1) completed successfully!")
 	}
 }
 
