@@ -121,6 +121,9 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 		t.Errorf("Failed to cordon node %s: %v", targetPod.Spec.NodeName, err)
 	}
 
+	// Capture pod UIDs before gang termination
+	originalPodUIDs := capturePodUIDs(pods)
+
 	// Delete the target pod
 	logger.Debugf("Deleting pod %s from node %s", targetPod.Name, targetPod.Spec.NodeName)
 	if err := clientset.CoreV1().Pods(workloadNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{}); err != nil {
@@ -130,8 +133,8 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 	logger.Infof("5. Wait for TerminationDelay (%v) seconds", TerminationDelay)
 	time.Sleep(TerminationDelay)
 
-	logger.Info("6. Verify that all pods in the workload get terminated")
-	// After gang-termination, all pods should be terminated (deleted or terminating)
+	logger.Info("6. Verify that all pods in the workload get gang-terminated and recreated")
+	// After gang-termination, pods should be recreated with new UIDs and be in Pending state
 	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
@@ -140,23 +143,30 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 			return false, err
 		}
 
-		// Check if all pods are being terminated or already deleted
-		terminatingOrDeletedCount := 0
+		// Should have the same number of pods (recreated, not deleted)
+		if len(pods.Items) != expectedPods {
+			return false, nil
+		}
+
+		// All pods should be Pending (cordoned nodes) with new UIDs
+		recreatedPendingCount := 0
 		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase == v1.PodFailed {
-				terminatingOrDeletedCount++
+			originalUID, existed := originalPodUIDs[pod.Name]
+			// Pod should exist in original list, have a different UID, and be Pending
+			if existed && string(pod.UID) != originalUID && pod.Status.Phase == v1.PodPending {
+				recreatedPendingCount++
 			}
 		}
 
-		// All pods should be terminating or the pod count should be reduced significantly
-		// indicating gang-termination has occurred
-		return len(pods.Items) == 0 || terminatingOrDeletedCount == len(pods.Items), nil
+		// All pods should be recreated and pending
+		return recreatedPendingCount == expectedPods, nil
 	})
 	if err != nil {
-		t.Errorf("Failed to verify gang-termination: %v", err)
+		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
 	}
-
-	logger.Info("🎉 Gang-termination with full-replicas PCS-owned test (GT-1) completed successfully!")
+	else {
+		logger.Info("🎉 Gang-termination with full-replicas PCS-owned test (GT-1) completed successfully!")		
+	}
 }
 
 // Test_GT2_GangTerminationFullReplicasPCSGOwned tests gang-termination behavior when a PCSG-owned PodClique is breached
@@ -236,6 +246,9 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 		t.Errorf("Failed to cordon node %s: %v", targetPod.Spec.NodeName, err)
 	}
 
+	// Capture pod UIDs before gang termination
+	originalPodUIDs := capturePodUIDs(pods)
+
 	// Delete the target pod
 	logger.Infof("Deleting pod %s from node %s", targetPod.Name, targetPod.Spec.NodeName)
 	if err := clientset.CoreV1().Pods(workloadNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{}); err != nil {
@@ -245,8 +258,8 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 	logger.Infof("5. Wait for TerminationDelay (%v) seconds", TerminationDelay)
 	time.Sleep(TerminationDelay)
 
-	logger.Info("6. Verify that all pods in the workload get terminated")
-	// After gang-termination, all pods should be terminated (deleted or terminating)
+	logger.Info("6. Verify that all pods in the workload get gang-terminated and recreated")
+	// After gang-termination, pods should be recreated with new UIDs and be in Pending state
 	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
@@ -255,19 +268,26 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 			return false, err
 		}
 
-		// Check if all pods are being terminated or already deleted
-		terminatingOrDeletedCount := 0
+		// Should have the same number of pods (recreated, not deleted)
+		if len(pods.Items) != expectedPods {
+			return false, nil
+		}
+
+		// All pods should be Pending (cordoned nodes) with new UIDs
+		recreatedPendingCount := 0
 		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase == v1.PodFailed {
-				terminatingOrDeletedCount++
+			originalUID, existed := originalPodUIDs[pod.Name]
+			// Pod should exist in original list, have a different UID, and be Pending
+			if existed && string(pod.UID) != originalUID && pod.Status.Phase == v1.PodPending {
+				recreatedPendingCount++
 			}
 		}
 
-		// All pods should be terminating or the pod count should be reduced significantly
-		return len(pods.Items) == 0 || terminatingOrDeletedCount == len(pods.Items), nil
+		// All pods should be recreated and pending
+		return recreatedPendingCount == expectedPods, nil
 	})
 	if err != nil {
-		t.Errorf("Failed to verify gang-termination: %v", err)
+		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
 	}
 
 	logger.Info("🎉 Gang-termination with full-replicas PCSG-owned test (GT-2) completed successfully!")
@@ -411,6 +431,15 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 		t.Errorf("Failed to cordon node %s: %v", secondTargetPod.Spec.NodeName, err)
 	}
 
+	// Capture pod UIDs before gang termination (after first deletion)
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Errorf("Failed to list workload pods: %v", err)
+	}
+	originalPodUIDs := capturePodUIDs(pods)
+
 	// Delete the second target pod
 	logger.Infof("Deleting second pod %s from node %s", secondTargetPod.Name, secondTargetPod.Spec.NodeName)
 	if err := clientset.CoreV1().Pods(workloadNamespace).Delete(ctx, secondTargetPod.Name, metav1.DeleteOptions{}); err != nil {
@@ -420,7 +449,7 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 	logger.Infof("8. Wait for TerminationDelay (%v) seconds", TerminationDelay)
 	time.Sleep(TerminationDelay)
 
-	logger.Info("9. Verify that all pods in the workload get terminated")
+	logger.Info("9. Verify that all pods in the workload get gang-terminated and recreated")
 	// After breaching min-replicas, gang-termination should occur
 	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
@@ -430,19 +459,26 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 			return false, err
 		}
 
-		// Check if all pods are being terminated or already deleted
-		terminatingOrDeletedCount := 0
+		// Should have the same number of pods (recreated, not deleted)
+		if len(pods.Items) != expectedPods {
+			return false, nil
+		}
+
+		// All pods should be Pending (cordoned nodes) with new UIDs
+		recreatedPendingCount := 0
 		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase == v1.PodFailed {
-				terminatingOrDeletedCount++
+			originalUID, existed := originalPodUIDs[pod.Name]
+			// Pod should exist in original list, have a different UID, and be Pending
+			if existed && string(pod.UID) != originalUID && pod.Status.Phase == v1.PodPending {
+				recreatedPendingCount++
 			}
 		}
 
-		// All pods should be terminating or deleted
-		return len(pods.Items) == 0 || terminatingOrDeletedCount == len(pods.Items), nil
+		// All pods should be recreated and pending
+		return recreatedPendingCount == expectedPods, nil
 	})
 	if err != nil {
-		t.Errorf("Failed to verify gang-termination: %v", err)
+		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
 	}
 
 	logger.Info("🎉 Gang-termination with min-replicas PCS-owned test (GT-3) completed successfully!")
@@ -592,10 +628,19 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 		}
 	}
 
+	// Capture pod UIDs before final gang termination
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Errorf("Failed to list workload pods: %v", err)
+	}
+	originalPodUIDs := capturePodUIDs(pods)
+
 	logger.Infof("14. Wait for TerminationDelay (%v) seconds", TerminationDelay)
 	time.Sleep(TerminationDelay)
 
-	logger.Info("15. Verify that all pods in the workload get terminated")
+	logger.Info("15. Verify that all pods in the workload get gang-terminated and recreated")
 	// After breaching min-replicas at PCSG level, gang-termination should occur
 	err = pollForCondition(ctx, 2*time.Minute, 5*time.Second, func() (bool, error) {
 		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
@@ -605,25 +650,41 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 			return false, err
 		}
 
-		// Check if all pods are being terminated or already deleted
-		terminatingOrDeletedCount := 0
+		// Should have the same number of pods (recreated, not deleted)
+		if len(pods.Items) != expectedPods {
+			return false, nil
+		}
+
+		// All pods should be Pending (cordoned nodes) with new UIDs
+		recreatedPendingCount := 0
 		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase == v1.PodFailed {
-				terminatingOrDeletedCount++
+			originalUID, existed := originalPodUIDs[pod.Name]
+			// Pod should exist in original list, have a different UID, and be Pending
+			if existed && string(pod.UID) != originalUID && pod.Status.Phase == v1.PodPending {
+				recreatedPendingCount++
 			}
 		}
 
-		// All pods should be terminating or deleted
-		return len(pods.Items) == 0 || terminatingOrDeletedCount == len(pods.Items), nil
+		// All pods should be recreated and pending
+		return recreatedPendingCount == expectedPods, nil
 	})
 	if err != nil {
-		t.Errorf("Failed to verify gang-termination: %v", err)
+		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
 	}
 
 	logger.Info("🎉 Gang-termination with min-replicas PCSG-owned test (GT-4) completed successfully!")
 }
 
 // Helper functions
+
+// capturePodUIDs captures the UIDs of all pods in the list
+func capturePodUIDs(pods *v1.PodList) map[string]string {
+	uidMap := make(map[string]string)
+	for _, pod := range pods.Items {
+		uidMap[pod.Name] = string(pod.UID)
+	}
+	return uidMap
+}
 
 // isPodReady checks if a pod is ready
 func isPodReady(pod *v1.Pod) bool {
