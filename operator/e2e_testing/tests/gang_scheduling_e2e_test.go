@@ -73,7 +73,7 @@ func init() {
 	}
 
 	// increase logger verbosity for debugging
-	logger = utils.NewTestLogger(logrus.InfoLevel)
+	logger = utils.NewTestLogger(logrus.DebugLevel)
 }
 
 // TestMain manages the lifecycle of the shared cluster for all tests
