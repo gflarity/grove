@@ -28,6 +28,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -38,6 +39,8 @@ import (
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -201,5 +204,99 @@ func assertPodsOnDistinctNodes(t *testing.T, pods []v1.Pod) {
 			t.Fatalf("Pods %s and %s are scheduled on the same node %s; expected unique nodes", existingPod, pod.Name, nodeName)
 		}
 		assignedNodes[nodeName] = pod.Name
+	}
+}
+
+func scalePCSGAndWait(t *testing.T, ctx context.Context, clientset kubernetes.Interface, dynamicClient dynamic.Interface, namespace, labelSelector, pcsgName string, replicas int32, expectedTotalPods, expectedPending int) {
+	t.Helper()
+
+	pcsgGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquescalinggroups"}
+	patchBytes, err := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"replicas": replicas,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to marshal PCSG patch: %v", err)
+	}
+
+	if _, err := dynamicClient.Resource(pcsgGVR).Namespace(namespace).Patch(ctx, pcsgName, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		t.Fatalf("Failed to scale PodCliqueScalingGroup %s: %v", pcsgName, err)
+	}
+
+	err = pollForCondition(ctx, 5*time.Minute, 5*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false, err
+		}
+		return len(pods.Items) == expectedTotalPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods after PCSG scaling: %v", err)
+	}
+
+	evaluatePodStates(t, ctx, clientset, namespace, labelSelector, expectedTotalPods, expectedPending)
+}
+
+func scalePCSAndWait(t *testing.T, ctx context.Context, clientset kubernetes.Interface, dynamicClient dynamic.Interface, namespace, labelSelector, pcsName string, replicas int32, expectedTotalPods, expectedPending int) {
+	t.Helper()
+
+	pcsGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquesets"}
+	patchBytes, err := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"replicas": replicas,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to marshal PCS patch: %v", err)
+	}
+
+	if _, err := dynamicClient.Resource(pcsGVR).Namespace(namespace).Patch(ctx, pcsName, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		t.Fatalf("Failed to scale PodCliqueSet %s: %v", pcsName, err)
+	}
+
+	err = pollForCondition(ctx, 1*time.Minute, 1*time.Second, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false, err
+		}
+		return len(pods.Items) == expectedTotalPods, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods after PCS scaling: %v", err)
+	}
+
+	evaluatePodStates(t, ctx, clientset, namespace, labelSelector, expectedTotalPods, expectedPending)
+}
+
+func evaluatePodStates(t *testing.T, ctx context.Context, clientset kubernetes.Interface, namespace, labelSelector string, expectedTotalPods, expectedPending int) {
+	t.Helper()
+
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	runningPods := 0
+	pendingPods := 0
+	for _, pod := range pods.Items {
+		switch pod.Status.Phase {
+		case v1.PodRunning:
+			runningPods++
+		case v1.PodPending:
+			pendingPods++
+		}
+	}
+
+	if len(pods.Items) != expectedTotalPods {
+		t.Fatalf("Expected %d total pods, but found %d", expectedTotalPods, len(pods.Items))
+	}
+
+	if pendingPods != expectedPending {
+		t.Fatalf("Expected %d pending pods, but found %d", expectedPending, pendingPods)
+	}
+
+	if runningPods != expectedTotalPods-expectedPending {
+		t.Fatalf("Expected %d running pods, but found %d", expectedTotalPods-expectedPending, runningPods)
 	}
 }
