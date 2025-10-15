@@ -73,7 +73,7 @@ func (scm *SharedClusterManager) Setup(ctx context.Context, testImages []string)
 	customCfg := ClusterConfig{
 		Name:             "shared-e2e-test-cluster",
 		Servers:          3,
-		Agents:           28,     // Maximum needed across all tests
+		Agents:           30,     // Maximum needed across all tests
 		WorkerMemory:     "150m", // 150m memory per agent node to fit one workload pod
 		Image:            "rancher/k3s:v1.33.5-k3s1",
 		HostPort:         "6560", // Use a different port to avoid conflicts
