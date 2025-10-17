@@ -89,6 +89,14 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 		t.Errorf("Failed to wait for pods to be ready: %v", err)
 	}
 
+	// Re-fetch pods after they're ready to get updated NodeName assignments
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Errorf("Failed to list pods after ready: %v", err)
+	}
+
 	// Verify pods are distributed across distinct nodes as per the workload YAML and Node resource constraints
 	assertPodsOnDistinctNodes(t, pods.Items)
 
@@ -239,6 +247,14 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 		t.Errorf("Failed to wait for pods to be ready: %v", err)
 	}
 
+	// Re-fetch pods after they're ready to get updated NodeName assignments
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Errorf("Failed to list pods after ready: %v", err)
+	}
+
 	// Verify pods are distributed across distinct nodes as per the workload YAML and Node resource constraints
 	assertPodsOnDistinctNodes(t, pods.Items)
 
@@ -386,13 +402,21 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 		t.Errorf("Failed to wait for pods to be created: %v", err)
 	}
 
-	// Verify pods are distributed across distinct nodes as per the workload YAML and Node resource constraints
-	assertPodsOnDistinctNodes(t, pods.Items)
-
 	logger.Info("3. Wait for pods to get scheduled and become ready")
 	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, 10*time.Minute, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready: %v", err)
 	}
+
+	// Re-fetch pods after they're ready to get updated NodeName assignments
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Errorf("Failed to list pods after ready: %v", err)
+	}
+
+	// Verify pods are distributed across distinct nodes as per the workload YAML and Node resource constraints
+	assertPodsOnDistinctNodes(t, pods.Items)
 
 	logger.Info("4. Cordon node and then delete 1 pod from PCS-owned podclique pcs-0-pc-a")
 	// Find the first pod from workload2-0-pc-a podclique (PCS-owned)
@@ -602,6 +626,18 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, 10*time.Minute, logger); err != nil {
 		t.Errorf("Failed to wait for pods to be ready: %v", err)
 	}
+
+	// Re-fetch pods after they're ready to get updated NodeName assignments
+	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Errorf("Failed to list pods after ready: %v", err)
+	}
+
+	// Verify pods are distributed across distinct nodes (not required for GT-4 but good to verify)
+	// Note: GT-4 doesn't have the assertion but we can add it for consistency
+	// assertPodsOnDistinctNodes(t, pods.Items)
 
 	logger.Info("4. Cordon node and then delete 1 ready pod from PCSG-owned podclique pcs-0-sg-x-0-pc-c")
 	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
