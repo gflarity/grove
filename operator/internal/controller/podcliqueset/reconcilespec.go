@@ -194,7 +194,6 @@ func getOrderedKindsForSync() []component.Kind {
 		component.KindServiceAccount,
 		component.KindRole,
 		component.KindRoleBinding,
-		component.KindServiceAccountTokenSecret,
 		component.KindHeadlessService,
 		component.KindHorizontalPodAutoscaler,
 		component.KindPodCliqueSetReplica,

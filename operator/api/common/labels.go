@@ -62,10 +62,6 @@ const (
 	// LabelComponentNamePodServiceAccount is the label key representing the component name  for a ServiceAccount that
 	// is used by all Pods that are created for a PodCliqueSet.
 	LabelComponentNamePodServiceAccount = "pod-service-account"
-	// LabelComponentNameServiceAccountTokenSecret is the label key representing the component name for a Secret for
-	// generating service account token that is used by an init container responsible for enforcing start-up ordering in
-	// each Pod for a PodCliqueSet.
-	LabelComponentNameServiceAccountTokenSecret = "pod-sa-token-secret"
 	// LabelComponentNamePodCliqueScalingGroup is the label key representing the component name for a
 	// PodCliqueScalingGroup resource.
 	LabelComponentNamePodCliqueScalingGroup = "pcs-podcliquescalinggroup"

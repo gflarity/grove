@@ -26,7 +26,6 @@ import (
 	"github.com/NVIDIA/grove/operator/internal/controller/podcliqueset/components/podgang"
 	"github.com/NVIDIA/grove/operator/internal/controller/podcliqueset/components/role"
 	"github.com/NVIDIA/grove/operator/internal/controller/podcliqueset/components/rolebinding"
-	"github.com/NVIDIA/grove/operator/internal/controller/podcliqueset/components/satokensecret"
 	"github.com/NVIDIA/grove/operator/internal/controller/podcliqueset/components/service"
 	"github.com/NVIDIA/grove/operator/internal/controller/podcliqueset/components/serviceaccount"
 
@@ -43,7 +42,6 @@ func CreateOperatorRegistry(mgr manager.Manager, eventRecorder record.EventRecor
 	reg.Register(component.KindRole, role.New(cl, mgr.GetScheme()))
 	reg.Register(component.KindRoleBinding, rolebinding.New(cl, mgr.GetScheme()))
 	reg.Register(component.KindServiceAccount, serviceaccount.New(cl, mgr.GetScheme()))
-	reg.Register(component.KindServiceAccountTokenSecret, satokensecret.New(cl, mgr.GetScheme()))
 	reg.Register(component.KindPodCliqueScalingGroup, podcliquescalinggroup.New(cl, mgr.GetScheme(), eventRecorder))
 	reg.Register(component.KindHorizontalPodAutoscaler, hpa.New(cl, mgr.GetScheme()))
 	reg.Register(component.KindPodGang, podgang.New(cl, mgr.GetScheme(), eventRecorder))

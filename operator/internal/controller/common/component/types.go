@@ -65,8 +65,6 @@ const (
 	KindRole Kind = "Role"
 	// KindRoleBinding indicates that the resource is a RoleBinding.
 	KindRoleBinding Kind = "RoleBinding"
-	// KindServiceAccountTokenSecret indicates that the resource is a Secret to generate ServiceAccount token.
-	KindServiceAccountTokenSecret Kind = "ServiceAccountTokenSecret"
 	// KindHeadlessService indicates that the resource is a headless Service.
 	KindHeadlessService Kind = "HeadlessService"
 	// KindHorizontalPodAutoscaler indicates that the resource is a HorizontalPodAutoscaler.

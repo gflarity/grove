@@ -157,6 +157,7 @@ func (r _resource) buildResource(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grov
 		)
 	}
 	pod.Spec = *pclq.Spec.PodSpec.DeepCopy()
+	pod.Spec.ServiceAccountName = apicommon.GeneratePodServiceAccountName(pcsName)
 	pod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: podGangSchedulingGate}}
 	// Add GROVE specific Pod environment variables
 	addEnvironmentVariables(pod, pclq, pcsName, pcsReplicaIndex, podIndex)

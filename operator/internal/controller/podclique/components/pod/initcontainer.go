@@ -54,16 +54,51 @@ func configurePodInitContainer(pcs *grovecorev1alpha1.PodCliqueSet, pclq *grovec
 }
 
 func addServiceAccountTokenSecretVolume(pcsName string, pod *corev1.Pod) {
-	saTokenSecretVol := corev1.Volume{
+	saTokenVol := corev1.Volume{
 		Name: serviceAccountTokenSecretVolumeName,
 		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName:  apicommon.GenerateInitContainerSATokenSecretName(pcsName),
+			Projected: &corev1.ProjectedVolumeSource{
 				DefaultMode: ptr.To[int32](420),
+				Sources: []corev1.VolumeProjection{
+					// Service account token - automatically rotated by kubelet
+					{
+						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+							Path:              "token",
+							ExpirationSeconds: ptr.To[int64](3600), // 1 hour
+						},
+					},
+					// CA certificate from cluster ConfigMap
+					{
+						ConfigMap: &corev1.ConfigMapProjection{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "kube-root-ca.crt",
+							},
+							Items: []corev1.KeyToPath{
+								{
+									Key:  "ca.crt",
+									Path: "ca.crt",
+								},
+							},
+						},
+					},
+					// Namespace from pod metadata
+					{
+						DownwardAPI: &corev1.DownwardAPIProjection{
+							Items: []corev1.DownwardAPIVolumeFile{
+								{
+									Path: "namespace",
+									FieldRef: &corev1.ObjectFieldSelector{
+										FieldPath: "metadata.namespace",
+									},
+								},
+							},
+						},
+					},
+				},
 			},
 		},
 	}
-	pod.Spec.Volumes = append(pod.Spec.Volumes, saTokenSecretVol)
+	pod.Spec.Volumes = append(pod.Spec.Volumes, saTokenVol)
 }
 
 func addPodInfoVolume(pod *corev1.Pod) {
