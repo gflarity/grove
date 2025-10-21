@@ -132,7 +132,7 @@ func computeReplicaStatus(logger logr.Logger, currentPCSGenerationHash *string, 
 }
 
 func mutateMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) {
-	newCondition := computeMinAvailableBreachedCondition(logger, pcsg, pclqsPerPCSGReplica)
+	newCondition := computeMinAvailableBreachedCondition(pcsg, pclqsPerPCSGReplica)
 	if k8sutils.HasConditionChanged(pcsg.Status.Conditions, newCondition) {
 		logger.Info("Updating MinAvailableBreached condition for PodCliqueScalingGroup",
 			"pcsg", client.ObjectKeyFromObject(pcsg),
@@ -144,12 +144,12 @@ func mutateMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1al
 }
 
 // computeMinAvailableBreachedCondition computes the MinAvailableBreached condition for the PodCliqueScalingGroup.
-// If rolling update is under progress, then gang termination for this PCSG is disabled. This is achieved by marking the status to `Unknown`. This PCSG will not influence
-// the gang termination of PCS replica till its update has completed.
-// If the number of scheduled replicas is less than the MinAvailable, then it is too pre-mature to set the MinAvailableBreached condition to true.
-// If we set MinAvailableBreached condition to true, then it can result in pre-mature gang termination when the PodClique Pods are still starting.
-// If there are sufficient scheduled replicas (i.e. scheduledReplicas >= minAvailable), then we can compute the MinAvailableBreached condition based on the number of ready replicas.
-func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) metav1.Condition {
+// During rolling updates, returns `Unknown` to prevent influencing gang termination until the update completes.
+//
+// Distinguishes between INITIAL STATE (never scheduled, availableReplicas == 0) which returns False to avoid
+// gang termination during creation, and DEGRADED STATE (previously available but lost) which evaluates
+// availableReplicas to determine if gang termination should trigger.
+func computeMinAvailableBreachedCondition(pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) metav1.Condition {
 	if componentutils.IsPCSGUpdateInProgress(pcsg) {
 		return metav1.Condition{
 			Type:    constants.ConditionTypeMinAvailableBreached,
@@ -161,7 +161,31 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 
 	minAvailable := int(*pcsg.Spec.MinAvailable)
 	scheduledReplicas := int(pcsg.Status.ScheduledReplicas)
-	if scheduledReplicas < minAvailable {
+
+	// Compute CURRENT available replicas by directly checking PodCliques
+	// We must do this BEFORE the initial state check because Status.AvailableReplicas
+	// is stale and doesn't reflect the current state
+	availableReplicas := computeAvailablePCSGReplicas(pclqsPerPCSGReplica)
+
+	// Special case: Initial PCSG replica creation (availableReplicasComputed == 0)
+	// Check if ANY child PodClique has WasOnceHealthy=True to distinguish:
+	//   - Initial creation (all PodCliques WasOnceHealthy=false) → Don't trigger gang termination
+	//   - Complete degradation (any PodClique WasOnceHealthy=true) → Trigger gang termination
+	allPodCliquesNeverHealthy := true
+	for _, pclqs := range pclqsPerPCSGReplica {
+		for _, pclq := range pclqs {
+			wasOnceHealthy := k8sutils.IsConditionTrue(pclq.Status.Conditions, constants.ConditionTypeWasOnceHealthy)
+			if wasOnceHealthy {
+				allPodCliquesNeverHealthy = false
+				break
+			}
+		}
+		if !allPodCliquesNeverHealthy {
+			break
+		}
+	}
+
+	if scheduledReplicas < minAvailable && availableReplicas == 0 && allPodCliquesNeverHealthy {
 		return metav1.Condition{
 			Type:    constants.ConditionTypeMinAvailableBreached,
 			Status:  metav1.ConditionFalse,
@@ -169,8 +193,8 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 			Message: fmt.Sprintf("Insufficient scheduled replicas. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
 		}
 	}
-	minAvailableBreachedReplicas := computeMinAvailableBreachedReplicas(logger, pclqsPerPCSGReplica)
-	availableReplicas := scheduledReplicas - minAvailableBreachedReplicas
+
+	// Normal case: Check if we have sufficient available PCSG replicas
 	if availableReplicas < minAvailable {
 		return metav1.Condition{
 			Type:    constants.ConditionTypeMinAvailableBreached,
@@ -187,18 +211,33 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 	}
 }
 
-func computeMinAvailableBreachedReplicas(logger logr.Logger, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) int {
-	var breachedReplicas int
-	for pcsgReplicaIndex, pclqs := range pclqsPerPCSGReplica {
-		isMinAvailableBreached := lo.Reduce(pclqs, func(agg bool, pclq grovecorev1alpha1.PodClique, _ int) bool {
-			return agg || k8sutils.IsConditionTrue(pclq.Status.Conditions, constants.ConditionTypeMinAvailableBreached)
-		}, false)
-		if isMinAvailableBreached {
-			breachedReplicas++
+// computeAvailablePCSGReplicas directly counts PCSG replicas where all constituent PodCliques are available.
+// A PodClique is considered available if:
+// 1. readyReplicas >= minAvailable AND
+// 2. MinAvailableBreached condition is False (or not set)
+// This is more accurate than scheduledReplicas - breachedReplicas because it avoids race conditions during deletion.
+func computeAvailablePCSGReplicas(pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) int {
+	var availableReplicas int
+	for _, pclqs := range pclqsPerPCSGReplica {
+		allAvailable := true
+		for _, pclq := range pclqs {
+			// Check if this PodClique has MinAvailableBreached=True
+			isBreached := k8sutils.IsConditionTrue(pclq.Status.Conditions, constants.ConditionTypeMinAvailableBreached)
+
+			// Check if this PodClique has enough ready pods
+			hasEnoughReady := pclq.Status.ReadyReplicas >= *pclq.Spec.MinAvailable
+
+			// A PodClique is only available if it has enough ready pods AND is not breached
+			if !hasEnoughReady || isBreached {
+				allAvailable = false
+				break
+			}
 		}
-		logger.Info("PodCliqueScalingGroup replica has MinAvailableBreached condition set to true", "pcsgReplicaIndex", pcsgReplicaIndex, "isMinAvailableBreached", isMinAvailableBreached)
+		if allAvailable && len(pclqs) > 0 {
+			availableReplicas++
+		}
 	}
-	return breachedReplicas
+	return availableReplicas
 }
 
 func (r *Reconciler) getPodCliquesPerPCSGReplica(ctx context.Context, pcsName string, pcsgObjKey client.ObjectKey) (map[string][]grovecorev1alpha1.PodClique, error) {

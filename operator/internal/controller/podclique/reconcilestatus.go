@@ -14,6 +14,7 @@
 // limitations under the License.
 // */
 
+// Package podclique implements the PodClique controller which manages the lifecycle of pod groups.
 package podclique
 
 import (
@@ -68,6 +69,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 	// This prevents prematurely setting incorrect conditions.
 	if pclq.Status.ObservedGeneration != nil {
 		mutatePodCliqueScheduledCondition(pclq)
+		mutateWasOnceHealthyCondition(pclq)
 		mutateMinAvailableBreachedCondition(pclq,
 			len(podCategories[k8sutils.PodHasAtleastOneContainerWithNonZeroExitCode]),
 			len(podCategories[k8sutils.PodStartedButNotReady]))
@@ -160,10 +162,74 @@ func mutateSelector(pcsName string, pclq *grovecorev1alpha1.PodClique) error {
 	return nil
 }
 
+// mutateWasOnceHealthyCondition updates the WasOnceHealthy condition on the PodClique.
+//
+// The WasOnceHealthy condition enables gang termination to distinguish between:
+// - Initial State: Pods haven't been created/scheduled yet → Don't trigger termination
+// - Degraded State: Pods were running but got deleted/failed → DO trigger termination
+//
+// This prevents false positives during pod creation while ensuring gang termination
+// activates when the workload degrades (e.g., pods deleted for whatever reason).
+//
+// For more information on gang termination, see the following documentation
+// see docs/gang_termination_overview.md
+func mutateWasOnceHealthyCondition(pclq *grovecorev1alpha1.PodClique) {
+	newCondition := computeWasOnceHealthyCondition(pclq)
+	if k8sutils.HasConditionChanged(pclq.Status.Conditions, newCondition) {
+
+		meta.SetStatusCondition(&pclq.Status.Conditions, newCondition)
+	}
+}
+
 func mutateMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, numNotReadyPodsWithContainersInError, numPodsStartedButNotReady int) {
 	newCondition := computeMinAvailableBreachedCondition(pclq, numNotReadyPodsWithContainersInError, numPodsStartedButNotReady)
 	if k8sutils.HasConditionChanged(pclq.Status.Conditions, newCondition) {
 		meta.SetStatusCondition(&pclq.Status.Conditions, newCondition)
+	}
+}
+
+// computeWasOnceHealthyCondition calculates the WasOnceHealthy condition for the PodClique.
+// This is a one-way condition with a ratchet behavior:
+// 1. Starts as False when PodClique is created
+// 2. Transitions to True when readyReplicas >= minAvailable
+// 3. Never transitions back to False, even if pods are deleted/failed
+//
+// This one-way behavior is critical for distinguishing two scenarios that both have readyReplicas=0:
+//   - Initial Creation: PodClique just created, pods haven't started yet → DON'T trigger gang termination
+//   - Complete Degradation: PodClique was healthy, then ALL pods were lost → DO trigger gang termination
+//
+// The condition "remembers" that this PodClique was once healthy, so readyReplicas=0
+// after being healthy is treated as a true failure, not just initial pod creation delays
+func computeWasOnceHealthyCondition(pclq *grovecorev1alpha1.PodClique) metav1.Condition {
+	minAvailable := int(*pclq.Spec.MinAvailable)
+	readyReplicas := int(pclq.Status.ReadyReplicas)
+	now := metav1.Now()
+
+	// Check if WasOnceHealthy condition already exists and is True
+	wasOnceHealthyCond := meta.FindStatusCondition(pclq.Status.Conditions, constants.ConditionTypeWasOnceHealthy)
+	if wasOnceHealthyCond != nil && wasOnceHealthyCond.Status == metav1.ConditionTrue {
+		// Once True, always True - this is a one-way transition
+		return *wasOnceHealthyCond
+	}
+
+	// Check if we've achieved healthy state
+	if readyReplicas >= minAvailable {
+		return metav1.Condition{
+			Type:               constants.ConditionTypeWasOnceHealthy,
+			Status:             metav1.ConditionTrue,
+			Reason:             constants.ConditionReasonHealthyStateAchieved,
+			Message:            fmt.Sprintf("PodClique achieved healthy state with %d ready pods (minAvailable: %d)", readyReplicas, minAvailable),
+			LastTransitionTime: now,
+		}
+	}
+
+	// Not yet healthy
+	return metav1.Condition{
+		Type:               constants.ConditionTypeWasOnceHealthy,
+		Status:             metav1.ConditionFalse,
+		Reason:             constants.ConditionReasonNeverHealthy,
+		Message:            fmt.Sprintf("PodClique has not yet achieved healthy state. ready: %d, minAvailable: %d", readyReplicas, minAvailable),
+		LastTransitionTime: now,
 	}
 }
 
@@ -180,25 +246,48 @@ func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, num
 	// make sure that you check for nil explicitly.
 	minAvailable := int(*pclq.Spec.MinAvailable)
 	scheduledReplicas := int(pclq.Status.ScheduledReplicas)
+	readyReplicas := int(pclq.Status.ReadyReplicas)
 	now := metav1.Now()
 
-	// If the number of scheduled pods is less than the minimum available, then minAvailable is not considered as breached.
-	// Consider a case where none of the PodCliques have been scheduled yet, then it should not cause the PodGang to be recreated all the time.
-	if scheduledReplicas < minAvailable {
+	// Check if PodClique has ever been healthy
+	wasOnceHealthyCond := meta.FindStatusCondition(pclq.Status.Conditions, constants.ConditionTypeWasOnceHealthy)
+	wasOnceHealthy := wasOnceHealthyCond != nil && wasOnceHealthyCond.Status == metav1.ConditionTrue
+
+	// Special case: Complete pod loss (scheduledReplicas < minAvailable && readyReplicas == 0)
+	// The readyReplicas == 0 check ensures we only apply this logic when ALL pods are gone,
+	// not partial degradation. Partial cases are handled by readyOrStartingPods logic below.
+	//
+	// Use WasOnceHealthy to distinguish:
+	//   - Initial creation (WasOnceHealthy=false) → Don't trigger gang termination
+	//   - Complete degradation (WasOnceHealthy=true) → Trigger gang termination
+	if scheduledReplicas < minAvailable && readyReplicas == 0 {
+		if !wasOnceHealthy {
+			return metav1.Condition{
+				Type:               constants.ConditionTypeMinAvailableBreached,
+				Status:             metav1.ConditionFalse,
+				Reason:             constants.ConditionReasonInsufficientScheduledPods,
+				Message:            fmt.Sprintf("Initial state: insufficient scheduled pods. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
+				LastTransitionTime: now,
+			}
+		}
 		return metav1.Condition{
 			Type:               constants.ConditionTypeMinAvailableBreached,
-			Status:             metav1.ConditionFalse,
+			Status:             metav1.ConditionTrue,
 			Reason:             constants.ConditionReasonInsufficientScheduledPods,
-			Message:            fmt.Sprintf("Insufficient scheduled pods. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
+			Message:            fmt.Sprintf("Degraded state: insufficient scheduled pods. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
 			LastTransitionTime: now,
 		}
 	}
 
+	// Normal Case: Check if we have sufficient ready or starting pods
+	// Calculate readyOrStartingPods by excluding:
+	// - Pods with containers that have exited with non-zero exit codes (failed containers)
+	// - Pods that have started but are not yet ready (still initializing)
+	//
+	// This gives pods with long-running init containers or slow startup time a grace period
+	// before they are considered unavailable and trigger gang termination.
 	readyOrStartingPods := scheduledReplicas - numPodsHavingAtleastOneContainerWithNonZeroExitCode - numPodsStartedButNotReady
-	// pclq.Status.ReadyReplicas do not account for Pods which are not yet ready and are in the process of starting/initializing.
-	// This allows sufficient time specially for pods that have long-running init containers or slow-to-start main containers.
-	// Therefore, we take Pods that are NotReady and at least one of their containers have exited with a non-zero exit code. Kubelet
-	// has attempted to start the containers within the Pod at least once and failed. These pods count towards unavailability.
+
 	if readyOrStartingPods < minAvailable {
 		return metav1.Condition{
 			Type:               constants.ConditionTypeMinAvailableBreached,

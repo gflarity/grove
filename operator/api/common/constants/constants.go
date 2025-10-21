@@ -72,6 +72,10 @@ const (
 	// ConditionTypePodCliqueScheduled indicates that the PodClique has been successfully scheduled.
 	// This condition is set to true when number of scheduled pods in the PodClique is greater than or equal to PodCliqueSpec.MinAvailable.
 	ConditionTypePodCliqueScheduled = "PodCliqueScheduled"
+	// ConditionTypeWasOnceHealthy indicates that the PodClique has achieved healthy state at least once (readyReplicas >= minAvailable).
+	// This is a one-way condition that transitions from False to True and never transitions back to False.
+	// It is used to distinguish between initial pod creation and degraded state for gang termination purposes.
+	ConditionTypeWasOnceHealthy = "WasOnceHealthy"
 )
 
 // Constants for Condition Reasons.
@@ -92,6 +96,10 @@ const (
 	ConditionReasonSufficientAvailablePCSGReplicas = "SufficientAvailablePodCliqueScalingGroupReplicas"
 	// ConditionReasonUpdateInProgress indicates that the resource is undergoing rolling update.
 	ConditionReasonUpdateInProgress = "UpdateInProgress"
+	// ConditionReasonHealthyStateAchieved indicates that the PodClique has achieved healthy state (readyReplicas >= minAvailable).
+	ConditionReasonHealthyStateAchieved = "HealthyStateAchieved"
+	// ConditionReasonNeverHealthy indicates that the PodClique has never achieved healthy state.
+	ConditionReasonNeverHealthy = "NeverHealthy"
 )
 
 const (
