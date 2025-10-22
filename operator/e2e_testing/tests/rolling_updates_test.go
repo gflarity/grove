@@ -65,7 +65,7 @@ func Test_RU7_RollingUpdatePCSPodClique(t *testing.T) {
 	}
 
 	expectedPods := 10
-	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, 1*time.Minute, logger); err != nil {
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func Test_RU8_RollingUpdatePCSGPodClique(t *testing.T) {
 	}
 
 	expectedPods := 10
-	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, 1*time.Minute, logger); err != nil {
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -230,7 +230,7 @@ func Test_RU9_RollingUpdateAllPodCliques(t *testing.T) {
 	}
 
 	expectedPods := 10
-	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, 1*time.Minute, logger); err != nil {
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -316,7 +316,7 @@ func Test_RU10_RollingUpdateInsufficientResources(t *testing.T) {
 		t.Fatalf("Failed to apply workload YAML: %v", err)
 	}
 
-	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, 1*time.Minute, logger); err != nil {
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -405,6 +405,951 @@ func Test_RU10_RollingUpdateInsufficientResources(t *testing.T) {
 	}
 
 	logger.Info("🎉 Rolling Update with insufficient resources test (RU-10) completed successfully!")
+}
+
+// Test_RU11_RollingUpdateWithPCSScaleOut tests rolling update with scale-out on PCS
+// Scenario RU-11:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a
+// 4. Scale out the PCS during the rolling update
+// 5. Verify the scaled out replica is created with the correct specifications
+func Test_RU11_RollingUpdateWithPCSScaleOut(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	// Scale PCS to 2 replicas first
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a")
+	err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", "pc-a")
+	if err != nil {
+		t.Fatalf("Failed to update PodClique spec: %v", err)
+	}
+
+	// Wait a bit for rolling update to start
+	time.Sleep(5 * time.Second)
+
+	logger.Info("4. Scale out the PCS during the rolling update")
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 3, 30, 0)
+
+	// Wait for rolling update to complete
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 3, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	logger.Info("5. Verify the scaled out replica is created with the correct specifications")
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 30 {
+		t.Fatalf("Expected 30 pods after scale-out, got %d", len(pods.Items))
+	}
+
+	// Verify all pods have the updated spec
+	events := tracker.getEvents()
+	logger.Debugf("Captured %d pod events during rolling update", len(events))
+
+	logger.Info("🎉 Rolling Update with PCS scale-out test (RU-11) completed successfully!")
+}
+
+// Test_RU12_RollingUpdateWithPCSScaleInDuringUpdate tests rolling update with scale-in on PCS while final ordinal is being updated
+// Scenario RU-12:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a, pc-b and pc-c
+// 4. Scale in the PCS while the final ordinal is being updated
+// 5. Verify the update goes through successfully
+func Test_RU12_RollingUpdateWithPCSScaleInDuringUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	// Wait for rolling update to progress to final ordinal
+	time.Sleep(10 * time.Second)
+
+	logger.Info("4. Scale in the PCS while the final ordinal is being updated")
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 1, 10, 0)
+
+	logger.Info("5. Verify the update goes through successfully")
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 1, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 10 {
+		t.Fatalf("Expected 10 pods after scale-in, got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PCS scale-in during update test (RU-12) completed successfully!")
+}
+
+// Test_RU13_RollingUpdateWithPCSScaleInAfterFinalOrdinal tests rolling update with scale-in on PCS after final ordinal finishes
+// Scenario RU-13:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a, pc-b and pc-c
+// 4. Wait for rolling update to complete on replica 1
+// 5. Scale in the PCS after final ordinal has been updated
+// 6. Verify the update goes through successfully
+func Test_RU13_RollingUpdateWithPCSScaleInAfterFinalOrdinal(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	logger.Info("4. Wait for rolling update to complete on both replicas")
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	logger.Info("5. Scale in the PCS after final ordinal has been updated")
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 1, 10, 0)
+
+	logger.Info("6. Verify the update goes through successfully")
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 10 {
+		t.Fatalf("Expected 10 pods after scale-in, got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PCS scale-in after final ordinal test (RU-13) completed successfully!")
+}
+
+// Test_RU14_RollingUpdateWithPCSGScaleOutDuringUpdate tests rolling update with scale-out on PCSG being updated
+// Scenario RU-14:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a, pc-b and pc-c
+// 4. Scale out the PCSG during its rolling update
+// 5. Verify the scaled out replica is created with the correct specifications
+// 6. Verify it should not be updated again before the rolling update ends
+func Test_RU14_RollingUpdateWithPCSGScaleOutDuringUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	// Wait for rolling update to start
+	time.Sleep(5 * time.Second)
+
+	logger.Info("4. Scale out the PCSG during its rolling update")
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "sg-x", 3, 26, 0)
+
+	logger.Info("5. Verify the scaled out replica is created with the correct specifications")
+	logger.Info("6. Verify it should not be updated again before the rolling update ends")
+
+	// Wait for rolling update to complete
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 26 {
+		t.Fatalf("Expected 26 pods after PCSG scale-out (2 pc-a + 12 pc-b + 12 pc-c), got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PCSG scale-out during update test (RU-14) completed successfully!")
+}
+
+// Test_RU15_RollingUpdateWithPCSGScaleOutBeforeUpdate tests rolling update with scale-out on PCSG before it is updated
+// Scenario RU-15:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a, pc-b and pc-c
+// 4. Scale out the PCSG before its rolling update starts
+// 5. Verify the scaled out replica is created with the correct specifications
+// 6. Verify it should not be updated again before the rolling update ends
+func Test_RU15_RollingUpdateWithPCSGScaleOutBeforeUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	logger.Info("4. Scale out the PCSG before its rolling update starts")
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "sg-x", 3, 26, 0)
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	logger.Info("5. Verify the scaled out replica is created with the correct specifications")
+	logger.Info("6. Verify it should not be updated again before the rolling update ends")
+
+	// Wait for rolling update to complete
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 26 {
+		t.Fatalf("Expected 26 pods after PCSG scale-out, got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PCSG scale-out before update test (RU-15) completed successfully!")
+}
+
+// Test_RU16_RollingUpdateWithPCSGScaleInDuringUpdate tests rolling update with scale-in on PCSG being updated
+// Scenario RU-16:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a, pc-b and pc-c
+// 4. Scale in the PCSG during its rolling update
+// 5. Verify the update goes through successfully
+func Test_RU16_RollingUpdateWithPCSGScaleInDuringUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	// Wait for rolling update to start
+	time.Sleep(5 * time.Second)
+
+	logger.Info("4. Scale in the PCSG during its rolling update")
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "sg-x", 1, 14, 0)
+
+	logger.Info("5. Verify the update goes through successfully")
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 14 {
+		t.Fatalf("Expected 14 pods after PCSG scale-in (2 pc-a + 4 pc-b + 4 pc-c), got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PCSG scale-in during update test (RU-16) completed successfully!")
+}
+
+// Test_RU17_RollingUpdateWithPCSGScaleInBeforeUpdate tests rolling update with scale-in on PCSG before it is updated
+// Scenario RU-17:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a, pc-b and pc-c
+// 4. Scale in the PCSG before its rolling update starts
+// 5. Verify the update goes through successfully
+func Test_RU17_RollingUpdateWithPCSGScaleInBeforeUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	logger.Info("4. Scale in the PCSG before its rolling update starts")
+	scalePCSGAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "sg-x", 1, 14, 0)
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	logger.Info("5. Verify the update goes through successfully")
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 14 {
+		t.Fatalf("Expected 14 pods after PCSG scale-in, got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PCSG scale-in before update test (RU-17) completed successfully!")
+}
+
+// Test_RU18_RollingUpdateWithPodCliqueScaleOutDuringUpdate tests rolling update with scale-out on standalone PCLQ being updated
+// Scenario RU-18:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a, pc-b and pc-c
+// 4. Scale out the standalone PCLQ (pc-a) during its rolling update
+// 5. Verify the scaled pods are created with the correct specifications
+// 6. Verify they should not be updated again before the rolling update ends
+func Test_RU18_RollingUpdateWithPodCliqueScaleOutDuringUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	// Wait for rolling update to start
+	time.Sleep(5 * time.Second)
+
+	logger.Info("4. Scale out the standalone PCLQ (pc-a) during its rolling update")
+	if err := scalePodCliqueInPCS(ctx, dynamicClient, workloadNamespace, "workload1", "pc-a", 4); err != nil {
+		t.Fatalf("Failed to scale PodClique pc-a: %v", err)
+	}
+
+	// Wait for new pods to be created
+	err = pollForCondition(ctx, defaultPollTimeout, defaultPollInterval, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+		return len(pods.Items) >= 24, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for scaled pods: %v", err)
+	}
+
+	logger.Info("5. Verify the scaled pods are created with the correct specifications")
+	logger.Info("6. Verify they should not be updated again before the rolling update ends")
+
+	// Wait for rolling update to complete
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 24 {
+		t.Fatalf("Expected 24 pods after PodClique scale-out (4 pc-a + 4 pc-b + 12 pc-c), got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PodClique scale-out during update test (RU-18) completed successfully!")
+}
+
+// Test_RU19_RollingUpdateWithPodCliqueScaleOutBeforeUpdate tests rolling update with scale-out on standalone PCLQ before it is updated
+// Scenario RU-19:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Scale out the standalone PCLQ (pc-a) before its rolling update
+// 4. Change the specification of pc-a, pc-b and pc-c
+// 5. Verify the scaled pods are created with the correct specifications
+// 6. Verify they should not be updated again before the rolling update ends
+func Test_RU19_RollingUpdateWithPodCliqueScaleOutBeforeUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	logger.Info("3. Scale out the standalone PCLQ (pc-a) before its rolling update")
+	if err := scalePodCliqueInPCS(ctx, dynamicClient, workloadNamespace, "workload1", "pc-a", 4); err != nil {
+		t.Fatalf("Failed to scale PodClique pc-a: %v", err)
+	}
+
+	// Wait for new pods to be created
+	err = pollForCondition(ctx, defaultPollTimeout, defaultPollInterval, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+		return len(pods.Items) >= 24, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for scaled pods: %v", err)
+	}
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for scaled pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("4. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	logger.Info("5. Verify the scaled pods are created with the correct specifications")
+	logger.Info("6. Verify they should not be updated again before the rolling update ends")
+
+	// Wait for rolling update to complete
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 24 {
+		t.Fatalf("Expected 24 pods after PodClique scale-out, got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PodClique scale-out before update test (RU-19) completed successfully!")
+}
+
+// Test_RU20_RollingUpdateWithPodCliqueScaleInDuringUpdate tests rolling update with scale-in on standalone PCLQ being updated
+// Scenario RU-20:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Change the specification of pc-a, pc-b and pc-c
+// 4. Scale in the standalone PCLQ (pc-a) during its rolling update
+// 5. Verify the update goes through successfully
+func Test_RU20_RollingUpdateWithPodCliqueScaleInDuringUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("3. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	// Wait for rolling update to start
+	time.Sleep(5 * time.Second)
+
+	logger.Info("4. Scale in the standalone PCLQ (pc-a) during its rolling update")
+	if err := scalePodCliqueInPCS(ctx, dynamicClient, workloadNamespace, "workload1", "pc-a", 1); err != nil {
+		t.Fatalf("Failed to scale PodClique pc-a: %v", err)
+	}
+
+	logger.Info("5. Verify the update goes through successfully")
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 18 {
+		t.Fatalf("Expected 18 pods after PodClique scale-in (1 pc-a per replica), got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PodClique scale-in during update test (RU-20) completed successfully!")
+}
+
+// Test_RU21_RollingUpdateWithPodCliqueScaleInBeforeUpdate tests rolling update with scale-in on standalone PCLQ before it is updated
+// Scenario RU-21:
+// 1. Initialize a 2-node Grove cluster
+// 2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods
+// 3. Scale in the standalone PCLQ (pc-a) before its rolling update
+// 4. Change the specification of pc-a, pc-b and pc-c
+// 5. Verify the update goes through successfully
+func Test_RU21_RollingUpdateWithPodCliqueScaleInBeforeUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 2-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 2)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload WL1 with 2 replicas, and verify 20 newly created pods")
+	workloadNamespace := "default"
+	workloadYAMLPath := "../yaml/workload1.yaml"
+	workloadLabelSelector := "app.kubernetes.io/part-of=workload1"
+
+	_, err := utils.ApplyYAMLFile(ctx, workloadYAMLPath, workloadNamespace, restConfig, logger)
+	if err != nil {
+		t.Fatalf("Failed to apply workload YAML: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create dynamic client: %v", err)
+	}
+
+	scalePCSAndWait(t, ctx, clientset, dynamicClient, workloadNamespace, workloadLabelSelector, "workload1", 2, 20, 0)
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	logger.Info("3. Scale in the standalone PCLQ (pc-a) before its rolling update")
+	if err := scalePodCliqueInPCS(ctx, dynamicClient, workloadNamespace, "workload1", "pc-a", 1); err != nil {
+		t.Fatalf("Failed to scale PodClique pc-a: %v", err)
+	}
+
+	// Wait for pods to be deleted
+	err = pollForCondition(ctx, defaultPollTimeout, defaultPollInterval, func() (bool, error) {
+		pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: workloadLabelSelector,
+		})
+		if err != nil {
+			return false, err
+		}
+		return len(pods.Items) <= 18, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to wait for pods to be scaled in: %v", err)
+	}
+
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
+		t.Fatalf("Failed to wait for remaining pods to be ready: %v", err)
+	}
+
+	tracker := newRollingUpdateTracker()
+	if err := tracker.Start(ctx, clientset, workloadNamespace, workloadLabelSelector); err != nil {
+		t.Fatalf("Failed to start tracker: %v", err)
+	}
+	defer tracker.Stop()
+
+	if err := tracker.WaitForReady(); err != nil {
+		t.Fatalf("Failed to wait for tracker to be ready: %v", err)
+	}
+
+	logger.Info("4. Change the specification of pc-a, pc-b and pc-c")
+	for _, cliqueName := range []string{"pc-a", "pc-b", "pc-c"} {
+		err = triggerPodCliqueRollingUpdate(ctx, dynamicClient, workloadNamespace, "workload1", cliqueName)
+		if err != nil {
+			t.Fatalf("Failed to update PodClique %s spec: %v", cliqueName, err)
+		}
+	}
+
+	logger.Info("5. Verify the update goes through successfully")
+	if err := waitForRollingUpdateComplete(ctx, dynamicClient, workloadNamespace, "workload1", 2, 2*time.Minute); err != nil {
+		t.Fatalf("Failed to wait for rolling update to complete: %v", err)
+	}
+
+	tracker.Stop()
+
+	pods, err := clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: workloadLabelSelector,
+	})
+	if err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+
+	if len(pods.Items) != 18 {
+		t.Fatalf("Expected 18 pods after PodClique scale-in, got %d", len(pods.Items))
+	}
+
+	logger.Info("🎉 Rolling Update with PodClique scale-in before update test (RU-21) completed successfully!")
 }
 
 // podEvent represents a pod lifecycle event during rolling update
@@ -1087,6 +2032,72 @@ func verifyOnePCSGReplicaDeletedAtATimePerPCSG(t *testing.T, events []podEvent) 
 	for pcsg, maxDeletions := range maxConcurrentDeletionsPerPCSG {
 		if maxDeletions > 1 {
 			t.Fatalf("Expected at most 1 replica being deleted at a time in PCSG %s, but found %d concurrent deletions", pcsg, maxDeletions)
+		}
+	}
+}
+
+// scalePodCliqueInPCS scales a specific PodClique within a PodCliqueSet by updating its replicas field
+func scalePodCliqueInPCS(ctx context.Context, dynamicClient dynamic.Interface, namespace, pcsName, cliqueName string, replicas int32) error {
+	pcsGVR := schema.GroupVersionResource{Group: "grove.io", Version: "v1alpha1", Resource: "podcliquesets"}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		unstructuredPCS, err := dynamicClient.Resource(pcsGVR).Namespace(namespace).Get(ctx, pcsName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get PodCliqueSet: %w", err)
+		}
+
+		var pcs grovev1alpha1.PodCliqueSet
+		err = convertUnstructuredToTyped(unstructuredPCS.Object, &pcs)
+		if err != nil {
+			return fmt.Errorf("failed to convert to PodCliqueSet: %w", err)
+		}
+
+		found := false
+		for i, clique := range pcs.Spec.Template.Cliques {
+			if clique.Name == cliqueName {
+				pcs.Spec.Template.Cliques[i].Spec.Replicas = replicas
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			return fmt.Errorf("clique %s not found in PodCliqueSet %s", cliqueName, pcsName)
+		}
+
+		updatedUnstructured, err := convertTypedToUnstructured(&pcs)
+		if err != nil {
+			return fmt.Errorf("failed to convert to unstructured: %w", err)
+		}
+
+		_, err = dynamicClient.Resource(pcsGVR).Namespace(namespace).Update(ctx, updatedUnstructured, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// verifyPodSpecHasEnvVar verifies that pods with a specific label have the expected environment variable value
+func verifyPodSpecHasEnvVar(t *testing.T, pods []corev1.Pod, envVarName, expectedValue string) {
+	t.Helper()
+
+	for _, pod := range pods {
+		if len(pod.Spec.Containers) == 0 {
+			t.Fatalf("Pod %s has no containers", pod.Name)
+		}
+
+		found := false
+		for _, env := range pod.Spec.Containers[0].Env {
+			if env.Name == envVarName {
+				if env.Value != expectedValue {
+					t.Fatalf("Pod %s has incorrect env var %s value: expected %s, got %s",
+						pod.Name, envVarName, expectedValue, env.Value)
+				}
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			t.Fatalf("Pod %s does not have env var %s", pod.Name, envVarName)
 		}
 	}
 }
