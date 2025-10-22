@@ -74,7 +74,7 @@ func Test_SO1_InorderStartupOrderWithFullReplicas(t *testing.T) {
 	expectedPods := 10 // pc-a: 2 replicas, pc-b: 1*2 (scaling group), pc-c: 3*2 (scaling group) = 2+2+6=10
 
 	var pods *v1.PodList
-	err = pollForCondition(ctx, 1*time.Minute, 1*time.Second, func() (bool, error) {
+	err = pollForCondition(ctx, defaultPollTimeout, defaultPollInterval, func() (bool, error) {
 		var err error
 		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
@@ -89,7 +89,7 @@ func Test_SO1_InorderStartupOrderWithFullReplicas(t *testing.T) {
 	}
 
 	logger.Info("3. Wait for pods to get scheduled and become ready")
-	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, 10*time.Minute, logger); err != nil {
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -132,21 +132,20 @@ func Test_SO1_InorderStartupOrderWithFullReplicas(t *testing.T) {
 
 // Test_SO2_InorderStartupOrderWithMinReplicas tests inorder startup with min replicas
 // Scenario SO-2:
-//  1. Initialize a 10-node Grove cluster
+//  1. Initialize a 6-node Grove cluster
 //  2. Deploy workload WL4, and verify 10 newly created pods
-//  3. Wait for 10 pods get scheduled and become ready:
+//  3. Wait for 6 pods to get scheduled and become ready (4 will be unschedulable since there are only 6 nodes available):
 //     pcs-0-{pc-a = 2}
-//     pcs-0-{sg-x-0-pc-b = 1, sg-x-0-pc-c = 3} (base PodGang)
-//     pcs-0-{sg-x-1-pc-b = 1, sg-x-1-pc-c = 3} (scaled PodGang - independent)
-//  4. Verify startup order within each gang:
-//     - pc-a starts before scaling groups
-//     - Within sg-x-0: pc-a → pc-b → pc-c
-//     - Within sg-x-1: pc-b → pc-c (independent from sg-x-0)
+//     pcs-0-{sg-x-0-pc-b = 1, sg-x-0-pc-c = 3}
+//  4. Verify each print clique prints in the following order:
+//     pcs-0-pc-a
+//     pcs-0-sg-x-0-pc-b
+//     pcs-0-sg-x-0-pc-c
 func Test_SO2_InorderStartupOrderWithMinReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	logger.Info("1. Initialize a 10-node Grove cluster")
-	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 10)
+	logger.Info("1. Initialize a 6-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 6)
 	defer cleanup()
 
 	logger.Info("2. Deploy workload WL4, and verify 10 newly created pods")
@@ -176,13 +175,12 @@ func Test_SO2_InorderStartupOrderWithMinReplicas(t *testing.T) {
 		t.Fatalf("Failed to wait for pods to be created: %v", err)
 	}
 
-	logger.Info("3. Wait for 10 pods get scheduled and become ready:")
+	logger.Info("3. Wait for 6 pods to get scheduled and become ready (4 will be unschedulable):")
 	logger.Info("   pcs-0-{pc-a = 2}")
-	logger.Info("   pcs-0-{sg-x-0-pc-b = 1, sg-x-0-pc-c = 3} (there are 2 replicas)")
-	logger.Info("   pcs-0-{sg-x-1-pc-b = 1, sg-x-1-pc-c = 3}")
+	logger.Info("   pcs-0-{sg-x-0-pc-b = 1, sg-x-0-pc-c = 3}")
 
-	// Wait for all 10 pods to become running
-	err = pollForCondition(ctx, 10*time.Minute, 5*time.Second, func() (bool, error) {
+	// Wait for 6 pods to become running (4 will remain unschedulable due to insufficient nodes)
+	err = pollForCondition(ctx, defaultPollTimeout, defaultPollInterval, func() (bool, error) {
 		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
 		})
@@ -195,16 +193,16 @@ func Test_SO2_InorderStartupOrderWithMinReplicas(t *testing.T) {
 				runningPods++
 			}
 		}
-		return runningPods == 10, nil
+		return runningPods == 6, nil
 	})
 	if err != nil {
-		t.Fatalf("Failed to wait for 10 pods to be running: %v", err)
+		t.Fatalf("Failed to wait for 6 pods to be running: %v", err)
 	}
 
-	logger.Info("4. Verify startup order within each gang:")
-	logger.Info("   pc-a starts before scaling groups")
-	logger.Info("   Within sg-x-0 (base): pc-a → pc-b → pc-c")
-	logger.Info("   Within sg-x-1 (scaled): pc-b → pc-c (independent)")
+	logger.Info("4. Verify each print clique prints in the following order:")
+	logger.Info("   pcs-0-pc-a")
+	logger.Info("   pcs-0-sg-x-0-pc-b")
+	logger.Info("   pcs-0-sg-x-0-pc-c")
 
 	// Get running pods by clique pattern
 	var runningPodsList []v1.Pod
@@ -215,46 +213,26 @@ func Test_SO2_InorderStartupOrderWithMinReplicas(t *testing.T) {
 	}
 
 	pcAPods := getPodsByCliquePattern(runningPodsList, "-pc-a-")
-	pcBPods := getPodsByCliquePattern(runningPodsList, "-pc-b-")
-	pcCPods := getPodsByCliquePattern(runningPodsList, "-pc-c-")
+	sgX0PCBPods := getPodsByCliquePattern(runningPodsList, "-sg-x-0-pc-b-")
+	sgX0PCCPods := getPodsByCliquePattern(runningPodsList, "-sg-x-0-pc-c-")
 
 	// Verify we have the expected number of running pods
 	if len(pcAPods) != 2 {
 		t.Fatalf("Expected 2 running pc-a pods, got %d", len(pcAPods))
 	}
-	if len(pcBPods) != 2 {
-		t.Fatalf("Expected 2 running pc-b pods (1 per scaling group replica), got %d", len(pcBPods))
+	if len(sgX0PCBPods) != 1 {
+		t.Fatalf("Expected 1 running sg-x-0-pc-b pod, got %d", len(sgX0PCBPods))
 	}
-	if len(pcCPods) != 6 {
-		t.Fatalf("Expected 6 running pc-c pods (3 per scaling group replica), got %d", len(pcCPods))
-	}
-
-	// With minAvailable=1 for the scaling group:
-	// - sg-x-0 (replica 0) is the base PodGang
-	// - sg-x-1 (replica 1) is a scaled PodGang (independent)
-	// Startup ordering is enforced WITHIN each gang, not globally across all gangs.
-	// We need to verify ordering separately for each scaling group replica.
-
-	// InOrder startup: pc-a → pc-b → pc-c (within each gang)
-
-	// First verify pc-a starts before any scaling group pods
-	allScalingGroupPods := append([]v1.Pod{}, pcBPods...)
-	allScalingGroupPods = append(allScalingGroupPods, pcCPods...)
-	verifyGroupStartupOrder(t, pcAPods, allScalingGroupPods, "pc-a", "scaling-groups")
-
-	// Verify ordering within sg-x-0 (base gang): pc-b → pc-c
-	sgX0PCBPods := getPodsByCliquePattern(pcBPods, "-sg-x-0-")
-	sgX0PCCPods := getPodsByCliquePattern(pcCPods, "-sg-x-0-")
-	if len(sgX0PCBPods) > 0 && len(sgX0PCCPods) > 0 {
-		verifyGroupStartupOrder(t, sgX0PCBPods, sgX0PCCPods, "sg-x-0-pc-b", "sg-x-0-pc-c")
+	if len(sgX0PCCPods) != 3 {
+		t.Fatalf("Expected 3 running sg-x-0-pc-c pods, got %d", len(sgX0PCCPods))
 	}
 
-	// Verify ordering within sg-x-1 (scaled gang): pc-b → pc-c
-	sgX1PCBPods := getPodsByCliquePattern(pcBPods, "-sg-x-1-")
-	sgX1PCCPods := getPodsByCliquePattern(pcCPods, "-sg-x-1-")
-	if len(sgX1PCBPods) > 0 && len(sgX1PCCPods) > 0 {
-		verifyGroupStartupOrder(t, sgX1PCBPods, sgX1PCCPods, "sg-x-1-pc-b", "sg-x-1-pc-c")
-	}
+	// Verify startup ordering: pc-a → sg-x-0-pc-b → sg-x-0-pc-c
+	// First verify pc-a starts before sg-x-0-pc-b
+	verifyGroupStartupOrder(t, pcAPods, sgX0PCBPods, "pcs-0-pc-a", "pcs-0-sg-x-0-pc-b")
+
+	// Then verify sg-x-0-pc-b starts before sg-x-0-pc-c
+	verifyGroupStartupOrder(t, sgX0PCBPods, sgX0PCCPods, "pcs-0-sg-x-0-pc-b", "pcs-0-sg-x-0-pc-c")
 
 	logger.Info("🎉 Inorder startup order with min replicas test completed successfully!")
 }
@@ -303,7 +281,7 @@ func Test_SO3_ExplicitStartupOrderWithFullReplicas(t *testing.T) {
 	}
 
 	logger.Info("3. Wait for pods to get scheduled and become ready")
-	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, 10*time.Minute, logger); err != nil {
+	if err := utils.WaitForPods(ctx, restConfig, []string{workloadNamespace}, workloadLabelSelector, defaultPollTimeout, defaultPollInterval, logger); err != nil {
 		t.Fatalf("Failed to wait for pods to be ready: %v", err)
 	}
 
@@ -347,21 +325,20 @@ func Test_SO3_ExplicitStartupOrderWithFullReplicas(t *testing.T) {
 
 // Test_SO4_ExplicitStartupOrderWithMinReplicas tests explicit startup order with min replicas
 // Scenario SO-4:
-//  1. Initialize a 10-node Grove cluster
+//  1. Initialize a 6-node Grove cluster
 //  2. Deploy workload WL6, and verify 10 newly created pods
-//  3. Wait for 10 pods get scheduled and become ready:
+//  3. Wait for 6 pods to get scheduled and become ready (4 will be unschedulable since there are only 6 nodes available):
 //     pcs-0-{pc-a = 2}
-//     pcs-0-{sg-x-0-pc-b = 1, sg-x-0-pc-c = 3} (base PodGang)
-//     pcs-0-{sg-x-1-pc-b = 1, sg-x-1-pc-c = 3} (scaled PodGang - independent)
-//  4. Verify startup order within each gang (explicit dependency: pc-c startsAfter pc-b):
-//     - pc-a starts before scaling groups
-//     - Within sg-x-0: pc-a → pc-b → pc-c
-//     - Within sg-x-1: pc-b → pc-c (independent from sg-x-0)
+//     pcs-0-{sg-x-0-pc-b = 1, sg-x-0-pc-c = 3}
+//  4. Verify each print clique prints in the following order:
+//     pcs-0-pc-a
+//     pcs-0-sg-x-0-pc-b
+//     pcs-0-sg-x-0-pc-c
 func Test_SO4_ExplicitStartupOrderWithMinReplicas(t *testing.T) {
 	ctx := context.Background()
 
-	logger.Info("1. Initialize a 10-node Grove cluster")
-	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 10)
+	logger.Info("1. Initialize a 6-node Grove cluster")
+	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 6)
 	defer cleanup()
 
 	logger.Info("2. Deploy workload WL6, and verify 10 newly created pods")
@@ -391,12 +368,11 @@ func Test_SO4_ExplicitStartupOrderWithMinReplicas(t *testing.T) {
 		t.Fatalf("Failed to wait for pods to be created: %v", err)
 	}
 
-	logger.Info("3. Wait for 10 pods get scheduled and become ready:")
+	logger.Info("3. Wait for 6 pods to get scheduled and become ready (4 will be unschedulable):")
 	logger.Info("   pcs-0-{pc-a = 2}")
-	logger.Info("   pcs-0-{sg-x-0-pc-b = 1, sg-x-0-pc-c = 3} (there are 2 replicas)")
-	logger.Info("   pcs-0-{sg-x-1-pc-b = 1, sg-x-1-pc-c = 3}")
+	logger.Info("   pcs-0-{sg-x-0-pc-b = 1, sg-x-0-pc-c = 3}")
 
-	// Wait for all 10 pods to become running
+	// Wait for 6 pods to become running (4 will remain unschedulable due to insufficient nodes)
 	err = pollForCondition(ctx, 10*time.Minute, 5*time.Second, func() (bool, error) {
 		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
@@ -410,16 +386,16 @@ func Test_SO4_ExplicitStartupOrderWithMinReplicas(t *testing.T) {
 				runningPods++
 			}
 		}
-		return runningPods == 10, nil
+		return runningPods == 6, nil
 	})
 	if err != nil {
-		t.Fatalf("Failed to wait for 10 pods to be running: %v", err)
+		t.Fatalf("Failed to wait for 6 pods to be running: %v", err)
 	}
 
-	logger.Info("4. Verify startup order within each gang:")
-	logger.Info("   pc-a starts before scaling groups")
-	logger.Info("   Within sg-x-0 (base): pc-a → pc-b → pc-c (explicit dependency)")
-	logger.Info("   Within sg-x-1 (scaled): pc-b → pc-c (independent)")
+	logger.Info("4. Verify each print clique prints in the following order:")
+	logger.Info("   pcs-0-pc-a")
+	logger.Info("   pcs-0-sg-x-0-pc-b")
+	logger.Info("   pcs-0-sg-x-0-pc-c")
 
 	// Get running pods by clique pattern
 	var runningPodsList []v1.Pod
@@ -430,46 +406,26 @@ func Test_SO4_ExplicitStartupOrderWithMinReplicas(t *testing.T) {
 	}
 
 	pcAPods := getPodsByCliquePattern(runningPodsList, "-pc-a-")
-	pcBPods := getPodsByCliquePattern(runningPodsList, "-pc-b-")
-	pcCPods := getPodsByCliquePattern(runningPodsList, "-pc-c-")
+	sgX0PCBPods := getPodsByCliquePattern(runningPodsList, "-sg-x-0-pc-b-")
+	sgX0PCCPods := getPodsByCliquePattern(runningPodsList, "-sg-x-0-pc-c-")
 
 	// Verify we have the expected number of running pods
 	if len(pcAPods) != 2 {
 		t.Fatalf("Expected 2 running pc-a pods, got %d", len(pcAPods))
 	}
-	if len(pcBPods) != 2 {
-		t.Fatalf("Expected 2 running pc-b pods (1 per scaling group replica), got %d", len(pcBPods))
+	if len(sgX0PCBPods) != 1 {
+		t.Fatalf("Expected 1 running sg-x-0-pc-b pod, got %d", len(sgX0PCBPods))
 	}
-	if len(pcCPods) != 6 {
-		t.Fatalf("Expected 6 running pc-c pods (3 per scaling group replica), got %d", len(pcCPods))
-	}
-
-	// With minAvailable=1 for the scaling group:
-	// - sg-x-0 (replica 0) is the base PodGang
-	// - sg-x-1 (replica 1) is a scaled PodGang (independent)
-	// Startup ordering is enforced WITHIN each gang, not globally across all gangs.
-	// We need to verify ordering separately for each scaling group replica.
-
-	// Explicit startup: pc-a → pc-b → pc-c (pc-c has startsAfter: [pc-b])
-
-	// First verify pc-a starts before any scaling group pods
-	allScalingGroupPods := append([]v1.Pod{}, pcBPods...)
-	allScalingGroupPods = append(allScalingGroupPods, pcCPods...)
-	verifyGroupStartupOrder(t, pcAPods, allScalingGroupPods, "pc-a", "scaling-groups")
-
-	// Verify ordering within sg-x-0 (base gang): pc-b → pc-c
-	sgX0PCBPods := getPodsByCliquePattern(pcBPods, "-sg-x-0-")
-	sgX0PCCPods := getPodsByCliquePattern(pcCPods, "-sg-x-0-")
-	if len(sgX0PCBPods) > 0 && len(sgX0PCCPods) > 0 {
-		verifyGroupStartupOrder(t, sgX0PCBPods, sgX0PCCPods, "sg-x-0-pc-b", "sg-x-0-pc-c")
+	if len(sgX0PCCPods) != 3 {
+		t.Fatalf("Expected 3 running sg-x-0-pc-c pods, got %d", len(sgX0PCCPods))
 	}
 
-	// Verify ordering within sg-x-1 (scaled gang): pc-b → pc-c
-	sgX1PCBPods := getPodsByCliquePattern(pcBPods, "-sg-x-1-")
-	sgX1PCCPods := getPodsByCliquePattern(pcCPods, "-sg-x-1-")
-	if len(sgX1PCBPods) > 0 && len(sgX1PCCPods) > 0 {
-		verifyGroupStartupOrder(t, sgX1PCBPods, sgX1PCCPods, "sg-x-1-pc-b", "sg-x-1-pc-c")
-	}
+	// Verify startup ordering: pc-a → sg-x-0-pc-b → sg-x-0-pc-c
+	// First verify pc-a starts before sg-x-0-pc-b
+	verifyGroupStartupOrder(t, pcAPods, sgX0PCBPods, "pcs-0-pc-a", "pcs-0-sg-x-0-pc-b")
+
+	// Then verify sg-x-0-pc-b starts before sg-x-0-pc-c
+	verifyGroupStartupOrder(t, sgX0PCBPods, sgX0PCCPods, "pcs-0-sg-x-0-pc-b", "pcs-0-sg-x-0-pc-c")
 
 	logger.Info("🎉 Explicit startup order with min replicas test completed successfully!")
 }
