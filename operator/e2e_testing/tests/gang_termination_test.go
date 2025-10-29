@@ -138,30 +138,30 @@ func Test_GT1_GangTerminationFullReplicasPCSOwned(t *testing.T) {
 	}
 
 	// DEBUGGING: Check PodClique status immediately after deletion
-	logger.Info("🔍 DEBUG: Checking PodClique status after pod deletion...")
+	logger.Debug("Checking PodClique status after pod deletion...")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-pc-a", logger)
 
 	logger.Infof("5. Wait for TerminationDelay (%v) seconds", TerminationDelay)
-	
+
 	// DEBUGGING: Poll PodClique status during the delay
 	go func() {
 		for i := 0; i < 3; i++ {
 			time.Sleep(3 * time.Second)
-			logger.Infof("🔍 DEBUG: Checking status at T+%ds...", (i+1)*3)
+			logger.Debugf("Checking status at T+%ds...", (i+1)*3)
 			debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-pc-a", logger)
 			debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload1", logger)
 		}
 	}()
-	
+
 	time.Sleep(TerminationDelay)
-	
+
 	// DEBUGGING: Final status check before verification
-	logger.Info("🔍 DEBUG: Final status check after TerminationDelay...")
+	logger.Debug("Final status check after TerminationDelay...")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-pc-a", logger)
 	debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload1", logger)
-	
+
 	// DEBUGGING: Dump operator logs for troubleshooting
-	logger.Info("🔍 DEBUG: Fetching operator controller logs...")
+	logger.Debug("Fetching operator controller logs...")
 	dumpOperatorLogs(ctx, clientset, logger, "grove-operator", 50)
 
 	logger.Info("6. Verify that all pods in the workload get gang-terminated and recreated")
@@ -320,16 +320,16 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 	}
 
 	// DEBUGGING: Check PodClique and PCSG status after deletion
-	logger.Info("🔍 DEBUG: Checking PodClique and PCSG status after pod deletion...")
+	logger.Debug("Checking PodClique and PCSG status after pod deletion...")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-sg-x-0-pc-c", logger)
 	debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-sg-x", logger)
-	
+
 	// DEBUGGING: Check actual pod counts
-	logger.Info("🔍 DEBUG: Checking pod states after deletion...")
+	logger.Debug("Checking pod states after deletion...")
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
 
 	logger.Infof("5. Wait for TerminationDelay (%v) seconds", TerminationDelay)
-	
+
 	// DEBUGGING: Poll status during the delay with more granular checks
 	startTime := time.Now()
 	tickerDone := make(chan bool)
@@ -340,7 +340,7 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 			select {
 			case <-ticker.C:
 				elapsed := time.Since(startTime)
-				logger.Infof("🔍 DEBUG: Status check at T+%.1fs (%.0f%% of TerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/TerminationDelay.Seconds())*100)
+				logger.Debugf("Status check at T+%.1fs (%.0f%% of TerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/TerminationDelay.Seconds())*100)
 				debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-sg-x-0-pc-c", logger)
 				debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-sg-x", logger)
 				debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload1", logger)
@@ -350,42 +350,42 @@ func Test_GT2_GangTerminationFullReplicasPCSGOwned(t *testing.T) {
 			}
 		}
 	}()
-	
+
 	time.Sleep(TerminationDelay)
 	close(tickerDone)
 	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish
-	
+
 	// DEBUGGING: Final status check
-	logger.Info("🔍 DEBUG: Final status check after TerminationDelay...")
+	logger.Debug("Final status check after TerminationDelay...")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-sg-x-0-pc-c", logger)
 	debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload1-0-sg-x", logger)
 	debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload1", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
-	
+
 	// DEBUGGING: Check all related PodCliques
-	logger.Info("🔍 DEBUG: Checking ALL PodCliques in the workload...")
+	logger.Debug("Checking ALL PodCliques in the workload...")
 	debugAllPodCliques(ctx, t, restConfig, workloadNamespace, "workload1", logger)
-	
+
 	// DEBUGGING: Check K8s events for gang termination indicators
-	logger.Info("🔍 DEBUG: Checking Kubernetes events...")
+	logger.Debug("Checking Kubernetes events...")
 	debugEvents(ctx, t, clientset, workloadNamespace, logger)
-	
+
 	// DEBUGGING: Dump operator logs
-	logger.Info("🔍 DEBUG: Fetching operator controller logs...")
+	logger.Debug("Fetching operator controller logs...")
 	dumpOperatorLogs(ctx, clientset, logger, "grove-operator", 100)
 
 	logger.Info("6. Verify that all pods in the workload get gang-terminated and recreated")
-	
-	// DEBUGGING: Print expected behavior
-	logger.Info("📋 EXPECTED BEHAVIOR:")
-	logger.Info("  1. PodClique workload1-0-sg-x-0-pc-c should have MinAvailableBreached=True")
-	logger.Info("     (because 1 pod deleted: 2 remaining < minAvailable:3)")
-	logger.Info("  2. PCSG workload1-0-sg-x should have MinAvailableBreached=True")
-	logger.Info("     (because replica 0 is breached: 1 available < minAvailable:2)")
-	logger.Info("  3. PCS controller should detect breach and wait for TerminationDelay (10s)")
-	logger.Info("  4. After TerminationDelay, ALL 10 pods should be deleted and recreated")
-	logger.Info("  5. New pods should have different UIDs and be in Pending state")
-	
+
+	// Print expected behavior for debugging
+	logger.Debug("📋 EXPECTED BEHAVIOR:")
+	logger.Debug("  1. PodClique workload1-0-sg-x-0-pc-c should have MinAvailableBreached=True")
+	logger.Debug("     (because 1 pod deleted: 2 remaining < minAvailable:3)")
+	logger.Debug("  2. PCSG workload1-0-sg-x should have MinAvailableBreached=True")
+	logger.Debug("     (because replica 0 is breached: 1 available < minAvailable:2)")
+	logger.Debug("  3. PCS controller should detect breach and wait for TerminationDelay (10s)")
+	logger.Debug("  4. After TerminationDelay, ALL 10 pods should be deleted and recreated")
+	logger.Debug("  5. New pods should have different UIDs and be in Pending state")
+
 	// After gang-termination, pods should be recreated with new UIDs and be in Pending state
 	pollCount := 0
 	err = pollForCondition(ctx, 10*time.Second, 1*time.Second, func() (bool, error) {
@@ -520,7 +520,7 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 	}
 
 	// DEBUGGING: Check initial pod distribution
-	logger.Info("🔍 DEBUG: Initial pod distribution before first deletion:")
+	logger.Debug("Initial pod distribution before first deletion:")
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-pc-a", logger)
 
@@ -547,20 +547,20 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 
 	// Delete the first target pod
 	logger.Infof("🗑️  Deleting FIRST pod %s from node %s (podclique: workload2-0-pc-a)", firstTargetPod.Name, firstTargetPod.Spec.NodeName)
-	logger.Infof("📋 Expected after first deletion: minAvailable should NOT be breached (1 pod remains >= minAvailable:1)")
+	logger.Debugf("📋 Expected after first deletion: minAvailable should NOT be breached (1 pod remains >= minAvailable:1)")
 	if err := clientset.CoreV1().Pods(workloadNamespace).Delete(ctx, firstTargetPod.Name, metav1.DeleteOptions{}); err != nil {
 		t.Errorf("Failed to delete pod %s: %v", firstTargetPod.Name, err)
 	}
 
 	// DEBUGGING: Check status immediately after first deletion
-	logger.Info("🔍 DEBUG: Checking status immediately after FIRST pod deletion...")
+	logger.Debug("Checking status immediately after FIRST pod deletion...")
 	time.Sleep(2 * time.Second) // Give operator time to reconcile
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-pc-a", logger)
 	debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload2", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
 
 	logger.Infof("5. Wait for 2x TerminationDelay (%v) to ensure no gang-termination occurs", 2*TerminationDelay)
-	
+
 	// DEBUGGING: Monitor status during the wait period
 	startTime := time.Now()
 	tickerDone := make(chan bool)
@@ -571,7 +571,7 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 			select {
 			case <-ticker.C:
 				elapsed := time.Since(startTime)
-				logger.Infof("🔍 DEBUG: Status check at T+%.1fs (%.0f%% of 2xTerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/(2*TerminationDelay).Seconds())*100)
+				logger.Debugf("Status check at T+%.1fs (%.0f%% of 2xTerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/(2*TerminationDelay).Seconds())*100)
 				debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-pc-a", logger)
 				debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload2", logger)
 				debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
@@ -580,13 +580,13 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 			}
 		}
 	}()
-	
+
 	time.Sleep(2 * TerminationDelay)
 	close(tickerDone)
 	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish
 
 	// DEBUGGING: Final check after 2x TerminationDelay
-	logger.Info("🔍 DEBUG: Final status check after 2x TerminationDelay (should be no gang termination)...")
+	logger.Debug("Final status check after 2x TerminationDelay (should be no gang termination)...")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-pc-a", logger)
 	debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload2", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
@@ -595,9 +595,9 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 	verifyNoGangTermination(ctx, t, clientset, workloadNamespace, workloadLabelSelector, 3)
 
 	logger.Info("7. Cordon node and then delete 1 ready pod from PCS-owned podclique pcs-0-pc-a")
-	
+
 	// DEBUGGING: Check state before second deletion
-	logger.Info("🔍 DEBUG: State before SECOND pod deletion:")
+	logger.Debug("State before SECOND pod deletion:")
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-pc-a", logger)
 
@@ -640,20 +640,20 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 
 	// Delete the second target pod
 	logger.Infof("🗑️  Deleting SECOND pod %s from node %s (podclique: workload2-0-pc-a)", secondTargetPod.Name, secondTargetPod.Spec.NodeName)
-	logger.Infof("📋 Expected after second deletion: minAvailable SHOULD be breached (0 pods remaining < minAvailable:1)")
+	logger.Debugf("📋 Expected after second deletion: minAvailable SHOULD be breached (0 pods remaining < minAvailable:1)")
 	if err := clientset.CoreV1().Pods(workloadNamespace).Delete(ctx, secondTargetPod.Name, metav1.DeleteOptions{}); err != nil {
 		t.Errorf("Failed to delete pod %s: %v", secondTargetPod.Name, err)
 	}
 
 	// DEBUGGING: Check status immediately after second deletion
-	logger.Info("🔍 DEBUG: Checking status immediately after SECOND pod deletion...")
+	logger.Debug("Checking status immediately after SECOND pod deletion...")
 	time.Sleep(2 * time.Second) // Give operator time to reconcile
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-pc-a", logger)
 	debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload2", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
 
 	logger.Infof("8. Wait for TerminationDelay (%v) seconds", TerminationDelay)
-	
+
 	// DEBUGGING: Monitor status during TerminationDelay with detailed checks
 	startTime2 := time.Now()
 	tickerDone2 := make(chan bool)
@@ -664,7 +664,7 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 			select {
 			case <-ticker.C:
 				elapsed := time.Since(startTime2)
-				logger.Infof("🔍 DEBUG: Status check at T+%.1fs (%.0f%% of TerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/TerminationDelay.Seconds())*100)
+				logger.Debugf("Status check at T+%.1fs (%.0f%% of TerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/TerminationDelay.Seconds())*100)
 				debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-pc-a", logger)
 				debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload2", logger)
 				debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
@@ -673,36 +673,36 @@ func Test_GT3_GangTerminationMinReplicasPCSOwned(t *testing.T) {
 			}
 		}
 	}()
-	
+
 	time.Sleep(TerminationDelay)
 	close(tickerDone2)
 	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish
 
 	// DEBUGGING: Final comprehensive status check
-	logger.Info("🔍 DEBUG: Final status check after TerminationDelay (gang termination should have occurred)...")
+	logger.Debug("Final status check after TerminationDelay (gang termination should have occurred)...")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-pc-a", logger)
 	debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload2", logger)
 	debugAllPodCliques(ctx, t, restConfig, workloadNamespace, "workload2", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
-	
+
 	// DEBUGGING: Check events
-	logger.Info("🔍 DEBUG: Checking Kubernetes events...")
+	logger.Debug("Checking Kubernetes events...")
 	debugEvents(ctx, t, clientset, workloadNamespace, logger)
-	
+
 	// DEBUGGING: Dump operator logs
-	logger.Info("🔍 DEBUG: Fetching operator controller logs...")
+	logger.Debug("Fetching operator controller logs...")
 	dumpOperatorLogs(ctx, clientset, logger, "grove-operator", 100)
 
 	logger.Info("9. Verify that all pods in the workload get gang-terminated and recreated")
-	
+
 	// DEBUGGING: Print expected behavior
-	logger.Info("📋 EXPECTED BEHAVIOR:")
-	logger.Info("  1. PodClique workload2-0-pc-a should have MinAvailableBreached=True")
-	logger.Info("     (because 2 pods deleted: 0 remaining < minAvailable:1)")
-	logger.Info("  2. PCS controller should detect breach and wait for TerminationDelay (10s)")
-	logger.Info("  3. After TerminationDelay, ALL 10 pods should be deleted and recreated")
-	logger.Info("  4. New pods should have different UIDs and be in Pending state")
-	
+	logger.Debug("📋 EXPECTED BEHAVIOR:")
+	logger.Debug("  1. PodClique workload2-0-pc-a should have MinAvailableBreached=True")
+	logger.Debug("     (because 2 pods deleted: 0 remaining < minAvailable:1)")
+	logger.Debug("  2. PCS controller should detect breach and wait for TerminationDelay (10s)")
+	logger.Debug("  3. After TerminationDelay, ALL 10 pods should be deleted and recreated")
+	logger.Debug("  4. New pods should have different UIDs and be in Pending state")
+
 	// After breaching min-replicas, gang-termination should occur
 	pollCount := 0
 	err = pollForCondition(ctx, 10*time.Second, 1*time.Second, func() (bool, error) {
@@ -790,7 +790,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	logger.Info("1. Initialize a 10-node Grove cluster")
 	clientset, restConfig, _, cleanup, _ := setupTestCluster(ctx, t, 10)
 	defer cleanup()
-	
+
 	// Track nodes cordoned by this test so we can uncordon them later
 	cordonedNodes := make(map[string]bool)
 
@@ -838,13 +838,13 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	// assertPodsOnDistinctNodes(t, pods.Items)
 
 	logger.Info("4. Cordon node and then delete 1 ready pod from PCSG-owned podclique pcs-0-sg-x-0-pc-c")
-	
+
 	// DEBUGGING: Check initial state before first deletion
-	logger.Info("🔍 DEBUG: State before first pod deletion from sg-x-0-pc-c:")
+	logger.Debug("State before first pod deletion from sg-x-0-pc-c:")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-0-pc-c", logger)
 	debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
-	
+
 	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: workloadLabelSelector,
 	})
@@ -854,18 +854,18 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 
 	// Find and delete first pod from workload2-0-sg-x-0-pc-c
 	logger.Info("🗑️  Deleting FIRST pod from workload2-0-sg-x-0-pc-c")
-	logger.Info("📋 EXPECTED: After 1st deletion, 2 pods remain >= minAvailable:1 → NO breach")
+	logger.Debug("📋 EXPECTED: After 1st deletion, 2 pods remain >= minAvailable:1 → NO breach")
 	firstPodToDelete := findAndDeletePodFromPodClique(ctx, t, clientset, pods, "workload2-0-sg-x-0-pc-c", workloadNamespace, "first", cordonedNodes)
-	
+
 	// DEBUGGING: Check status immediately after deletion
-	logger.Info("🔍 DEBUG: State immediately after first pod deletion:")
+	logger.Debug("State immediately after first pod deletion:")
 	time.Sleep(2 * time.Second) // Give operator time to reconcile
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-0-pc-c", logger)
 	debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
 
 	logger.Infof("5. Wait for 2x TerminationDelay (%v) to ensure no gang-termination occurs", 2*TerminationDelay)
-	
+
 	// DEBUGGING: Monitor status during wait period
 	startTime := time.Now()
 	tickerDone := make(chan bool)
@@ -876,7 +876,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 			select {
 			case <-ticker.C:
 				elapsed := time.Since(startTime)
-				logger.Infof("🔍 DEBUG: Status at T+%.1fs (%.0f%% of 2xTerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/(2*TerminationDelay).Seconds())*100)
+				logger.Debugf("Status at T+%.1fs (%.0f%% of 2xTerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/(2*TerminationDelay).Seconds())*100)
 				debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-0-pc-c", logger)
 				debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
 				debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
@@ -885,12 +885,12 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 			}
 		}
 	}()
-	
+
 	time.Sleep(2 * TerminationDelay)
 	close(tickerDone)
 	time.Sleep(100 * time.Millisecond)
 
-	logger.Info("🔍 DEBUG: Final state after 2x TerminationDelay (should be NO gang termination):")
+	logger.Debug("Final state after 2x TerminationDelay (should be NO gang termination):")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-0-pc-c", logger)
 	debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
 	debugPodCliqueSetStatus(ctx, t, restConfig, workloadNamespace, "workload2", logger)
@@ -904,7 +904,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	logger.Info("🔍 DEBUG: State before deleting remaining pods:")
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-0-pc-c", logger)
 	debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
-	
+
 	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: workloadLabelSelector,
 	})
@@ -918,13 +918,13 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 		logger.Infof("🗑️  Deleting pod %d/2 from sg-x-0-pc-c...", i+2)
 		podName := findAndDeletePodFromPodCliqueExcluding(ctx, t, clientset, pods, "workload2-0-sg-x-0-pc-c", workloadNamespace, deletedPods, fmt.Sprintf("pod %d", i+2), cordonedNodes)
 		deletedPods = append(deletedPods, podName)
-		
+
 		// DEBUGGING: Check status after each deletion
 		time.Sleep(2 * time.Second)
-		logger.Infof("🔍 DEBUG: Status after deleting pod %d:", i+2)
+		logger.Debugf("Status after deleting pod %d:", i+2)
 		debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-0-pc-c", logger)
 		debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
-		
+
 		// Refresh pod list
 		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
@@ -941,7 +941,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	logger.Info("  3. PCSG workload2-0-sg-x: MinAvailableBreached = False (1 available replica >= minAvailable:1)")
 	logger.Info("  4. Local PCSG replica termination (both pc-b and pc-c deleted)")
 	logger.Info("  5. NO full PCS gang termination")
-	
+
 	// DEBUGGING: Monitor during wait period
 	startTime2 := time.Now()
 	tickerDone2 := make(chan bool)
@@ -962,7 +962,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 			}
 		}
 	}()
-	
+
 	time.Sleep(2 * TerminationDelay)
 	close(tickerDone2)
 	time.Sleep(100 * time.Millisecond)
@@ -995,7 +995,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-1-pc-c", logger)
 	debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
-	
+
 	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: workloadLabelSelector,
 	})
@@ -1007,7 +1007,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	logger.Info("🗑️  Deleting FIRST pod from workload2-0-sg-x-1-pc-c")
 	logger.Info("📋 EXPECTED: After 1st deletion, 2 pods remain >= minAvailable:1 → NO breach")
 	firstPodSgx1 := findAndDeletePodFromPodClique(ctx, t, clientset, pods, "workload2-0-sg-x-1-pc-c", workloadNamespace, "first from sg-x-1", cordonedNodes)
-	
+
 	logger.Info("🔍 DEBUG: State immediately after first pod deletion from sg-x-1:")
 	time.Sleep(2 * time.Second)
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-1-pc-c", logger)
@@ -1034,7 +1034,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-1-pc-c", logger)
 	debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
 	debugPodStates(ctx, t, clientset, workloadNamespace, workloadLabelSelector, logger)
-	
+
 	pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: workloadLabelSelector,
 	})
@@ -1048,13 +1048,13 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 		logger.Infof("🗑️  Deleting pod %d/2 from sg-x-1-pc-c...", i+2)
 		podName := findAndDeletePodFromPodCliqueExcluding(ctx, t, clientset, pods, "workload2-0-sg-x-1-pc-c", workloadNamespace, deletedPodsSgx1, fmt.Sprintf("pod %d from sg-x-1", i+2), cordonedNodes)
 		deletedPodsSgx1 = append(deletedPodsSgx1, podName)
-		
+
 		// DEBUGGING: Check status after each deletion
 		time.Sleep(2 * time.Second)
-		logger.Infof("🔍 DEBUG: Status after deleting pod %d from sg-x-1:", i+2)
+		logger.Debugf("Status after deleting pod %d from sg-x-1:", i+2)
 		debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-1-pc-c", logger)
 		debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
-		
+
 		// Refresh pod list
 		pods, err = clientset.CoreV1().Pods(workloadNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: workloadLabelSelector,
@@ -1083,7 +1083,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	logger.Info("  5. PCSG workload2-0-sg-x: MinAvailableBreached = True (0 available replicas < minAvailable:1)")
 	logger.Info("  6. PCS controller detects PCSG breach → FULL gang termination")
 	logger.Info("  7. ALL 10 pods deleted and recreated")
-	
+
 	// DEBUGGING: Monitor during termination delay
 	startTime3 := time.Now()
 	tickerDone3 := make(chan bool)
@@ -1094,7 +1094,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 			select {
 			case <-ticker.C:
 				elapsed := time.Since(startTime3)
-				logger.Infof("🔍 DEBUG: Status at T+%.1fs (%.0f%% of TerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/TerminationDelay.Seconds())*100)
+				logger.Debugf("Status at T+%.1fs (%.0f%% of TerminationDelay)...", elapsed.Seconds(), (elapsed.Seconds()/TerminationDelay.Seconds())*100)
 				debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-0-pc-c", logger)
 				debugPodCliqueStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x-1-pc-c", logger)
 				debugPodCliqueScalingGroupStatus(ctx, t, restConfig, workloadNamespace, "workload2-0-sg-x", logger)
@@ -1105,7 +1105,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 			}
 		}
 	}()
-	
+
 	time.Sleep(TerminationDelay)
 	close(tickerDone3)
 	time.Sleep(100 * time.Millisecond)
@@ -1193,7 +1193,7 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 		t.Errorf("Failed to verify gang-termination and recreation: %v", err)
 		return // Don't try to uncordon again on failure
 	}
-	
+
 	logger.Info("🎉 Gang-termination with min-replicas PCSG-owned test (GT-4) completed successfully!")
 
 }
@@ -1350,63 +1350,63 @@ func verifyNoGangTermination(ctx context.Context, t *testing.T, clientset kubern
 // debugPodCliqueStatus dumps detailed PodClique status for debugging
 func debugPodCliqueStatus(ctx context.Context, t *testing.T, restConfig *rest.Config, namespace, pclqName string, logger *logrus.Logger) {
 	t.Helper()
-	
+
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		logger.Errorf("Failed to create dynamic client: %v", err)
 		return
 	}
-	
+
 	pclqGVR := schema.GroupVersionResource{
 		Group:    "grove.io",
 		Version:  "v1alpha1",
 		Resource: "podcliques",
 	}
-	
+
 	pclq, err := dynamicClient.Resource(pclqGVR).Namespace(namespace).Get(ctx, pclqName, metav1.GetOptions{})
 	if err != nil {
 		logger.Errorf("Failed to get PodClique %s: %v", pclqName, err)
 		return
 	}
-	
+
 	spec, specFound, _ := unstructured.NestedMap(pclq.Object, "spec")
 	status, statusFound, _ := unstructured.NestedMap(pclq.Object, "status")
 	if !statusFound {
 		logger.Warnf("PodClique %s has no status", pclqName)
 		return
 	}
-	
+
 	// Extract spec values
 	var minAvailable interface{}
 	if specFound {
 		minAvailable = spec["minAvailable"]
 	}
-	
+
 	// Extract status values
 	replicas := status["replicas"]
 	readyReplicas := status["readyReplicas"]
 	scheduledReplicas := status["scheduledReplicas"]
-	
+
 	conditions, _, _ := unstructured.NestedSlice(status, "conditions")
-	logger.Infof("📊 PodClique %s Status:", pclqName)
-	logger.Infof("  Spec.MinAvailable: %v", minAvailable)
-	logger.Infof("  Status.Replicas: %v (non-terminating pods)", replicas)
-	logger.Infof("  Status.ReadyReplicas: %v", readyReplicas)
-	logger.Infof("  Status.ScheduledReplicas: %v", scheduledReplicas)
-	
+	logger.Debugf("📊 PodClique %s Status:", pclqName)
+	logger.Debugf("  Spec.MinAvailable: %v", minAvailable)
+	logger.Debugf("  Status.Replicas: %v (non-terminating pods)", replicas)
+	logger.Debugf("  Status.ReadyReplicas: %v", readyReplicas)
+	logger.Debugf("  Status.ScheduledReplicas: %v", scheduledReplicas)
+
 	// Show the breach logic calculation
 	if minAvailable != nil && scheduledReplicas != nil && readyReplicas != nil {
 		minAvailInt64, _ := minAvailable.(int64)
 		scheduledInt64, _ := scheduledReplicas.(int64)
 		readyInt64, _ := readyReplicas.(int64)
-		
-		logger.Infof("  📐 Breach Calculation:")
-		logger.Infof("    scheduledReplicas (%d) < minAvailable (%d)? %v", scheduledInt64, minAvailInt64, scheduledInt64 < minAvailInt64)
-		logger.Infof("    readyReplicas (%d) == 0? %v", readyInt64, readyInt64 == 0)
-		logger.Infof("    → Should MinAvailableBreached be True? %v", scheduledInt64 >= minAvailInt64 && scheduledInt64 < minAvailInt64)
+
+		logger.Debugf("  📐 Breach Calculation:")
+		logger.Debugf("    scheduledReplicas (%d) < minAvailable (%d)? %v", scheduledInt64, minAvailInt64, scheduledInt64 < minAvailInt64)
+		logger.Debugf("    readyReplicas (%d) == 0? %v", readyInt64, readyInt64 == 0)
+		logger.Debugf("    → Should MinAvailableBreached be True? %v", scheduledInt64 >= minAvailInt64 && scheduledInt64 < minAvailInt64)
 	}
-	
-	logger.Infof("  Conditions (%d):", len(conditions))
+
+	logger.Debugf("  Conditions (%d):", len(conditions))
 	for _, cond := range conditions {
 		condMap, ok := cond.(map[string]interface{})
 		if !ok {
@@ -1417,7 +1417,7 @@ func debugPodCliqueStatus(ctx context.Context, t *testing.T, restConfig *rest.Co
 		condReason := condMap["reason"]
 		condMessage := condMap["message"]
 		lastTransition := condMap["lastTransitionTime"]
-		
+
 		emoji := "ℹ️"
 		if condType == "MinAvailableBreached" {
 			if condStatus == "True" {
@@ -1426,9 +1426,9 @@ func debugPodCliqueStatus(ctx context.Context, t *testing.T, restConfig *rest.Co
 				emoji = "🟢"
 			}
 		}
-		logger.Infof("    %s %s: %s (reason: %s, lastTransition: %s)", emoji, condType, condStatus, condReason, lastTransition)
+		logger.Debugf("    %s %s: %s (reason: %s, lastTransition: %s)", emoji, condType, condStatus, condReason, lastTransition)
 		if condMessage != nil && condMessage != "" {
-			logger.Infof("       Message: %s", condMessage)
+			logger.Debugf("       Message: %s", condMessage)
 		}
 	}
 }
@@ -1436,37 +1436,37 @@ func debugPodCliqueStatus(ctx context.Context, t *testing.T, restConfig *rest.Co
 // debugPodCliqueSetStatus dumps detailed PodCliqueSet status for debugging
 func debugPodCliqueSetStatus(ctx context.Context, t *testing.T, restConfig *rest.Config, namespace, pcsName string, logger *logrus.Logger) {
 	t.Helper()
-	
+
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		logger.Errorf("Failed to create dynamic client: %v", err)
 		return
 	}
-	
+
 	pcsGVR := schema.GroupVersionResource{
 		Group:    "grove.io",
 		Version:  "v1alpha1",
 		Resource: "podcliquesets",
 	}
-	
+
 	pcs, err := dynamicClient.Resource(pcsGVR).Namespace(namespace).Get(ctx, pcsName, metav1.GetOptions{})
 	if err != nil {
 		logger.Errorf("Failed to get PodCliqueSet %s: %v", pcsName, err)
 		return
 	}
-	
+
 	status, found, _ := unstructured.NestedMap(pcs.Object, "status")
 	if !found {
 		logger.Warnf("PodCliqueSet %s has no status", pcsName)
 		return
 	}
-	
-	logger.Infof("📊 PodCliqueSet %s Status:", pcsName)
-	logger.Infof("  Replicas: %v", status["replicas"])
-	logger.Infof("  AvailableReplicas: %v", status["availableReplicas"])
-	logger.Infof("  UpdatedReplicas: %v", status["updatedReplicas"])
-	logger.Infof("  ObservedGeneration: %v", status["observedGeneration"])
-	
+
+	logger.Debugf("📊 PodCliqueSet %s Status:", pcsName)
+	logger.Debugf("  Replicas: %v", status["replicas"])
+	logger.Debugf("  AvailableReplicas: %v", status["availableReplicas"])
+	logger.Debugf("  UpdatedReplicas: %v", status["updatedReplicas"])
+	logger.Debugf("  ObservedGeneration: %v", status["observedGeneration"])
+
 	// Check for last errors
 	lastErrors, _, _ := unstructured.NestedSlice(status, "lastErrors")
 	if len(lastErrors) > 0 {
@@ -1484,38 +1484,38 @@ func debugPodCliqueSetStatus(ctx context.Context, t *testing.T, restConfig *rest
 // debugPodCliqueScalingGroupStatus dumps detailed PCSG status for debugging
 func debugPodCliqueScalingGroupStatus(ctx context.Context, t *testing.T, restConfig *rest.Config, namespace, pcsgName string, logger *logrus.Logger) {
 	t.Helper()
-	
+
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		logger.Errorf("Failed to create dynamic client: %v", err)
 		return
 	}
-	
+
 	pcsgGVR := schema.GroupVersionResource{
 		Group:    "grove.io",
 		Version:  "v1alpha1",
 		Resource: "podcliquescalinggroups",
 	}
-	
+
 	pcsg, err := dynamicClient.Resource(pcsgGVR).Namespace(namespace).Get(ctx, pcsgName, metav1.GetOptions{})
 	if err != nil {
 		logger.Errorf("Failed to get PodCliqueScalingGroup %s: %v", pcsgName, err)
 		return
 	}
-	
+
 	status, found, _ := unstructured.NestedMap(pcsg.Object, "status")
 	if !found {
 		logger.Warnf("PodCliqueScalingGroup %s has no status", pcsgName)
 		return
 	}
-	
+
 	conditions, _, _ := unstructured.NestedSlice(status, "conditions")
-	logger.Infof("📊 PodCliqueScalingGroup %s Status:", pcsgName)
-	logger.Infof("  Replicas: %v", status["replicas"])
-	logger.Infof("  AvailableReplicas: %v", status["availableReplicas"])
-	logger.Infof("  ScheduledReplicas: %v", status["scheduledReplicas"])
-	
-	logger.Infof("  Conditions (%d):", len(conditions))
+	logger.Debugf("📊 PodCliqueScalingGroup %s Status:", pcsgName)
+	logger.Debugf("  Replicas: %v", status["replicas"])
+	logger.Debugf("  AvailableReplicas: %v", status["availableReplicas"])
+	logger.Debugf("  ScheduledReplicas: %v", status["scheduledReplicas"])
+
+	logger.Debugf("  Conditions (%d):", len(conditions))
 	for _, cond := range conditions {
 		condMap, ok := cond.(map[string]interface{})
 		if !ok {
@@ -1525,7 +1525,7 @@ func debugPodCliqueScalingGroupStatus(ctx context.Context, t *testing.T, restCon
 		condStatus := condMap["status"]
 		condReason := condMap["reason"]
 		lastTransition := condMap["lastTransitionTime"]
-		
+
 		emoji := "ℹ️"
 		if condType == "MinAvailableBreached" {
 			if condStatus == "True" {
@@ -1534,7 +1534,7 @@ func debugPodCliqueScalingGroupStatus(ctx context.Context, t *testing.T, restCon
 				emoji = "🟢"
 			}
 		}
-		logger.Infof("    %s %s: %s (reason: %s, lastTransition: %s)", emoji, condType, condStatus, condReason, lastTransition)
+		logger.Debugf("    %s %s: %s (reason: %s, lastTransition: %s)", emoji, condType, condStatus, condReason, lastTransition)
 	}
 }
 
@@ -1548,26 +1548,26 @@ func dumpOperatorLogs(ctx context.Context, clientset kubernetes.Interface, logge
 		logger.Errorf("Failed to list operator pods: %v", err)
 		return
 	}
-	
+
 	if len(pods.Items) == 0 {
 		logger.Warn("No operator pods found")
 		return
 	}
-	
+
 	// Get logs from the first operator pod
 	pod := pods.Items[0]
 	logger.Infof("📋 Recent operator logs from pod %s (last %d lines):", pod.Name, tailLines)
-	
+
 	logOptions := &v1.PodLogOptions{
 		TailLines: &tailLines,
 	}
-	
+
 	logs, err := clientset.CoreV1().Pods(operatorNamespace).GetLogs(pod.Name, logOptions).DoRaw(ctx)
 	if err != nil {
 		logger.Errorf("Failed to get operator logs: %v", err)
 		return
 	}
-	
+
 	// Print logs with indentation
 	logLines := string(logs)
 	logger.Infof("--- BEGIN OPERATOR LOGS ---")
@@ -1578,7 +1578,7 @@ func dumpOperatorLogs(ctx context.Context, clientset kubernetes.Interface, logge
 // debugPodStates provides detailed debugging info about pod states
 func debugPodStates(ctx context.Context, t *testing.T, clientset kubernetes.Interface, namespace, labelSelector string, logger *logrus.Logger) {
 	t.Helper()
-	
+
 	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
@@ -1586,9 +1586,9 @@ func debugPodStates(ctx context.Context, t *testing.T, clientset kubernetes.Inte
 		logger.Errorf("Failed to list pods: %v", err)
 		return
 	}
-	
-	logger.Infof("📊 Pod States Summary: Total=%d", len(pods.Items))
-	
+
+	logger.Debugf("📊 Pod States Summary: Total=%d", len(pods.Items))
+
 	// Group pods by podclique
 	podsByClique := make(map[string][]*v1.Pod)
 	for i := range pods.Items {
@@ -1599,7 +1599,7 @@ func debugPodStates(ctx context.Context, t *testing.T, clientset kubernetes.Inte
 		}
 		podsByClique[cliqueName] = append(podsByClique[cliqueName], pod)
 	}
-	
+
 	// Print per-clique stats
 	for cliqueName, cliquePods := range podsByClique {
 		ready := 0
@@ -1608,13 +1608,13 @@ func debugPodStates(ctx context.Context, t *testing.T, clientset kubernetes.Inte
 		failed := 0
 		terminating := 0
 		scheduled := 0
-		
-		logger.Infof("  🔷 PodClique: %s (pods=%d)", cliqueName, len(cliquePods))
+
+		logger.Debugf("  🔷 PodClique: %s (pods=%d)", cliqueName, len(cliquePods))
 		for _, pod := range cliquePods {
 			if pod.DeletionTimestamp != nil {
 				terminating++
 			}
-			
+
 			switch pod.Status.Phase {
 			case v1.PodPending:
 				pending++
@@ -1623,24 +1623,24 @@ func debugPodStates(ctx context.Context, t *testing.T, clientset kubernetes.Inte
 			case v1.PodFailed:
 				failed++
 			}
-			
+
 			if pod.Spec.NodeName != "" {
 				scheduled++
 			}
-			
+
 			if isPodReady(pod) {
 				ready++
 			}
-			
+
 			// Detailed per-pod info for the affected clique
 			if cliqueName == "workload1-0-sg-x-0-pc-c" || cliqueName == "workload2-0-pc-a" {
-				logger.Infof("    - Pod: %s, Phase=%s, Ready=%v, Scheduled=%v, Node=%s, Terminating=%v, UID=%s",
-					pod.Name, pod.Status.Phase, isPodReady(pod), pod.Spec.NodeName != "", pod.Spec.NodeName, 
+				logger.Debugf("    - Pod: %s, Phase=%s, Ready=%v, Scheduled=%v, Node=%s, Terminating=%v, UID=%s",
+					pod.Name, pod.Status.Phase, isPodReady(pod), pod.Spec.NodeName != "", pod.Spec.NodeName,
 					pod.DeletionTimestamp != nil, pod.UID)
 			}
 		}
-		
-		logger.Infof("    Stats: Ready=%d, Scheduled=%d, Running=%d, Pending=%d, Failed=%d, Terminating=%d",
+
+		logger.Debugf("    Stats: Ready=%d, Scheduled=%d, Running=%d, Pending=%d, Failed=%d, Terminating=%d",
 			ready, scheduled, running, pending, failed, terminating)
 	}
 }
@@ -1648,19 +1648,19 @@ func debugPodStates(ctx context.Context, t *testing.T, clientset kubernetes.Inte
 // debugAllPodCliques checks status of all PodCliques in a workload
 func debugAllPodCliques(ctx context.Context, t *testing.T, restConfig *rest.Config, namespace, pcsName string, logger *logrus.Logger) {
 	t.Helper()
-	
+
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		logger.Errorf("Failed to create dynamic client: %v", err)
 		return
 	}
-	
+
 	pclqGVR := schema.GroupVersionResource{
 		Group:    "grove.io",
 		Version:  "v1alpha1",
 		Resource: "podcliques",
 	}
-	
+
 	// List all podcliques in the namespace
 	pclqList, err := dynamicClient.Resource(pclqGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("grove.io/podcliqueset=%s", pcsName),
@@ -1669,25 +1669,25 @@ func debugAllPodCliques(ctx context.Context, t *testing.T, restConfig *rest.Conf
 		logger.Errorf("Failed to list PodCliques: %v", err)
 		return
 	}
-	
-	logger.Infof("📊 All PodCliques in %s (count=%d):", pcsName, len(pclqList.Items))
-	
+
+	logger.Debugf("📊 All PodCliques in %s (count=%d):", pcsName, len(pclqList.Items))
+
 	for _, pclqItem := range pclqList.Items {
 		pclqName := pclqItem.GetName()
-		
+
 		status, found, _ := unstructured.NestedMap(pclqItem.Object, "status")
 		if !found {
 			logger.Warnf("  ⚠️  PodClique %s has no status", pclqName)
 			continue
 		}
-		
+
 		spec, _, _ := unstructured.NestedMap(pclqItem.Object, "spec")
 		minAvailable := spec["minAvailable"]
-		
+
 		replicas := status["replicas"]
 		readyReplicas := status["readyReplicas"]
 		scheduledReplicas := status["scheduledReplicas"]
-		
+
 		// Find MinAvailableBreached condition
 		conditions, _, _ := unstructured.NestedSlice(status, "conditions")
 		var breachStatus, breachReason, breachMessage, breachTime string
@@ -1704,25 +1704,25 @@ func debugAllPodCliques(ctx context.Context, t *testing.T, restConfig *rest.Conf
 				break
 			}
 		}
-		
+
 		emoji := "✅"
 		if breachStatus == "True" {
 			emoji = "🔴"
 		} else if breachStatus == "Unknown" {
 			emoji = "⚠️"
 		}
-		
-		logger.Infof("  %s %s:", emoji, pclqName)
-		logger.Infof("    Spec: minAvailable=%v", minAvailable)
-		logger.Infof("    Status: replicas=%v, ready=%v, scheduled=%v", replicas, readyReplicas, scheduledReplicas)
-		logger.Infof("    MinAvailableBreached: status=%s, reason=%s", breachStatus, breachReason)
-		logger.Infof("    Message: %s", breachMessage)
-		logger.Infof("    LastTransitionTime: %s", breachTime)
-		
+
+		logger.Debugf("  %s %s:", emoji, pclqName)
+		logger.Debugf("    Spec: minAvailable=%v", minAvailable)
+		logger.Debugf("    Status: replicas=%v, ready=%v, scheduled=%v", replicas, readyReplicas, scheduledReplicas)
+		logger.Debugf("    MinAvailableBreached: status=%s, reason=%s", breachStatus, breachReason)
+		logger.Debugf("    Message: %s", breachMessage)
+		logger.Debugf("    LastTransitionTime: %s", breachTime)
+
 		// Calculate time since transition
 		if breachTime != "" && breachStatus == "True" {
 			// Parse the time and calculate duration
-			logger.Infof("    ⏱️  Time since breach detected: %s", breachTime)
+			logger.Debugf("    ⏱️  Time since breach detected: %s", breachTime)
 		}
 	}
 }
@@ -1730,21 +1730,21 @@ func debugAllPodCliques(ctx context.Context, t *testing.T, restConfig *rest.Conf
 // debugEvents lists recent Kubernetes events in the namespace
 func debugEvents(ctx context.Context, t *testing.T, clientset kubernetes.Interface, namespace string, logger *logrus.Logger) {
 	t.Helper()
-	
+
 	events, err := clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		logger.Errorf("Failed to list events: %v", err)
 		return
 	}
-	
-	logger.Infof("📋 Recent Kubernetes Events (last 20):")
-	
+
+	logger.Debugf("📋 Recent Kubernetes Events (last 20):")
+
 	// Sort events by timestamp (newest first) and limit to recent ones
 	recentEvents := events.Items
 	if len(recentEvents) > 20 {
 		recentEvents = recentEvents[len(recentEvents)-20:]
 	}
-	
+
 	for _, event := range recentEvents {
 		emoji := "ℹ️"
 		switch event.Type {
@@ -1755,8 +1755,8 @@ func debugEvents(ctx context.Context, t *testing.T, clientset kubernetes.Interfa
 		case "Normal":
 			emoji = "✅"
 		}
-		
-		logger.Infof("  %s [%s] %s/%s: %s - %s (count=%d, last=%s)",
+
+		logger.Debugf("  %s [%s] %s/%s: %s - %s (count=%d, last=%s)",
 			emoji,
 			event.Type,
 			event.InvolvedObject.Kind,
@@ -1777,6 +1777,6 @@ func uncordonNodes(ctx context.Context, clientset kubernetes.Interface, cordoned
 		}
 		logger.Debugf("Uncordoned node %s", nodeName)
 	}
-	
+
 	return nil
 }
