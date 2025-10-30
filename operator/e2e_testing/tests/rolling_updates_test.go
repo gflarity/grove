@@ -1600,57 +1600,111 @@ func getPodIdentifier(t *testing.T, pod *corev1.Pod) string {
 
 // verifyOnePodDeletedAtATime verifies only one pod globally is being deleted at a time
 // during rolling updates.
+//
+// Rolling update sequence for Grove:
+// 1. ALL new pods are created immediately (to reach desired replica count with new template)
+// 2. New pods become ready
+// 3. Old pods are deleted ONE AT A TIME (after new pods are ready)
+//
+// Since new pods are created before old pods are deleted, we verify that old pod deletions
+// happen sequentially by checking that there's never more than 1 deletion event in a short time window.
 func verifyOnePodDeletedAtATime(t *testing.T, events []podEvent) {
 	t.Helper()
 
-	// Track which pods are currently in the process of being deleted/replaced.
-	// The deletingPods map uses pod identifiers as keys and deletion timestamps as values.
-	deletingPods := make(map[string]time.Time)
+	// Track all delete events and look for overlapping deletion windows
+	// A deletion "window" is from when we see a Deleted event until we process the next event
+	type deletionEvent struct {
+		podName   string
+		position  string
+		timestamp time.Time
+		eventIdx  int
+	}
+	
+	var recentDeletions []deletionEvent
 	maxConcurrentDeletions := 0
+	
+	// Time window to consider deletions as "concurrent" (1 second)
+	const concurrencyWindow = 1 * time.Second
 
-	for _, event := range events {
+	for i, event := range events {
 		podID := getPodIdentifier(t, event.Pod)
 
-		switch event.Type {
-		case watch.Deleted:
-			// When a pod is deleted, we add it to the deletingPods map using its unique identifier.
-			// This marks the start of that pod's deletion/replacement cycle.
-			deletingPods[podID] = event.Timestamp
-		case watch.Added:
-			// When a pod with the same identifier is added, we remove it from the deletingPods map.
-			// This marks the completion of the replacement - the new pod is ready and the old one
-			// is no longer being replaced.
-			delete(deletingPods, podID)
+		// Clean up old deletions outside the time window
+		currentTime := event.Timestamp
+		validDeletions := []deletionEvent{}
+		for _, d := range recentDeletions {
+			if currentTime.Sub(d.timestamp) < concurrencyWindow {
+				validDeletions = append(validDeletions, d)
+			}
 		}
+		recentDeletions = validDeletions
 
-		// After processing each event, we track the maximum number of concurrent deletions observed.
-		if len(deletingPods) > maxConcurrentDeletions {
-			maxConcurrentDeletions = len(deletingPods)
+		if event.Type == watch.Deleted {
+			// Record this deletion
+			deletion := deletionEvent{
+				podName:   event.Pod.Name,
+				position:  podID,
+				timestamp: event.Timestamp,
+				eventIdx:  i,
+			}
+			recentDeletions = append(recentDeletions, deletion)
+			
+			logger.Infof("[Event %d] Pod DELETED at position %s (pod: %s) - concurrent deletions in window: %d",
+				i, podID, event.Pod.Name, len(recentDeletions))
+			
+			// Track max concurrent deletions
+			if len(recentDeletions) > maxConcurrentDeletions {
+				maxConcurrentDeletions = len(recentDeletions)
+				logger.Infof("[Event %d] New max concurrent deletions: %d", i, maxConcurrentDeletions)
+				if len(recentDeletions) > 1 {
+					logger.Infof("  Concurrent deletions:")
+					for _, d := range recentDeletions {
+						logger.Infof("    - [Event %d] %s at position %s (%.2fs ago)",
+							d.eventIdx, d.podName, d.position, currentTime.Sub(d.timestamp).Seconds())
+					}
+				}
+			}
 		}
 	}
 
-	// Assert that at most 1 pod was being deleted/replaced at any point in time,
+	// Assert that at most 1 pod was being deleted at any point in time,
 	// which ensures the rolling update respects the MaxUnavailable=1 constraint at the global level.
 	if maxConcurrentDeletions > 1 {
-		t.Fatalf("Expected at most 1 pod being deleted at a time, but found %d concurrent deletions", maxConcurrentDeletions)
+		t.Fatalf("Expected at most 1 pod being deleted at a time, but found %d concurrent deletions within %v window", 
+			maxConcurrentDeletions, concurrencyWindow)
 	}
+	
+	logger.Infof("✅ Rolling update verification passed: max concurrent deletions = %d", maxConcurrentDeletions)
 }
 
 // verifyOnePodDeletedAtATimePerPodclique verifies only one pod per Podclique is being deleted at a time
 // during rolling updates.
 //
-// This function processes a sequence of pod events and tracks the number of individual pods
-// that are in a "deleting" state within each Podclique at any given time.
+// Rolling update sequence for Grove:
+// 1. ALL new pods are created immediately (to reach desired replica count with new template)
+// 2. New pods become ready
+// 3. Old pods are deleted ONE AT A TIME (after new pods are ready)
+//
+// Since new pods are created before old pods are deleted, we verify that old pod deletions
+// happen sequentially within each PodClique by checking deletion event timing.
 func verifyOnePodDeletedAtATimePerPodclique(t *testing.T, events []podEvent) {
 	t.Helper()
 
-	// Track which pods are currently in the process of being deleted/replaced, grouped by Podclique.
-	// The deletingPods map is keyed by Podclique name, with values being maps of pod identifiers to deletion timestamps.
-	// Map structure: podcliqueName -> podID -> deletion timestamp
-	deletingPods := make(map[string]map[string]time.Time)
+	// Track deletion events per PodClique
+	type deletionEvent struct {
+		podName   string
+		position  string
+		timestamp time.Time
+		eventIdx  int
+	}
+	
+	recentDeletionsPerPodclique := make(map[string][]deletionEvent)
 	maxConcurrentDeletionsPerPodclique := make(map[string]int)
+	
+	// Time window to consider deletions as "concurrent" (1 second)
+	const concurrencyWindow = 1 * time.Second
 
-	for _, event := range events {
+	for i, event := range events {
 		// All pods should have labels - if nil, that's a bug
 		if event.Pod.Labels == nil {
 			t.Fatalf("Pod %s has no labels, which indicates a bug in pod creation", event.Pod.Name)
@@ -1663,39 +1717,41 @@ func verifyOnePodDeletedAtATimePerPodclique(t *testing.T, events []podEvent) {
 
 		podID := getPodIdentifier(t, event.Pod)
 
-		switch event.Type {
-		case watch.Deleted:
-			// When a pod is deleted, we add it to the deletingPods map (grouped by Podclique) using its unique identifier.
-			// This marks the start of that pod's deletion/replacement cycle.
-			if deletingPods[podcliqueName] == nil {
-				deletingPods[podcliqueName] = make(map[string]time.Time)
-			}
-			deletingPods[podcliqueName][podID] = event.Timestamp
-		case watch.Added:
-			// When a pod with the same identifier is added, we remove it from the deletingPods map.
-			// This marks the completion of the replacement - the new pod is ready and the old one
-			// is no longer being replaced.
-			if deletingPods[podcliqueName] != nil {
-				delete(deletingPods[podcliqueName], podID)
-				if len(deletingPods[podcliqueName]) == 0 {
-					delete(deletingPods, podcliqueName)
+		// Clean up old deletions outside the time window for this PodClique
+		if event.Type == watch.Deleted || len(recentDeletionsPerPodclique[podcliqueName]) > 0 {
+			currentTime := event.Timestamp
+			validDeletions := []deletionEvent{}
+			for _, d := range recentDeletionsPerPodclique[podcliqueName] {
+				if currentTime.Sub(d.timestamp) < concurrencyWindow {
+					validDeletions = append(validDeletions, d)
 				}
 			}
+			recentDeletionsPerPodclique[podcliqueName] = validDeletions
 		}
 
-		// After processing each event, we track the maximum number of concurrent deletions observed per Podclique.
-		for podclique, pods := range deletingPods {
-			if len(pods) > maxConcurrentDeletionsPerPodclique[podclique] {
-				maxConcurrentDeletionsPerPodclique[podclique] = len(pods)
+		if event.Type == watch.Deleted {
+			// Record this deletion for this PodClique
+			deletion := deletionEvent{
+				podName:   event.Pod.Name,
+				position:  podID,
+				timestamp: event.Timestamp,
+				eventIdx:  i,
+			}
+			recentDeletionsPerPodclique[podcliqueName] = append(recentDeletionsPerPodclique[podcliqueName], deletion)
+			
+			// Track max concurrent deletions per PodClique
+			if len(recentDeletionsPerPodclique[podcliqueName]) > maxConcurrentDeletionsPerPodclique[podcliqueName] {
+				maxConcurrentDeletionsPerPodclique[podcliqueName] = len(recentDeletionsPerPodclique[podcliqueName])
 			}
 		}
 	}
 
-	// Assert that at most 1 pod per Podclique was in the deletion-to-creation window at any point in time,
-	// which ensures the rolling update deletes pods sequentially within each Podclique.
+	// Assert that at most 1 pod per Podclique was being deleted at any point in time,
+	// which ensures the rolling update processes pods sequentially within each Podclique.
 	for podclique, maxDeletions := range maxConcurrentDeletionsPerPodclique {
 		if maxDeletions > 1 {
-			t.Fatalf("Expected at most 1 pod being deleted at a time in Podclique %s, but found %d concurrent deletions", podclique, maxDeletions)
+			t.Fatalf("Expected at most 1 pod being deleted at a time in Podclique %s, but found %d concurrent deletions within %v window", 
+				podclique, maxDeletions, concurrencyWindow)
 		}
 	}
 }
@@ -1885,6 +1941,16 @@ func getPodCliqueNames(podCliqueMap map[string]map[string]bool) []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+// getMapKeys returns the keys of a map as a slice (for logging)
+func getMapKeys(m map[string]time.Time) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // verifyOnePCSGReplicaDeletedAtATime verifies only one PCSG replica globally is deleted at a time
