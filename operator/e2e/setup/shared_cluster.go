@@ -174,9 +174,11 @@ func (scm *SharedClusterManager) Setup(ctx context.Context, testImages []string)
 	scm.dynamicClient = dynamicClient
 
 	// Setup test images in registry
-	if err := setupRegistryTestImages(scm.registryPort, testImages); err != nil {
+	scm.logger.Info("🖼️ Setting up test images in registry...")
+	if err := setupRegistryTestImages(scm.registryPort, testImages, scm.logger); err != nil {
 		return fmt.Errorf("failed to setup registry test images: %w", err)
 	}
+	scm.logger.Info("✅ Test images ready in registry")
 
 	// Get list of worker nodes for cordoning management
 	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -438,7 +440,10 @@ func (scm *SharedClusterManager) Teardown() {
 }
 
 // setupRegistryTestImages sets up test images in the registry
-func setupRegistryTestImages(registryPort string, images []string) error {
+// Docker push is smart - if the image layers already exist in the registry, the push becomes
+// essentially a no-op (just verifies layers and updates manifest). By keeping the registry
+// container around between test runs, subsequent pushes are very fast.
+func setupRegistryTestImages(registryPort string, images []string, logger *utils.Logger) error {
 	if len(images) == 0 {
 		return nil
 	}
@@ -455,8 +460,9 @@ func setupRegistryTestImages(registryPort string, images []string) error {
 	// Process each image
 	for _, imageName := range images {
 		registryImage := fmt.Sprintf("localhost:%s/%s", registryPort, imageName)
+		logger.Debugf("  Processing image: %s -> %s", imageName, registryImage)
 
-		// Step 1: Pull the image
+		// Step 1: Pull the image if not already present locally
 		pullReader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to pull %s: %w", imageName, err)
@@ -476,6 +482,8 @@ func setupRegistryTestImages(registryPort string, images []string) error {
 		}
 
 		// Step 3: Push the image to the local registry
+		// If layers already exist in the registry, this is very fast (essentially a no-op)
+		logger.Debugf("  Pushing to registry (will be fast if layers already exist)...")
 		pushReader, err := cli.ImagePush(ctx, registryImage, image.PushOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to push %s: %w", registryImage, err)
@@ -487,6 +495,7 @@ func setupRegistryTestImages(registryPort string, images []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to read push output for %s: %w", registryImage, err)
 		}
+		logger.Debugf("  ✓ Image %s ready in registry", imageName)
 	}
 
 	return nil

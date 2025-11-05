@@ -29,6 +29,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
 	"github.com/k3d-io/k3d/v5/pkg/client"
 	"github.com/k3d-io/k3d/v5/pkg/config"
 	"github.com/k3d-io/k3d/v5/pkg/config/types"
@@ -117,7 +118,8 @@ func ensureClusterDoesNotExist(ctx context.Context, clusterName string, logger *
 }
 
 // ensureRegistryDoesNotExist removes any stale k3d registry container from previous runs.
-func ensureRegistryDoesNotExist(ctx context.Context, clusterName string, logger *utils.Logger) error {
+// If keepRegistry is true, the registry is preserved if it exists and is running.
+func ensureRegistryDoesNotExist(ctx context.Context, clusterName string, keepRegistry bool, logger *utils.Logger) error {
 	registryContainerName := fmt.Sprintf("k3d-%s-registry", clusterName)
 
 	dockerClient, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
@@ -144,6 +146,12 @@ func ensureRegistryDoesNotExist(ctx context.Context, clusterName string, logger 
 			displayName = strings.TrimPrefix(c.Names[0], "/")
 		}
 
+		// If keepRegistry is true and container is running, keep it
+		if keepRegistry && c.State == "running" {
+			logger.Infof("♻️ Keeping existing registry container %s (%s) for reuse", displayName, c.ID[:12])
+			return nil
+		}
+
 		logger.Warnf("🧹 Removing stale k3d registry container %s (%s) before cluster setup", displayName, c.ID[:12])
 
 		if err := dockerClient.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
@@ -151,6 +159,97 @@ func ensureRegistryDoesNotExist(ctx context.Context, clusterName string, logger 
 		}
 	}
 
+	return nil
+}
+
+// registryExists checks if a k3d registry container exists and is running
+func registryExists(ctx context.Context, clusterName string) (bool, error) {
+	registryContainerName := fmt.Sprintf("k3d-%s-registry", clusterName)
+
+	dockerClient, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	if err != nil {
+		return false, fmt.Errorf("failed to create Docker client: %w", err)
+	}
+	defer dockerClient.Close()
+
+	filterArgs := filters.NewArgs()
+	filterArgs.Add("name", registryContainerName)
+
+	containers, err := dockerClient.ContainerList(ctx, container.ListOptions{All: true, Filters: filterArgs})
+	if err != nil {
+		return false, fmt.Errorf("failed to list Docker containers: %w", err)
+	}
+
+	for _, c := range containers {
+		if c.State == "running" {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// createRegistry manually creates a Docker registry container
+// By creating it manually (not via k3d), it won't be deleted when the cluster is torn down
+func createRegistry(ctx context.Context, clusterName, registryPort string, logger *utils.Logger) error {
+	registryContainerName := fmt.Sprintf("k3d-%s-registry", clusterName)
+
+	dockerClient, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("failed to create Docker client: %w", err)
+	}
+	defer dockerClient.Close()
+
+	logger.Infof("🏗️ Creating registry container %s...", registryContainerName)
+
+	// Create container configuration
+	exposedPorts, err := nat.NewPort("tcp", "5000")
+	if err != nil {
+		return fmt.Errorf("failed to create port: %w", err)
+	}
+
+	containerConfig := &container.Config{
+		Image: "registry:2",
+		ExposedPorts: nat.PortSet{
+			exposedPorts: struct{}{},
+		},
+		Labels: map[string]string{
+			"app":                      "k3d",
+			"k3d.cluster":              clusterName,
+			"k3d.role":                 "registry",
+			"k3d.version":              "v5.8.3",
+			"k3d.registry.host":        "0.0.0.0",
+			"k3d.registry.hostIP":      "0.0.0.0",
+			fmt.Sprintf("k3d.registry.host.port.%s", registryPort): registryPort,
+		},
+	}
+
+	hostConfig := &container.HostConfig{
+		PortBindings: nat.PortMap{
+			exposedPorts: []nat.PortBinding{
+				{
+					HostIP:   "0.0.0.0",
+					HostPort: registryPort,
+				},
+			},
+		},
+		RestartPolicy: container.RestartPolicy{
+			Name: "unless-stopped",
+		},
+	}
+
+	// Create the container
+	resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, registryContainerName)
+	if err != nil {
+		return fmt.Errorf("failed to create registry container: %w", err)
+	}
+
+	// Start the container
+	if err := dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("failed to start registry container: %w", err)
+	}
+
+	logger.Infof("✅ Registry container created and started: %s", registryContainerName)
 	return nil
 }
 
@@ -335,14 +434,26 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *utils.Logge
 		)
 	}
 
-	// Configure registry if enabled
+	// Check if registry already exists and create it if needed
 	if cfg.EnableRegistry {
+		exists, err := registryExists(ctx, cfg.Name)
+		if err != nil {
+			logger.Warnf("Failed to check if registry exists: %v", err)
+		}
+
+		if exists {
+			logger.Infof("📦 Registry already exists - will reuse it for faster setup")
+		} else {
+			logger.Infof("📦 No existing registry found - will create new one")
+			if err := createRegistry(ctx, cfg.Name, cfg.RegistryPort, logger); err != nil {
+				return nil, nil, fmt.Errorf("failed to create registry: %w", err)
+			}
+		}
+
+		// Configure cluster to use the externally-managed registry
+		// Using "Use" instead of "Create" means k3d won't manage the registry lifecycle
 		clusterConfig.Registries = v1alpha5.SimpleConfigRegistries{
-			Create: &v1alpha5.SimpleConfigRegistryCreateConfig{
-				Name:     "registry",
-				Host:     "0.0.0.0",
-				HostPort: cfg.RegistryPort,
-			},
+			Use: []string{fmt.Sprintf("k3d-%s-registry:%s", cfg.Name, cfg.RegistryPort)},
 		}
 	}
 
@@ -356,16 +467,13 @@ func SetupK3DCluster(ctx context.Context, cfg ClusterConfig, logger *utils.Logge
 		return nil, nil, err
 	}
 
-	if cfg.EnableRegistry {
-		if err := ensureRegistryDoesNotExist(ctx, cfg.Name, logger); err != nil {
-			return nil, nil, err
-		}
-	}
-
 	// this is the cleanup function, we always return it now so the caller can decide to use it or not
 	cleanup := func() {
 		logger.Debug("🗑️ Deleting cluster...")
-		if err := client.ClusterDelete(ctx, runtimes.Docker, &k3dConfig.Cluster, k3d.ClusterDeleteOpts{}); err != nil {
+		// Use default opts - k3d will check if registry is connected to other networks
+		// and preserve it if so (which happens when we manually create the registry)
+		deleteOpts := k3d.ClusterDeleteOpts{}
+		if err := client.ClusterDelete(ctx, runtimes.Docker, &k3dConfig.Cluster, deleteOpts); err != nil {
 			logger.Errorf("Failed to delete cluster: %v", err)
 		} else {
 			logger.Info("✅ Cluster deleted successfully")
