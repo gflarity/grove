@@ -1,0 +1,146 @@
+# ImagePullBackOff - Non-existent Image Tag with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when image tag doesn't exist
+# Expected: 
+# - PodClique 'api' fails to pull image (part of scaling group)
+# - PodClique 'web' is schedule-gated (part of scaling group)
+# - PodClique 'database' is schedule-gated (part of scaling group)
+# - PodClique 'cache' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows unhealthy status due to 'api' failure
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 02-wrong-tag-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs image-error-wrong-tag-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg image-error-wrong-tag-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq image-error-wrong-tag-sg-0-api
+#    kubectl describe pclq image-error-wrong-tag-sg-0-cache
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=image-error-wrong-tag-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs image-error-wrong-tag-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows unhealthy children
+# - PodCliqueScalingGroup shows member 'api' is unhealthy
+# - 'api' PodClique shows image pull errors for non-existent tag
+# - 'web' and 'database' PodCliques show gang scheduling blocked
+# - 'cache' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: image-error-wrong-tag-sg
+  namespace: default
+  labels:
+    app: image-error-wrong-tag-sg
+    demo: group1-image
+    scenario: 02-wrong-tag-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing api, web, and database
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - api
+          - web
+          - database
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with non-existent image tag
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                # Non-existent tag: nginx:definitely-not-a-real-tag
+                image: nginx:definitely-not-a-real-tag
+                ports:
+                  - containerPort: 8080
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: web
+        spec:
+          roleName: web
+          replicas: 3
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                env:
+                  - name: APP_ENV
+                    value: "production"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique in the scaling group
+      # Part of the scaling group
+      - name: database
+        spec:
+          roleName: database
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: database
+                image: postgres:14-alpine
+                env:
+                  - name: POSTGRES_PASSWORD
+                    value: "example"
+                  - name: POSTGRES_DB
+                    value: "appdb"
+                resources:
+                  requests:
+                    cpu: 20m
+                    memory: 64Mi
+      
+      # Standalone healthy PodClique - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: cache
+        spec:
+          roleName: cache
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: cache
+                image: redis:7-alpine
+                ports:
+                  - containerPort: 6379
+                    name: redis
+                command:
+                  - redis-server
+                  - --save
+                  - ""
+                  - --appendonly
+                  - "no"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

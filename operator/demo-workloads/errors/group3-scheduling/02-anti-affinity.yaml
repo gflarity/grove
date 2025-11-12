@@ -1,0 +1,101 @@
+# Gang Scheduling Blocked - Pod Anti-Affinity
+# Demonstrates error when pod anti-affinity conflicts with gang scheduling requirements
+# Expected: Conflicting constraints prevent scheduling, status shows anti-affinity conflict
+#
+# CLUSTER REQUIREMENTS:
+# - This scenario requires a cluster with FEWER than 3 schedulable nodes
+# - In clusters with ≥3 nodes, the anti-affinity constraint will be satisfied
+# - To trigger the expected error, cordon nodes to leave < 3 schedulable:
+#   kubectl get nodes --no-headers | tail -n +4 | awk '{print $1}' | xargs -I {} kubectl cordon {}
+#
+# QUICK START:
+# 1. (Optional) Cordon nodes to ensure < 3 schedulable nodes:
+#    # Get total node count
+#    NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
+#    # Cordon all but 2 nodes
+#    kubectl get nodes --no-headers | tail -n +3 | awk '{print $1}' | xargs -I {} kubectl cordon {}
+#
+# 2. Apply this scenario:
+#    kubectl apply -f 02-anti-affinity.yaml
+#
+# 3. Check pod status (should show some Pending):
+#    kubectl get pods -l app=scheduling-error-anti-affinity
+#
+# 4. View the scheduling error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 5. Check PodCliqueSet status for scheduling visibility:
+#    kubectl get pcs scheduling-error-anti-affinity -o jsonpath='{.status.podGangStatuses}' | jq
+#
+# 6. (Recommended) Use grovectl for better output:
+#    grovectl describe pcs scheduling-error-anti-affinity
+#    grovectl analyze scheduling pcs scheduling-error-anti-affinity
+#
+# 7. Clean up:
+#    kubectl delete pcs scheduling-error-anti-affinity
+#    # Uncordon nodes if you cordoned them
+#    kubectl get nodes --no-headers | awk '{print $1}' | xargs -I {} kubectl uncordon {}
+#
+# EXPECTED BEHAVIOR:
+# - Some pods will remain in Pending state (if < 3 nodes available)
+# - Error will show "didn't match pod anti-affinity rules"
+# - Gang scheduling will be blocked due to conflicting constraints
+# - PCS status.operationalSummary.phase will be 'Degraded'
+# - PCS status.operationalSummary.reason will be 'SomeGangsBlocked'
+# - PCS status.podGangStatuses will show blocking info with 'NotScheduled' reason
+# - PCS status.conditions[GangSchedulingReady] will be 'False'
+# - PCS status.conditions[ChildrenHealthy] will be 'True' (unscheduled ≠ unhealthy)
+#
+# NOTE: In clusters with ≥3 nodes, all pods will schedule successfully and status will be 'Healthy'
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: scheduling-error-anti-affinity
+  namespace: default
+  labels:
+    app: scheduling-error-anti-affinity
+    demo: group3-scheduling
+    scenario: 02-anti-affinity
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with anti-affinity constraint - requires more nodes than available
+      - name: distributed
+        spec:
+          roleName: distributed
+          replicas: 5  # Requires 5 separate nodes (likely more than available)
+          podSpec:
+            containers:
+              - name: distributed
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+            # Pod anti-affinity requiring separate nodes for each pod
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: grove.io/role-name
+                          operator: In
+                          values:
+                            - distributed
+                    topologyKey: kubernetes.io/hostname
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: coordinator
+        spec:
+          roleName: coordinator
+          replicas: 1
+          podSpec:
+            containers:
+              - name: coordinator
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

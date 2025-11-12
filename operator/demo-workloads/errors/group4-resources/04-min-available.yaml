@@ -1,0 +1,87 @@
+# MinAvailable Violations
+# Demonstrates error when insufficient resources to meet MinAvailable requirement
+# Expected: Some pods scheduled, but not enough for MinAvailable, condition shows MinAvailableBreached = True
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 04-min-available.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=resource-error-min-available
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs resource-error-min-available -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs resource-error-min-available
+#
+# 6. Clean up:
+#    kubectl delete pcs resource-error-min-available
+#
+# EXPECTED BEHAVIOR:
+# - Some pods may schedule, but not enough for MinAvailable
+# - PCS condition MinAvailableBreached will be True
+# - PCS status.operationalSummary.phase will be 'Degraded'
+# - status.lastErrors will contain MinAvailable violation details
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: resource-error-min-available
+  namespace: default
+  labels:
+    app: resource-error-min-available
+    demo: group4-resources
+    scenario: 04-min-available
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with high replica count and MinAvailable - insufficient cluster resources
+      - name: workers
+        spec:
+          roleName: workers
+          replicas: 5
+          # Set MinAvailable to require all 5 replicas
+          # But request high resources so only some can be scheduled
+          minAvailable: 5
+          podSpec:
+            containers:
+              - name: workers
+                image: nginx:latest
+                resources:
+                  # Request high CPU so not all pods can be scheduled
+                  # With 5 pods needing 20 CPUs each (100 CPUs total),
+                  # most clusters won't be able to schedule all 5 pods
+                  requests:
+                    cpu: "20"
+                    memory: 4Gi
+      # Healthy PodClique - schedule-gated waiting for workers to meet MinAvailable
+      - name: coordinator
+        spec:
+          roleName: coordinator
+          replicas: 1
+          podSpec:
+            containers:
+              - name: coordinator
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Another healthy PodClique - schedule-gated waiting for gang
+      - name: storage
+        spec:
+          roleName: storage
+          replicas: 1
+          podSpec:
+            containers:
+              - name: storage
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

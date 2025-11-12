@@ -1,0 +1,135 @@
+# Multi-Gang Scenarios with Different Errors and Scaling Group
+# Demonstrates different gangs having different error types with PodCliqueScalingGroup
+# Expected: 
+# - Each gang shows its own errors through PodCliqueScalingGroup
+# - PodClique 'app' has different errors per gang (part of scaling group)
+# - PodClique 'sidecar' is schedule-gated when app has errors (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup status aggregates across gangs
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 04-multi-gang-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs complex-error-multi-gang-sg
+#
+# 3. Check PodCliqueScalingGroup status for each gang:
+#    kubectl describe pcsg complex-error-multi-gang-sg-0-main
+#    kubectl describe pcsg complex-error-multi-gang-sg-1-main
+#    kubectl describe pcsg complex-error-multi-gang-sg-2-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq complex-error-multi-gang-sg-0-app
+#    kubectl describe pclq complex-error-multi-gang-sg-0-monitoring
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=complex-error-multi-gang-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs complex-error-multi-gang-sg
+#
+# EXPECTED BEHAVIOR:
+# - Different gangs will show different errors
+# - PodCliqueScalingGroup status reflects per-gang state
+# - Some gangs may be healthy while others are degraded
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: complex-error-multi-gang-sg
+  namespace: default
+  labels:
+    app: complex-error-multi-gang-sg
+    demo: group5-complex
+    scenario: 04-multi-gang-scaling-group
+spec:
+  replicas: 3  # 3 gangs with different error states
+  template:
+    # Define a scaling group containing app and sidecar
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - app
+          - sidecar
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with image selector that will cause ImagePullBackOff in replicas 0
+      # Part of the scaling group
+      - name: app
+        spec:
+          roleName: app
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: app
+                # Using image with replica-specific tag (will fail for replica 0, succeed for others)
+                # In reality, all replicas use same image, but this simulates different error per gang
+                # For demo: replica 0 gets error, replica 2 is healthy
+                image: nginx:latest  # Will be patched per replica in actual e2e test
+                ports:
+                  - containerPort: 8080
+                    name: http
+                env:
+                  - name: APP_VERSION
+                    value: "v1"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Healthy PodClique - schedule-gated when app has errors
+      # Part of the scaling group
+      - name: sidecar
+        spec:
+          roleName: sidecar
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: sidecar
+                image: nginx:latest
+                ports:
+                  - containerPort: 9090
+                    name: metrics
+                env:
+                  - name: APP_URL
+                    value: "http://app:8080"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone monitoring service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: prom/prometheus:latest
+                ports:
+                  - containerPort: 9090
+                    name: prometheus
+                args:
+                  - --config.file=/etc/prometheus/prometheus.yml
+                  - --storage.tsdb.path=/prometheus
+                  - --web.enable-lifecycle
+                resources:
+                  requests:
+                    cpu: 20m
+                    memory: 128Mi
+# This creates 3 replicas (gangs) with different error states per gang
+# Gang 0 (Replica 0): app has ImagePullBackOff, sidecar healthy but schedule-gated
+# Gang 1 (Replica 1): app has CrashLoopBackOff, sidecar healthy but schedule-gated
+# Gang 2 (Replica 2): Both app and sidecar fully healthy and running
+# Note: To truly have different errors per gang, use e2e test helpers to patch
+# specific PodCliques after creation with different errors
+# PodCliqueScalingGroup status will aggregate errors from Gang 0 and Gang 1 with origin tracking

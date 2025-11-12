@@ -1,0 +1,98 @@
+# Rolling Update Blocked by Errors
+# Demonstrates how errors can block a rolling update
+# Expected: Update progress stalls, status shows blocking errors
+#
+# QUICK START:
+# 1. Apply the initial healthy workload:
+#    kubectl apply -f 03-rolling-update.yaml
+#
+# 2. Wait for it to be healthy:
+#    kubectl wait --for=condition=Ready pcs/complex-error-rolling-update --timeout=2m
+#
+# 3. Trigger a bad update (invalid image):
+#    kubectl patch pcs complex-error-rolling-update --type='json' -p='[
+#      {"op": "replace", "path": "/spec/template/cliques/0/spec/podSpec/containers/0/image", "value": "nginx:does-not-exist"}
+#    ]'
+#
+# 4. Watch rolling update progress:
+#    kubectl get pcs complex-error-rolling-update -o jsonpath='{.status.rollingUpdateProgress}'
+#
+# 5. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=complex-error-rolling-update
+#
+# 6. Clean up:
+#    kubectl delete pcs complex-error-rolling-update
+#
+# EXPECTED BEHAVIOR:
+# - New pods will fail with ImagePullBackOff
+# - Rolling update will stall
+# - status.rollingUpdateProgress will show blocked state
+# - Old pods will remain running
+# - PCS status.operationalSummary.phase will be 'Degraded'
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: complex-error-rolling-update
+  namespace: default
+  labels:
+    app: complex-error-rolling-update
+    demo: group5-complex
+    scenario: 03-rolling-update
+spec:
+  replicas: 3  # 3 gangs to demonstrate rolling update blocking
+  template:
+    cliques:
+      # PodClique that will have error in new version
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          podSpec:
+            containers:
+              - name: api
+                # Start with valid image (will be patched to invalid for demo)
+                image: nginx:latest
+                ports:
+                  - containerPort: 8080
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique in same gang
+      - name: web
+        spec:
+          roleName: web
+          replicas: 2
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Another healthy PodClique in same gang
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 1
+          podSpec:
+            containers:
+              - name: worker
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+# To demonstrate rolling update blocked:
+# 1. Apply this workload and wait for it to be healthy
+# 2. Update the image to an invalid one (e.g., nginx:does-not-exist)
+# 3. Observe that rolling update starts but gets blocked
+# 4. RollingUpdateProgress will show stalled state
+# 5. Status will show blocking errors preventing update completion

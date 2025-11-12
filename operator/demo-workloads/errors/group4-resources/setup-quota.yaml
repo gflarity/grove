@@ -1,0 +1,19 @@
+# Resource Quota Setup for Demo Scenario 03-quota-exceeded
+# Apply this file BEFORE applying 03-quota-exceeded.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-quota
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: demo-quota
+  namespace: demo-quota
+spec:
+  hard:
+    requests.cpu: "100m"
+    requests.memory: 200Mi
+    limits.cpu: "200m"
+    limits.memory: 400Mi

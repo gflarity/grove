@@ -1,0 +1,84 @@
+# Gang Scheduling Blocked - High CPU Requests
+# Demonstrates error when requesting more CPU than available
+# Expected: Pods cannot be scheduled, error shows insufficient CPU, gang scheduling blocked
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-high-cpu.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=resource-error-high-cpu
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs resource-error-high-cpu -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs resource-error-high-cpu
+#
+# 6. Clean up:
+#    kubectl delete pcs resource-error-high-cpu
+#
+# EXPECTED BEHAVIOR:
+# - Pods will remain in Pending state
+# - Error will show 'Insufficient cpu'
+# - Gang scheduling will be blocked due to resource constraints
+# - PCS status.operationalSummary.phase will be 'Blocked'
+# - status.blockingReasons will contain resource shortage details
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: resource-error-high-cpu
+  namespace: default
+  labels:
+    app: resource-error-high-cpu
+    demo: group4-resources
+    scenario: 01-high-cpu
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with excessive CPU request - blocks gang scheduling
+      - name: compute
+        spec:
+          roleName: compute
+          replicas: 2
+          podSpec:
+            containers:
+              - name: compute
+                image: nginx:latest
+                resources:
+                  # Request 1000 CPU cores (way more than any cluster has)
+                  requests:
+                    cpu: "1000"
+                    memory: 32Mi
+      # Healthy PodClique with reasonable resources - schedule-gated waiting for gang
+      - name: controller
+        spec:
+          roleName: controller
+          replicas: 1
+          podSpec:
+            containers:
+              - name: controller
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Another healthy PodClique with minimal resources - schedule-gated waiting for gang
+      - name: logger
+        spec:
+          roleName: logger
+          replicas: 1
+          podSpec:
+            containers:
+              - name: logger
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

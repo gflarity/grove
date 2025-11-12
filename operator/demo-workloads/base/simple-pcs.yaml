@@ -1,0 +1,59 @@
+# Simple PodCliqueSet - Base Template
+# This is a basic PodCliqueSet with a single PodClique containing 3 replicas.
+# Used as a foundation for creating error scenarios and as a reference for successful deployments.
+#
+# QUICK START:
+# 1. Apply this working example:
+#    kubectl apply -f simple-pcs.yaml
+#
+# 2. Check pods are running:
+#    kubectl get pods -l app.kubernetes.io/part-of=simple-pcs
+#
+# 3. Check PodCliqueSet is healthy:
+#    kubectl get pcs simple-pcs
+#
+# 4. View detailed status:
+#    kubectl get pcs simple-pcs -o yaml | grep -A 5 operationalSummary
+#
+# 5. (Optional) Use grovectl:
+#    grovectl describe pcs simple-pcs
+#
+# 6. Clean up:
+#    kubectl delete pcs simple-pcs
+#
+# EXPECTED BEHAVIOR:
+# - All 3 pods will be Running
+# - PCS status.operationalSummary.phase will be "Healthy"
+# - No errors in status.lastErrors
+# - All pods scheduled as a gang
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: simple-pcs
+  namespace: default
+  labels:
+    app: simple-pcs
+    demo: base-template
+spec:
+  replicas: 1
+  template:
+    cliques:
+      - name: web
+        spec:
+          roleName: web
+          replicas: 3
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+                  limits:
+                    cpu: 100m
+                    memory: 64Mi

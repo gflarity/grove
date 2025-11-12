@@ -1,0 +1,74 @@
+# CrashLoopBackOff - Missing Binary
+# Demonstrates error when command references non-existent binary
+# Expected: Container fails to start, error shows binary not found
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 02-missing-binary.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=container-error-missing-binary
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs container-error-missing-binary -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs container-error-missing-binary
+#
+# 6. Clean up:
+#    kubectl delete pcs container-error-missing-binary
+#
+# EXPECTED BEHAVIOR:
+# - Pods will show CrashLoopBackOff state
+# - Error message will indicate 'executable file not found'
+# - Container will fail to start
+# - PCS status.operationalSummary.phase will be 'Degraded'
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-error-missing-binary
+  namespace: default
+  labels:
+    app: container-error-missing-binary
+    demo: group2-container
+    scenario: 02-missing-binary
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with missing binary error
+      - name: service
+        spec:
+          roleName: service
+          replicas: 2
+          podSpec:
+            containers:
+              - name: service
+                image: nginx:latest
+                # Command referencing non-existent binary
+                command: ["/bin/does-not-exist"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: ingress
+        spec:
+          roleName: ingress
+          replicas: 1
+          podSpec:
+            containers:
+              - name: ingress
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

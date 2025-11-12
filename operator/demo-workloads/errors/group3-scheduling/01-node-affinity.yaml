@@ -1,0 +1,93 @@
+# Gang Scheduling Blocked - Node Affinity
+# Demonstrates error when node affinity requires non-existent label
+# Expected: Pods cannot be scheduled, gang scheduling blocked, status shows blocking reason
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-node-affinity.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=scheduling-error-node-affinity
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs scheduling-error-node-affinity -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs scheduling-error-node-affinity
+#
+# 6. Clean up:
+#    kubectl delete pcs scheduling-error-node-affinity
+#
+# EXPECTED BEHAVIOR:
+# - Pods will remain in Pending state
+# - Gang scheduling will be blocked
+# - Error will show 'node(s) didn't match node selector'
+# - PCS status.operationalSummary.phase will be 'Blocked'
+# - status.blockingReasons will contain scheduling constraint details
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: scheduling-error-node-affinity
+  namespace: default
+  labels:
+    app: scheduling-error-node-affinity
+    demo: group3-scheduling
+    scenario: 01-node-affinity
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with node affinity constraint - blocks gang scheduling
+      - name: compute
+        spec:
+          roleName: compute
+          replicas: 2
+          podSpec:
+            containers:
+              - name: compute
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+            # Node affinity requiring a label that doesn't exist
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: demo-label-that-does-not-exist
+                          operator: In
+                          values:
+                            - demo-value-that-does-not-exist
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: storage
+        spec:
+          roleName: storage
+          replicas: 1
+          podSpec:
+            containers:
+              - name: storage
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Another healthy PodClique - schedule-gated waiting for gang
+      - name: network
+        spec:
+          roleName: network
+          replicas: 1
+          podSpec:
+            containers:
+              - name: network
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

@@ -1,0 +1,120 @@
+# Gang Scheduling Blocked - High Memory Requests with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when requesting more memory than available
+# Expected: 
+# - PodClique 'data-processor' cannot be scheduled (part of scaling group)
+# - PodClique 'api' is schedule-gated (part of scaling group)
+# - PodClique 'cache' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows blocked status due to 'data-processor' resource constraints
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 02-high-memory-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs resource-error-high-memory-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg resource-error-high-memory-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq resource-error-high-memory-sg-0-data-processor
+#    kubectl describe pclq resource-error-high-memory-sg-0-cache
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=resource-error-high-memory-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs resource-error-high-memory-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows blocked children
+# - PodCliqueScalingGroup shows member 'data-processor' is blocked
+# - 'data-processor' PodClique shows pods in Pending state with 'Insufficient memory'
+# - 'api' PodClique shows gang scheduling blocked
+# - 'cache' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: resource-error-high-memory-sg
+  namespace: default
+  labels:
+    app: resource-error-high-memory-sg
+    demo: group4-resources
+    scenario: 02-high-memory-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing data-processor and api
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - data-processor
+          - api
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with excessive memory request - blocks gang scheduling
+      # Part of the scaling group
+      - name: data-processor
+        spec:
+          roleName: data-processor
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: data-processor
+                image: nginx:latest
+                resources:
+                  # Request 1Ti memory (way more than any cluster has)
+                  requests:
+                    cpu: 10m
+                    memory: "1Ti"
+      
+      # Healthy PodClique with normal memory - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                image: nginx:latest
+                ports:
+                  - containerPort: 8080
+                    name: http
+                env:
+                  - name: API_VERSION
+                    value: "v1"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone cache service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: cache
+        spec:
+          roleName: cache
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: cache
+                image: redis:7-alpine
+                ports:
+                  - containerPort: 6379
+                    name: redis
+                command:
+                  - redis-server
+                  - --maxmemory
+                  - 64mb
+                  - --maxmemory-policy
+                  - allkeys-lru
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

@@ -1,0 +1,29 @@
+# Limit Ranges for Demo Scenarios
+# Creates limit ranges that can be used to demonstrate resource constraint scenarios
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-limits-ns
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: demo-limit-range
+  namespace: demo-limits-ns
+spec:
+  limits:
+    - default:
+        cpu: "100m"
+        memory: "128Mi"
+      defaultRequest:
+        cpu: "50m"
+        memory: "64Mi"
+      type: Container
+    - max:
+        cpu: "500m"
+        memory: "512Mi"
+      min:
+        cpu: "10m"
+        memory: "16Mi"
+      type: Container

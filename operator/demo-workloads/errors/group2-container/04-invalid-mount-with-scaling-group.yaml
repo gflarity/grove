@@ -1,0 +1,190 @@
+# CreateContainerError - Invalid Volume Mount with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when volume mount references non-existent volume
+# Expected: 
+# - PodClique 'storage' fails with invalid volume mount (part of scaling group)
+# - PodClique 'app' is schedule-gated (part of scaling group)
+# - PodClique 'processor' is schedule-gated (part of scaling group)
+# - PodClique 'metrics' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows unhealthy status due to 'storage' failure
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 04-invalid-mount-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs container-invalid-mount-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg container-invalid-mount-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq container-invalid-mount-sg-0-storage
+#    kubectl describe pclq container-invalid-mount-sg-0-metrics
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=container-invalid-mount-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs container-invalid-mount-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows unhealthy children
+# - PodCliqueScalingGroup shows member 'storage' is unhealthy
+# - 'storage' PodClique shows container creation error
+# - 'app' and 'processor' PodCliques show gang scheduling blocked
+# - 'metrics' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-invalid-mount-sg
+  namespace: default
+  labels:
+    app: container-invalid-mount-sg
+    demo: group2-container
+    scenario: 04-invalid-mount-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing storage, app, and processor
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - storage
+          - app
+          - processor
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with invalid volume mount
+      # Part of the scaling group
+      - name: storage
+        spec:
+          roleName: storage
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: storage
+                image: minio/minio:latest
+                command:
+                  - minio
+                  - server
+                  - /data
+                ports:
+                  - containerPort: 9000
+                    name: api
+                  - containerPort: 9001
+                    name: console
+                volumeMounts:
+                  # Reference to non-existent volume
+                  - name: data-volume-does-not-exist
+                    mountPath: /data
+                  # This valid mount won't help - the invalid one causes the error
+                  - name: config-volume
+                    mountPath: /config
+                env:
+                  - name: MINIO_ROOT_USER
+                    value: "minioadmin"
+                  - name: MINIO_ROOT_PASSWORD
+                    value: "minioadmin"
+                resources:
+                  requests:
+                    cpu: 20m
+                    memory: 128Mi
+            volumes:
+              # Only config-volume is defined, not data-volume-does-not-exist
+              - name: config-volume
+                emptyDir: {}
+      
+      # Application service - part of scaling group
+      # Part of the scaling group
+      - name: app
+        spec:
+          roleName: app
+          replicas: 3
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: app
+                image: node:18-alpine
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Application server starting..."
+                    echo "Connecting to storage service..."
+                    while true; do
+                      echo "$(date): Processing requests"
+                      sleep 10
+                    done
+                ports:
+                  - containerPort: 3000
+                    name: http
+                env:
+                  - name: STORAGE_ENDPOINT
+                    value: "http://storage:9000"
+                  - name: NODE_ENV
+                    value: "production"
+                resources:
+                  requests:
+                    cpu: 15m
+                    memory: 64Mi
+      
+      # Data processor in the scaling group
+      # Part of the scaling group
+      - name: processor
+        spec:
+          roleName: processor
+          replicas: 2
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: processor
+                image: python:3.9-alpine
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Data processor starting..."
+                    pip install boto3
+                    while true; do
+                      echo "$(date): Processing data from storage..."
+                      sleep 20
+                    done
+                env:
+                  - name: S3_ENDPOINT
+                    value: "http://storage:9000"
+                  - name: AWS_ACCESS_KEY_ID
+                    value: "minioadmin"
+                  - name: AWS_SECRET_ACCESS_KEY
+                    value: "minioadmin"
+                resources:
+                  requests:
+                    cpu: 25m
+                    memory: 128Mi
+      
+      # Standalone metrics collector - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: metrics
+        spec:
+          roleName: metrics
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: metrics
+                image: grafana/grafana:latest
+                ports:
+                  - containerPort: 3000
+                    name: http
+                env:
+                  - name: GF_SECURITY_ADMIN_PASSWORD
+                    value: "admin"
+                  - name: GF_USERS_ALLOW_SIGN_UP
+                    value: "false"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi

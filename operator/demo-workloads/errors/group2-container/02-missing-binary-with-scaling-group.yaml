@@ -1,0 +1,158 @@
+# CrashLoopBackOff - Missing Binary/Command with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when container command doesn't exist
+# Expected: 
+# - PodClique 'backend' fails with missing binary (part of scaling group)
+# - PodClique 'frontend' is schedule-gated initially (part of scaling group)
+# - PodClique 'cache' is schedule-gated initially (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows degraded status due to 'backend' failure
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 02-missing-binary-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs container-missing-binary-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg container-missing-binary-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq container-missing-binary-sg-0-backend
+#    kubectl describe pclq container-missing-binary-sg-0-monitoring
+#
+# 5. View pods and their logs:
+#    kubectl get pods -l app.kubernetes.io/part-of=container-missing-binary-sg
+#    kubectl logs <backend-pod-name>
+#
+# 6. Clean up:
+#    kubectl delete pcs container-missing-binary-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows degraded children
+# - PodCliqueScalingGroup shows member 'backend' is unhealthy
+# - 'backend' pods fail with "executable file not found" error
+# - Gang members will schedule together but backend keeps failing
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-missing-binary-sg
+  namespace: default
+  labels:
+    app: container-missing-binary-sg
+    demo: group2-container
+    scenario: 02-missing-binary-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing backend, frontend, and cache
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - backend
+          - frontend
+          - cache
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with non-existent binary
+      # Part of the scaling group
+      - name: backend
+        spec:
+          roleName: backend
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: backend
+                image: alpine:latest
+                # Binary doesn't exist in alpine image
+                command:
+                  - node
+                  - server.js
+                env:
+                  - name: PORT
+                    value: "3000"
+                  - name: NODE_ENV
+                    value: "production"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Frontend service - part of scaling group
+      # Part of the scaling group
+      - name: frontend
+        spec:
+          roleName: frontend
+          replicas: 3
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: frontend
+                image: nginx:alpine
+                ports:
+                  - containerPort: 80
+                    name: http
+                env:
+                  - name: BACKEND_URL
+                    value: "http://backend:3000"
+                  - name: CACHE_URL
+                    value: "redis://cache:6379"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Cache service in the scaling group
+      # Part of the scaling group
+      - name: cache
+        spec:
+          roleName: cache
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: cache
+                image: redis:7-alpine
+                ports:
+                  - containerPort: 6379
+                    name: redis
+                command:
+                  - redis-server
+                  - --maxmemory
+                  - 64mb
+                  - --maxmemory-policy
+                  - allkeys-lru
+                resources:
+                  requests:
+                    cpu: 15m
+                    memory: 64Mi
+      
+      # Standalone monitoring service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: prom/prometheus:latest
+                ports:
+                  - containerPort: 9090
+                    name: prometheus
+                args:
+                  - --config.file=/etc/prometheus/prometheus.yml
+                  - --storage.tsdb.path=/prometheus
+                  - --web.console.libraries=/usr/share/prometheus/console_libraries
+                  - --web.console.templates=/usr/share/prometheus/consoles
+                  - --web.enable-lifecycle
+                resources:
+                  requests:
+                    cpu: 20m
+                    memory: 128Mi

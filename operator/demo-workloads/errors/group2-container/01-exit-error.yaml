@@ -1,0 +1,87 @@
+# CrashLoopBackOff - Exit Immediately
+# Demonstrates error when container exits immediately with error code
+# Expected: Pods enter CrashLoopBackOff state, restart count increases, gang scheduling may be blocked
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-exit-error.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=container-error-exit
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs container-error-exit -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs container-error-exit
+#
+# 6. Clean up:
+#    kubectl delete pcs container-error-exit
+#
+# EXPECTED BEHAVIOR:
+# - Pods will show CrashLoopBackOff state
+# - Container will exit immediately with code 1
+# - Restart count will increase over time
+# - PCS status.operationalSummary.phase will be 'Degraded'
+# - Watch restart count: kubectl get pods -l app.kubernetes.io/part-of=container-error-exit -w
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-error-exit
+  namespace: default
+  labels:
+    app: container-error-exit
+    demo: group2-container
+    scenario: 01-exit-error
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with CrashLoopBackOff - exits immediately
+      - name: processor
+        spec:
+          roleName: processor
+          replicas: 2
+          podSpec:
+            containers:
+              - name: processor
+                image: nginx:latest
+                # Command that exits immediately with error code
+                command: ["false"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: database
+        spec:
+          roleName: database
+          replicas: 1
+          podSpec:
+            containers:
+              - name: database
+                image: postgres:latest
+                env:
+                  - name: POSTGRES_PASSWORD
+                    value: "demo"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+      # Another healthy PodClique - schedule-gated waiting for gang
+      - name: queue
+        spec:
+          roleName: queue
+          replicas: 1
+          podSpec:
+            containers:
+              - name: queue
+                image: redis:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

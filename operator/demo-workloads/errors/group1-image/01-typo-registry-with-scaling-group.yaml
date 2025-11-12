@@ -1,0 +1,144 @@
+# ImagePullBackOff - Registry Hostname Typo with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when registry hostname has a typo (registr instead of registry)
+# Expected: 
+# - PodClique 'api' fails to pull image (part of scaling group)
+# - PodClique 'web' is schedule-gated (part of scaling group)
+# - PodClique 'worker' is schedule-gated (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows unhealthy status due to 'api' failure
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-typo-registry-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs image-error-typo-registry-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg image-error-typo-registry-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq image-error-typo-registry-sg-0-api
+#    kubectl describe pclq image-error-typo-registry-sg-0-monitoring
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=image-error-typo-registry-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs image-error-typo-registry-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows unhealthy children
+# - PodCliqueScalingGroup shows member 'api' is unhealthy
+# - 'api' PodClique shows image pull errors
+# - 'web' and 'worker' PodCliques show gang scheduling blocked
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: image-error-typo-registry-sg
+  namespace: default
+  labels:
+    app: image-error-typo-registry-sg
+    demo: group1-image
+    scenario: 01-typo-registry-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing api, web, and worker
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - api
+          - web
+          - worker
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with image error - blocks gang scheduling
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                # Typo in registry hostname: registr instead of registry
+                image: registr:5001/nginx:latest
+                ports:
+                  - containerPort: 8080
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Healthy PodClique - schedule-gated waiting for gang member "api"
+      # Part of the scaling group
+      - name: web
+        spec:
+          roleName: web
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique in the scaling group
+      # Part of the scaling group
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: worker
+                image: nginx:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Worker started"
+                    nginx -g 'daemon off;'
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone healthy PodClique - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Monitoring service started"
+                    while true; do
+                      echo "$(date): System healthy"
+                      sleep 30
+                    done
+                resources:
+                  requests:
+                    cpu: 5m
+                    memory: 16Mi

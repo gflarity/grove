@@ -1,0 +1,149 @@
+# CreateContainerConfigError - Invalid Environment Variable Key with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when environment variable key contains invalid characters
+# Expected: 
+# - PodClique 'api' fails to create container (part of scaling group)
+# - PodClique 'web' is schedule-gated (part of scaling group) 
+# - PodClique 'worker' is schedule-gated (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows unhealthy status due to 'api' failure
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 05-invalid-env-key-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs env-err-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg env-err-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq env-err-sg-0-api
+#    kubectl describe pclq env-err-sg-0-monitoring
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=env-err-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs env-err-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows unhealthy children
+# - PodCliqueScalingGroup shows member 'api' is unhealthy
+# - 'api' PodClique shows pod creation errors
+# - 'web' and 'worker' PodCliques show gang scheduling blocked
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: env-err-sg
+  namespace: default
+  labels:
+    app: env-err-sg
+    demo: group2-container
+    scenario: 05-invalid-env-key-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing api, web, and worker
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - api
+          - web 
+          - worker
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with INVALID environment variable key (will fail)
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                image: nginx:latest
+                env:
+                  # Invalid: environment variable key contains '=' character
+                  # Kubernetes expects keys to be valid C identifiers (alphanumeric + underscore)
+                  - name: "KEY=1"
+                    value: "some-value"
+                  # This valid env var won't help - the invalid one causes the error
+                  - name: VALID_KEY
+                    value: "valid-value"
+      
+      # PodClique with VALID configuration (but will be schedule-gated due to gang)
+      # Part of the scaling group
+      - name: web
+        spec:
+          roleName: web
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                env:
+                  # Valid environment variables
+                  - name: APP_NAME
+                    value: "my-app"
+                  - name: ENVIRONMENT
+                    value: "demo"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another PodClique in the scaling group - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: worker
+                image: nginx:latest
+                env:
+                  - name: WORKER_TYPE
+                    value: "background"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone healthy PodClique - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Monitoring service started"
+                    while true; do
+                      echo "$(date): System healthy"
+                      sleep 30
+                    done
+                env:
+                  - name: MONITOR_INTERVAL
+                    value: "30"
+                  - name: LOG_LEVEL
+                    value: "INFO"
+                resources:
+                  requests:
+                    cpu: 5m
+                    memory: 16Mi

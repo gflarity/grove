@@ -1,0 +1,74 @@
+# Cascading Failures
+# Demonstrates errors in one clique causing errors in dependent cliques
+# Expected: Errors propagate through dependencies, status shows dependency chain
+# Note: This uses startup ordering to create dependencies
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 02-cascading.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=complex-error-cascading
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs complex-error-cascading -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs complex-error-cascading
+#
+# 6. Clean up:
+#    kubectl delete pcs complex-error-cascading
+#
+# EXPECTED BEHAVIOR:
+# - Initial errors will trigger cascading failures
+# - Dependency chain will be visible in status
+# - Multiple error types will appear
+# - PCS status.operationalSummary.phase will be 'Degraded' or 'Blocked'
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: complex-error-cascading
+  namespace: default
+  labels:
+    app: complex-error-cascading
+    demo: group5-complex
+    scenario: 02-cascading
+spec:
+  replicas: 2  # Two gangs to demonstrate cascading
+  template:
+    cliques:
+      # Gang 0 - PodClique with ImagePullBackOff error (blocks Gang 0)
+      - name: database
+        spec:
+          roleName: database
+          replicas: 1
+          podSpec:
+            containers:
+              - name: database
+                # Image pull error blocks Gang 0
+                image: postgres:does-not-exist
+                env:
+                  - name: POSTGRES_PASSWORD
+                    value: "demo"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+      # Gang 0 - Healthy PodClique, schedule-gated waiting for database
+      - name: app
+        spec:
+          roleName: app
+          replicas: 2
+          podSpec:
+            containers:
+              - name: app
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
