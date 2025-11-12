@@ -1,0 +1,171 @@
+# CrashLoopBackOff - Invalid Command Arguments with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when container command has invalid arguments
+# Expected: 
+# - PodClique 'api' fails with invalid arguments (part of scaling group)
+# - PodClique 'web' is schedule-gated initially (part of scaling group)
+# - PodClique 'db' is schedule-gated initially (part of scaling group)
+# - PodClique 'backup' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows degraded status due to 'api' failure
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 03-invalid-args-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs container-invalid-args-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg container-invalid-args-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq container-invalid-args-sg-0-api
+#    kubectl describe pclq container-invalid-args-sg-0-backup
+#
+# 5. View pods and their logs:
+#    kubectl get pods -l app.kubernetes.io/part-of=container-invalid-args-sg
+#    kubectl logs <api-pod-name>
+#
+# 6. Clean up:
+#    kubectl delete pcs container-invalid-args-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows degraded children
+# - PodCliqueScalingGroup shows member 'api' is unhealthy
+# - 'api' pods fail due to invalid nginx arguments
+# - Gang members will schedule together but api keeps failing
+# - 'backup' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-invalid-args-sg
+  namespace: default
+  labels:
+    app: container-invalid-args-sg
+    demo: group2-container
+    scenario: 03-invalid-args-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing api, web, and db
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - api
+          - web
+          - db
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with invalid nginx arguments
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                image: nginx:latest
+                # Invalid: --invalid-option doesn't exist
+                args:
+                  - nginx
+                  - --invalid-option
+                  - some-value
+                  - -g
+                  - daemon off;
+                ports:
+                  - containerPort: 80
+                    name: http
+                env:
+                  - name: API_VERSION
+                    value: "v1"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Web frontend - part of scaling group
+      # Part of the scaling group
+      - name: web
+        spec:
+          roleName: web
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: web
+                image: httpd:2.4-alpine
+                ports:
+                  - containerPort: 80
+                    name: http
+                env:
+                  - name: SERVER_NAME
+                    value: "web.example.com"
+                  - name: API_ENDPOINT
+                    value: "http://api"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Database service in the scaling group
+      # Part of the scaling group
+      - name: db
+        spec:
+          roleName: db
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: db
+                image: mysql:8.0
+                ports:
+                  - containerPort: 3306
+                    name: mysql
+                env:
+                  - name: MYSQL_ROOT_PASSWORD
+                    value: "example"
+                  - name: MYSQL_DATABASE
+                    value: "appdb"
+                  - name: MYSQL_USER
+                    value: "appuser"
+                  - name: MYSQL_PASSWORD
+                    value: "apppass"
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 256Mi
+      
+      # Standalone backup service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: backup
+        spec:
+          roleName: backup
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: backup
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Backup service started"
+                    while true; do
+                      echo "$(date): Running backup job..."
+                      echo "Backing up database..."
+                      sleep 3600  # Run every hour
+                    done
+                env:
+                  - name: BACKUP_RETENTION_DAYS
+                    value: "7"
+                  - name: BACKUP_DESTINATION
+                    value: "/backups"
+                resources:
+                  requests:
+                    cpu: 5m
+                    memory: 16Mi

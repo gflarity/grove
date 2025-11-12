@@ -1,0 +1,75 @@
+# ImagePullBackOff - Registry Hostname Typo
+# Demonstrates error when registry hostname has a typo (registr instead of registry)
+# Expected: Pods fail to pull image, error propagates to PodClique status
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-typo-registry.yaml
+#
+# 2. Check pod status (should show ImagePullBackOff):
+#    kubectl get pods -l app.kubernetes.io/part-of=image-error-typo-registry
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs image-error-typo-registry -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs image-error-typo-registry
+#
+# 6. Clean up:
+#    kubectl delete pcs image-error-typo-registry
+#
+# EXPECTED BEHAVIOR:
+# - Pods will show ImagePullBackOff state
+# - PCS status.operationalSummary.phase will be "Degraded"
+# - status.lastErrors will contain image pull error details
+# - Events will show "Failed to pull image" messages
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: image-error-typo-registry
+  namespace: default
+  labels:
+    app: image-error-typo-registry
+    demo: group1-image
+    scenario: 01-typo-registry
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with image error - blocks gang scheduling
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          podSpec:
+            containers:
+              - name: api
+                # Typo in registry hostname: registr instead of registry
+                image: registr:5001/nginx:latest
+                ports:
+                  - containerPort: 8080
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang member "api"
+      - name: web
+        spec:
+          roleName: web
+          replicas: 2
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

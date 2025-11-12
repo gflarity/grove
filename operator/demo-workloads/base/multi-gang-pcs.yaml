@@ -1,0 +1,69 @@
+# Multi-Gang PodCliqueSet - Base Template
+# This PodCliqueSet contains multiple PodCliques in the same gang with different roles.
+# Demonstrates gang scheduling behavior and multi-clique coordination.
+#
+# QUICK START:
+# 1. Apply this working example:
+#    kubectl apply -f multi-gang-pcs.yaml
+#
+# 2. Check all pods are running (should see 7 total: 3 web + 2 worker + 2 db):
+#    kubectl get pods -l app.kubernetes.io/part-of=multi-gang-pcs
+#
+# 3. Check gang scheduling worked:
+#    kubectl get pods -l app.kubernetes.io/part-of=multi-gang-pcs -o wide
+#
+# 4. Check PodCliqueSet is healthy:
+#    kubectl get pcs multi-gang-pcs -o yaml | grep -A 10 podGangStatuses
+#
+# 5. (Optional) Use grovectl:
+#    grovectl describe pcs multi-gang-pcs
+#
+# 6. Clean up:
+#    kubectl delete pcs multi-gang-pcs
+#
+# EXPECTED BEHAVIOR:
+# - All 7 pods will be Running (3 web, 2 worker, 2 db)
+# - All pods scheduled together as a gang
+# - PCS status.operationalSummary.phase will be "Healthy"
+# - status.podGangStatuses will show all pods scheduled
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: multi-gang-pcs
+  namespace: default
+  labels:
+    app: multi-gang-pcs
+    demo: multi-gang-template
+spec:
+  replicas: 1
+  template:
+    cliques:
+      - name: master
+        spec:
+          roleName: master
+          replicas: 1
+          podSpec:
+            containers:
+              - name: master
+                image: nginx:latest
+                command: ["/bin/sh"]
+                args: ["-c", "echo 'Master node:' && hostname && sleep 3600"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 2
+          podSpec:
+            containers:
+              - name: worker
+                image: nginx:latest
+                command: ["/bin/sh"]
+                args: ["-c", "echo 'Worker node:' && hostname && sleep 3600"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

@@ -1,0 +1,11 @@
+# Demo Namespace Setup
+# Creates a namespace for demos with labels for organization
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grove-demos
+  labels:
+    purpose: demo
+    component: grove-operator
+    demo-namespace: "true"

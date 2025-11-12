@@ -1,0 +1,131 @@
+# Gang Scheduling Blocked - High CPU Requests with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when requesting more CPU than available
+# Expected: 
+# - PodClique 'compute' cannot be scheduled (part of scaling group)
+# - PodClique 'controller' is schedule-gated (part of scaling group)
+# - PodClique 'logger' is schedule-gated (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows blocked status due to 'compute' resource constraints
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-high-cpu-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs resource-error-high-cpu-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg resource-error-high-cpu-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq resource-error-high-cpu-sg-0-compute
+#    kubectl describe pclq resource-error-high-cpu-sg-0-monitoring
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=resource-error-high-cpu-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs resource-error-high-cpu-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows blocked children
+# - PodCliqueScalingGroup shows member 'compute' is blocked
+# - 'compute' PodClique shows pods in Pending state with 'Insufficient cpu'
+# - 'controller' and 'logger' PodCliques show gang scheduling blocked
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: resource-error-high-cpu-sg
+  namespace: default
+  labels:
+    app: resource-error-high-cpu-sg
+    demo: group4-resources
+    scenario: 01-high-cpu-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing compute, controller, and logger
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - compute
+          - controller
+          - logger
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with excessive CPU request - blocks gang scheduling
+      # Part of the scaling group
+      - name: compute
+        spec:
+          roleName: compute
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: compute
+                image: nginx:latest
+                resources:
+                  # Request 1000 CPU cores (way more than any cluster has)
+                  requests:
+                    cpu: "1000"
+                    memory: 32Mi
+      
+      # Healthy PodClique with reasonable resources - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: controller
+        spec:
+          roleName: controller
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: controller
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique with minimal resources - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: logger
+        spec:
+          roleName: logger
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: logger
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone monitoring service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: prom/node-exporter:latest
+                ports:
+                  - containerPort: 9100
+                    name: metrics
+                args:
+                  - --path.sysfs=/host/sys
+                  - --path.rootfs=/rootfs
+                  - --no-collector.wifi
+                  - --no-collector.hwmon
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

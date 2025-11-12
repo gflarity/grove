@@ -1,0 +1,164 @@
+# Invalid Port Configuration with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when containerPort configuration is invalid
+# Expected: 
+# - PodClique 'api' has invalid port but may still create pods (part of scaling group)
+# - PodClique 'gateway' is part of scaling group
+# - PodClique 'processor' is part of scaling group
+# - PodClique 'logger' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup will show as healthy if pods can be created
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 04-invalid-port-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs image-error-invalid-port-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg image-error-invalid-port-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq image-error-invalid-port-sg-0-api
+#    kubectl describe pclq image-error-invalid-port-sg-0-logger
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=image-error-invalid-port-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs image-error-invalid-port-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet and PodCliqueScalingGroup may show as healthy
+# - 'api' PodClique's pods may fail validation or have port issues
+# - All gang members should schedule together
+# - 'logger' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: image-error-invalid-port-sg
+  namespace: default
+  labels:
+    app: image-error-invalid-port-sg
+    demo: group1-image
+    scenario: 04-invalid-port-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing api, gateway, and processor
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - api
+          - gateway
+          - processor
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with invalid port configuration
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                image: nginx:latest
+                ports:
+                  # Invalid: Port number out of valid range (1-65535)
+                  - containerPort: 80000
+                    name: http
+                  # Valid secondary port
+                  - containerPort: 8080
+                    name: metrics
+                env:
+                  - name: SERVICE_PORT
+                    value: "80000"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # API Gateway - part of scaling group
+      # Part of the scaling group
+      - name: gateway
+        spec:
+          roleName: gateway
+          replicas: 2
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: gateway
+                image: nginx:alpine
+                ports:
+                  - containerPort: 80
+                    name: http
+                  - containerPort: 443
+                    name: https
+                env:
+                  - name: UPSTREAM_URL
+                    value: "http://api:80000"
+                resources:
+                  requests:
+                    cpu: 15m
+                    memory: 48Mi
+      
+      # Data processor in the scaling group
+      # Part of the scaling group
+      - name: processor
+        spec:
+          roleName: processor
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: processor
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Data processor started"
+                    while true; do
+                      echo "$(date): Processing batch..."
+                      sleep 15
+                    done
+                env:
+                  - name: BATCH_SIZE
+                    value: "100"
+                  - name: PROCESS_INTERVAL
+                    value: "15"
+                resources:
+                  requests:
+                    cpu: 20m
+                    memory: 64Mi
+      
+      # Standalone logging service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: logger
+        spec:
+          roleName: logger
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: logger
+                image: fluent/fluent-bit:2.0
+                ports:
+                  - containerPort: 2020
+                    name: metrics
+                command:
+                  - /fluent-bit/bin/fluent-bit
+                  - -i
+                  - cpu
+                  - -o
+                  - stdout
+                  - -p
+                  - format=json
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

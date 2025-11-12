@@ -1,0 +1,17 @@
+# ConfigMaps for Demo Scenarios
+# Example ConfigMaps that can be used in demo workloads
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-config
+  namespace: default
+data:
+  config.yaml: |
+    app:
+      name: demo-app
+      version: "1.0.0"
+  settings.conf: |
+    # Demo configuration
+    debug: true
+    log_level: info

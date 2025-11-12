@@ -1,0 +1,76 @@
+# ImagePullBackOff - Malformed Image Reference
+# Demonstrates error when image reference format is invalid
+# Expected: Pods fail to parse image reference, error shows malformed format
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 03-malformed-image.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=image-error-malformed
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs image-error-malformed -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs image-error-malformed
+#
+# 6. Clean up:
+#    kubectl delete pcs image-error-malformed
+#
+# EXPECTED BEHAVIOR:
+# - Pods will show ImagePullBackOff or ErrImagePull state
+# - Error message will indicate invalid image format
+# - PCS status.operationalSummary.phase will be 'Degraded'
+# - status.lastErrors will contain malformed image error
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: image-error-malformed
+  namespace: default
+  labels:
+    app: image-error-malformed
+    demo: group1-image
+    scenario: 03-malformed-image
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with malformed image reference - blocks gang scheduling
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 2
+          podSpec:
+            containers:
+              - name: worker
+                # Malformed image reference (invalid format)
+                image: nginx@sha256:invalid
+                ports:
+                  - containerPort: 8080
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: monitor
+        spec:
+          roleName: monitor
+          replicas: 1
+          podSpec:
+            containers:
+              - name: monitor
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

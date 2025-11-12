@@ -1,0 +1,99 @@
+# Mixed Errors - Multiple Error Types
+# Demonstrates different error types in the same PodCliqueSet
+# Expected: Different error types in same PodCliqueSet, status aggregates all errors, OperationalSummary reflects worst state
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-mixed-errors.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=complex-error-mixed
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs complex-error-mixed -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs complex-error-mixed
+#
+# 6. Clean up:
+#    kubectl delete pcs complex-error-mixed
+#
+# EXPECTED BEHAVIOR:
+# - Different pods will show different error types
+# - Some pods ImagePullBackOff, others CrashLoopBackOff
+# - PCS status will aggregate all error types
+# - status.operationalSummary.phase will reflect worst state
+# - status.lastErrors will contain multiple error types
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: complex-error-mixed
+  namespace: default
+  labels:
+    app: complex-error-mixed
+    demo: group5-complex
+    scenario: 01-mixed-errors
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with ImagePullBackOff error
+      - name: frontend
+        spec:
+          roleName: frontend
+          replicas: 2
+          podSpec:
+            containers:
+              - name: frontend
+                # Image pull error - wrong tag
+                image: nginx:does-not-exist
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # PodClique with CrashLoopBackOff error
+      - name: backend
+        spec:
+          roleName: backend
+          replicas: 2
+          podSpec:
+            containers:
+              - name: backend
+                image: nginx:latest
+                # Container exits immediately
+                command: ["false"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: cache
+        spec:
+          roleName: cache
+          replicas: 1
+          podSpec:
+            containers:
+              - name: cache
+                image: redis:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Another healthy PodClique - schedule-gated waiting for gang
+      - name: metrics
+        spec:
+          roleName: metrics
+          replicas: 1
+          podSpec:
+            containers:
+              - name: metrics
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

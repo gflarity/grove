@@ -1,0 +1,174 @@
+# Mixed Errors - Multiple Error Types with Scaling Group
+# Demonstrates different error types in the same PodCliqueSet with PodCliqueScalingGroup
+# Expected: 
+# - PodClique 'frontend' has ImagePullBackOff (part of scaling group)
+# - PodClique 'backend' has CrashLoopBackOff (part of scaling group)
+# - PodClique 'cache' is schedule-gated (part of scaling group)
+# - PodClique 'metrics' is schedule-gated (part of scaling group)
+# - PodClique 'logger' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows degraded status with multiple error types
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-mixed-errors-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs complex-error-mixed-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg complex-error-mixed-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq complex-error-mixed-sg-0-frontend
+#    kubectl describe pclq complex-error-mixed-sg-0-backend
+#    kubectl describe pclq complex-error-mixed-sg-0-logger
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=complex-error-mixed-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs complex-error-mixed-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status aggregates all error types
+# - PodCliqueScalingGroup shows multiple unhealthy members
+# - Different pods show different error types (ImagePullBackOff, CrashLoopBackOff)
+# - 'cache' and 'metrics' PodCliques show gang scheduling blocked
+# - 'logger' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: complex-error-mixed-sg
+  namespace: default
+  labels:
+    app: complex-error-mixed-sg
+    demo: group5-complex
+    scenario: 01-mixed-errors-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing frontend, backend, cache, and metrics
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - frontend
+          - backend
+          - cache
+          - metrics
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with ImagePullBackOff error
+      # Part of the scaling group
+      - name: frontend
+        spec:
+          roleName: frontend
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: frontend
+                # Image pull error - wrong tag
+                image: nginx:does-not-exist
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # PodClique with CrashLoopBackOff error
+      # Part of the scaling group
+      - name: backend
+        spec:
+          roleName: backend
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: backend
+                image: nginx:latest
+                # Container exits immediately
+                command: ["false"]
+                ports:
+                  - containerPort: 8080
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: cache
+        spec:
+          roleName: cache
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: cache
+                image: redis:latest
+                ports:
+                  - containerPort: 6379
+                    name: redis
+                command:
+                  - redis-server
+                  - --maxmemory
+                  - 64mb
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: metrics
+        spec:
+          roleName: metrics
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: metrics
+                image: prom/node-exporter:latest
+                ports:
+                  - containerPort: 9100
+                    name: metrics
+                args:
+                  - --path.sysfs=/host/sys
+                  - --path.rootfs=/rootfs
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone logging service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: logger
+        spec:
+          roleName: logger
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: logger
+                image: fluent/fluent-bit:2.0
+                ports:
+                  - containerPort: 2020
+                    name: metrics
+                command:
+                  - /fluent-bit/bin/fluent-bit
+                  - -i
+                  - cpu
+                  - -o
+                  - stdout
+                  - -p
+                  - format=json
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

@@ -1,0 +1,155 @@
+# InvalidImageName - Malformed Image Reference with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when image reference is malformed
+# Expected: 
+# - PodClique 'frontend' fails with invalid image reference (part of scaling group)
+# - PodClique 'backend' is schedule-gated (part of scaling group)
+# - PodClique 'auth' is schedule-gated (part of scaling group)
+# - PodClique 'metrics' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows unhealthy status due to 'frontend' failure
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 03-malformed-image-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs image-error-malformed-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg image-error-malformed-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq image-error-malformed-sg-0-frontend
+#    kubectl describe pclq image-error-malformed-sg-0-metrics
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=image-error-malformed-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs image-error-malformed-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows unhealthy children
+# - PodCliqueScalingGroup shows member 'frontend' is unhealthy
+# - 'frontend' PodClique shows invalid image name error
+# - 'backend' and 'auth' PodCliques show gang scheduling blocked
+# - 'metrics' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: image-error-malformed-sg
+  namespace: default
+  labels:
+    app: image-error-malformed-sg
+    demo: group1-image
+    scenario: 03-malformed-image-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing frontend, backend, and auth
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - frontend
+          - backend
+          - auth
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with malformed image reference
+      # Part of the scaling group
+      - name: frontend
+        spec:
+          roleName: frontend
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: frontend
+                # Malformed: Multiple colons and special characters
+                image: "nginx::latest@@invalid"
+                ports:
+                  - containerPort: 3000
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: backend
+        spec:
+          roleName: backend
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: backend
+                image: node:18-alpine
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Backend API server starting..."
+                    while true; do
+                      echo "$(date): Serving requests"
+                      sleep 10
+                    done
+                ports:
+                  - containerPort: 8000
+                    name: api
+                resources:
+                  requests:
+                    cpu: 15m
+                    memory: 48Mi
+      
+      # Auth service in the scaling group
+      # Part of the scaling group
+      - name: auth
+        spec:
+          roleName: auth
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: auth
+                image: nginx:alpine
+                ports:
+                  - containerPort: 8443
+                    name: https
+                env:
+                  - name: AUTH_MODE
+                    value: "jwt"
+                  - name: TOKEN_EXPIRY
+                    value: "3600"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone metrics collector - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: metrics
+        spec:
+          roleName: metrics
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: metrics
+                image: prom/node-exporter:latest
+                ports:
+                  - containerPort: 9100
+                    name: metrics
+                args:
+                  - --path.sysfs=/host/sys
+                  - --path.rootfs=/rootfs
+                  - --no-collector.wifi
+                  - --no-collector.hwmon
+                  - --collector.filesystem.ignored-mount-points=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/pods/.+)($|/)
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

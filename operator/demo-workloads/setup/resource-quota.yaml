@@ -1,0 +1,20 @@
+# Resource Quota for Demo Scenarios
+# Creates a resource quota that can be used to demonstrate quota exceeded scenarios
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-quota-ns
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: demo-resource-quota
+  namespace: demo-quota-ns
+spec:
+  hard:
+    requests.cpu: "500m"
+    requests.memory: 1Gi
+    limits.cpu: "1000m"
+    limits.memory: 2Gi
+    pods: "10"

@@ -1,0 +1,19 @@
+# Services for Demo Scenarios
+# Example Services that can be used with demo workloads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-service
+  namespace: default
+  labels:
+    app: demo-service
+spec:
+  selector:
+    app: simple-pcs
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      name: http
+  type: ClusterIP

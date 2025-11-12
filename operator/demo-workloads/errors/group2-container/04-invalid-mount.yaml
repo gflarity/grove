@@ -1,0 +1,79 @@
+# CreateContainerConfigError - Invalid Mount Path
+# Demonstrates error when mount path is empty or invalid
+# Expected: Pod fails to create container, error shows mount configuration issue
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 04-invalid-mount.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=container-error-invalid-mount
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs container-error-invalid-mount -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs container-error-invalid-mount
+#
+# 6. Clean up:
+#    kubectl delete pcs container-error-invalid-mount
+#
+# EXPECTED BEHAVIOR:
+# - Pods will fail to create container
+# - Error message will indicate mount configuration issue
+# - Pod status will show CreateContainerError
+# - PCS status.operationalSummary.phase will be 'Degraded'
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-error-invalid-mount
+  namespace: default
+  labels:
+    app: container-error-invalid-mount
+    demo: group2-container
+    scenario: 04-invalid-mount
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with invalid mount configuration
+      - name: stateful
+        spec:
+          roleName: stateful
+          replicas: 2
+          podSpec:
+            containers:
+              - name: stateful
+                image: nginx:latest
+                volumeMounts:
+                  # Empty mount path causes CreateContainerConfigError
+                  - name: config
+                    mountPath: ""
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+            volumes:
+              - name: config
+                configMap:
+                  name: non-existent-config
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: stateless
+        spec:
+          roleName: stateless
+          replicas: 2
+          podSpec:
+            containers:
+              - name: stateless
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

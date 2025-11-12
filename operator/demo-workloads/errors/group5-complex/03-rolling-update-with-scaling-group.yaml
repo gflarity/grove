@@ -1,0 +1,170 @@
+# Rolling Update Blocked by Errors with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when errors block a rolling update
+# Expected: 
+# - PodClique 'api' will have error in new version (part of scaling group)
+# - PodClique 'web' is part of scaling group
+# - PodClique 'worker' is part of scaling group
+# - PodClique 'backup' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows degraded status blocking rolling update
+#
+# QUICK START:
+# 1. Apply the initial healthy workload:
+#    kubectl apply -f 03-rolling-update-with-scaling-group.yaml
+#
+# 2. Wait for it to be healthy:
+#    kubectl wait --for=condition=Ready pcs/complex-error-rolling-update-sg --timeout=2m
+#
+# 3. Trigger a bad update (invalid image):
+#    kubectl patch pcs complex-error-rolling-update-sg --type='json' -p='[
+#      {"op": "replace", "path": "/spec/template/cliques/0/spec/podSpec/containers/0/image", "value": "nginx:does-not-exist"}
+#    ]'
+#
+# 4. Check PodCliqueSet status:
+#    kubectl describe pcs complex-error-rolling-update-sg
+#
+# 5. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg complex-error-rolling-update-sg-0-main
+#
+# 6. Watch rolling update progress:
+#    kubectl get pcs complex-error-rolling-update-sg -o jsonpath='{.status.rollingUpdateProgress}'
+#
+# 7. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=complex-error-rolling-update-sg
+#
+# 8. Clean up:
+#    kubectl delete pcs complex-error-rolling-update-sg
+#
+# EXPECTED BEHAVIOR:
+# - New pods will fail with ImagePullBackOff
+# - Rolling update will stall
+# - PodCliqueScalingGroup shows degraded status
+# - Old pods will remain running
+# - 'backup' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: complex-error-rolling-update-sg
+  namespace: default
+  labels:
+    app: complex-error-rolling-update-sg
+    demo: group5-complex
+    scenario: 03-rolling-update-scaling-group
+spec:
+  replicas: 3  # 3 gangs to demonstrate rolling update blocking
+  template:
+    # Define a scaling group containing api, web, and worker
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - api
+          - web
+          - worker
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique that will have error in new version
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                # Start with valid image (will be patched to invalid for demo)
+                image: nginx:latest
+                ports:
+                  - containerPort: 8080
+                    name: http
+                env:
+                  - name: API_VERSION
+                    value: "v1"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Healthy PodClique in same gang
+      # Part of the scaling group
+      - name: web
+        spec:
+          roleName: web
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                env:
+                  - name: API_URL
+                    value: "http://api:8080"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique in same gang
+      # Part of the scaling group
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: worker
+                image: nginx:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Worker started"
+                    while true; do
+                      echo "$(date): Processing jobs..."
+                      sleep 20
+                    done
+                env:
+                  - name: JOB_QUEUE
+                    value: "default"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone backup service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: backup
+        spec:
+          roleName: backup
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: backup
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Backup service started"
+                    while true; do
+                      echo "$(date): Running backup job..."
+                      sleep 3600  # Run every hour
+                    done
+                resources:
+                  requests:
+                    cpu: 5m
+                    memory: 16Mi
+# To demonstrate rolling update blocked:
+# 1. Apply this workload and wait for it to be healthy
+# 2. Update the image to an invalid one (e.g., nginx:does-not-exist)
+# 3. Observe that rolling update starts but gets blocked
+# 4. PodCliqueScalingGroup will show degraded status
+# 5. RollingUpdateProgress will show stalled state
+# 6. Status will show blocking errors preventing update completion

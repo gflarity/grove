@@ -1,0 +1,153 @@
+# Gang Scheduling Blocked - Schedule Gates with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when custom schedule gates block pod scheduling
+# Expected: 
+# - PodClique 'service' is schedule-gated (part of scaling group)
+# - PodClique 'client' is schedule-gated (part of scaling group)
+# - PodClique 'metrics' is schedule-gated (part of scaling group)
+# - PodClique 'logger' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows blocked status due to schedule gates
+#
+# FEATURE STATUS: ADVANCED / CUSTOM SCHEDULER REQUIRED
+# - This scenario demonstrates schedule gates, a Kubernetes 1.27+ feature
+# - Requires a custom scheduler plugin or admission controller to add gates
+# - The Grove Operator can DETECT and REPORT schedule gates via schedulingSummary
+# - This YAML does not create schedule gates itself (requires external tooling)
+#
+# CLUSTER REQUIREMENTS:
+# - Kubernetes 1.27+ (for schedule gates feature)
+# - Custom scheduler or admission webhook that adds schedule gates to pods
+# - OR manual pod patching to add schedule gates for testing
+#
+# TESTING OPTIONS:
+#
+# Option A: Manual Schedule Gate Testing
+# 1. Apply this scenario:
+#    kubectl apply -f 04-schedule-gates-with-scaling-group.yaml
+#
+# 2. Wait for pods to be created:
+#    sleep 5
+#
+# 3. Manually add schedule gates to pods (for testing visibility):
+#    for pod in $(kubectl get pods -l app=scheduling-error-schedule-gates-sg -o name); do
+#      kubectl patch $pod --type=json -p='[{"op":"add","path":"/spec/schedulingGates","value":[{"name":"custom-gate"}]}]'
+#    done
+#
+# 4. Check PodCliqueSet status:
+#    kubectl describe pcs scheduling-error-schedule-gates-sg
+#
+# 5. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg scheduling-error-schedule-gates-sg-0-main
+#
+# 6. Check individual PodCliques:
+#    kubectl describe pclq scheduling-error-schedule-gates-sg-0-service
+#    kubectl describe pclq scheduling-error-schedule-gates-sg-0-logger
+#
+# 7. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=scheduling-error-schedule-gates-sg
+#
+# 8. Clean up:
+#    kubectl delete pcs scheduling-error-schedule-gates-sg
+#
+# EXPECTED BEHAVIOR (when schedule gates are present):
+# - PodCliqueSet status shows blocked children
+# - PodCliqueScalingGroup shows members are blocked
+# - PodCliques show pods in Pending state with SchedulingGated reason
+# - 'logger' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: scheduling-error-schedule-gates-sg
+  namespace: default
+  labels:
+    app: scheduling-error-schedule-gates-sg
+    demo: group3-scheduling
+    scenario: 04-schedule-gates-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing service, client, and metrics
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - service
+          - client
+          - metrics
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique that will be gated (requires manual patching or custom scheduler)
+      # Part of the scaling group
+      - name: service
+        spec:
+          roleName: service
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: service
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: client
+        spec:
+          roleName: client
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: client
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: metrics
+        spec:
+          roleName: metrics
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: metrics
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone logging service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: logger
+        spec:
+          roleName: logger
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: logger
+                image: fluent/fluent-bit:2.0
+                ports:
+                  - containerPort: 2020
+                    name: metrics
+                command:
+                  - /fluent-bit/bin/fluent-bit
+                  - -i
+                  - cpu
+                  - -o
+                  - stdout
+                  - -p
+                  - format=json
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

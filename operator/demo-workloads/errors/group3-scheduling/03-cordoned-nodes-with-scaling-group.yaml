@@ -1,0 +1,139 @@
+# Gang Scheduling Blocked - Cordoned Nodes with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when all schedulable nodes are cordoned
+# Expected: 
+# - PodClique 'app' cannot be scheduled (part of scaling group)
+# - PodClique 'sidecar' is schedule-gated (part of scaling group)
+# - PodClique 'backup' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows blocked status due to 'app' scheduling failure
+#
+# CLUSTER REQUIREMENTS:
+# - This scenario requires ALL schedulable nodes to be cordoned
+# - In some clusters (e.g., k3d), control-plane nodes may be schedulable
+# - You may need to cordon control-plane nodes too, or add NoSchedule taints
+#
+# QUICK START:
+# 1. FIRST cordon all schedulable nodes:
+#    # Option A: Cordon all nodes (including control-plane)
+#    kubectl get nodes -o name | xargs -I {} kubectl cordon {}
+#
+#    # Option B: Cordon only worker nodes (if control-plane is tainted)
+#    kubectl get nodes --selector='!node-role.kubernetes.io/control-plane' -o name | xargs -I {} kubectl cordon {}
+#
+#    # Option C: For k3d clusters, you may need to taint control-plane nodes
+#    kubectl get nodes -l node-role.kubernetes.io/control-plane -o name | \
+#      xargs -I {} kubectl taint nodes {} node-role.kubernetes.io/control-plane=:NoSchedule --overwrite
+#    kubectl get nodes -o name | xargs -I {} kubectl cordon {}
+#
+# 2. Verify no nodes are schedulable:
+#    kubectl get nodes
+#    # All nodes should show "Ready,SchedulingDisabled" or have NoSchedule taint
+#
+# 3. Apply this scenario:
+#    kubectl apply -f 03-cordoned-nodes-with-scaling-group.yaml
+#
+# 4. Check PodCliqueSet status:
+#    kubectl describe pcs scheduling-error-cordoned-nodes-sg
+#
+# 5. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg scheduling-error-cordoned-nodes-sg-0-main
+#
+# 6. Check individual PodCliques:
+#    kubectl describe pclq scheduling-error-cordoned-nodes-sg-0-app
+#    kubectl describe pclq scheduling-error-cordoned-nodes-sg-0-backup
+#
+# 7. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=scheduling-error-cordoned-nodes-sg
+#
+# 8. Clean up:
+#    kubectl delete pcs scheduling-error-cordoned-nodes-sg
+#    # IMPORTANT: Uncordon your nodes!
+#    kubectl get nodes -o name | xargs -I {} kubectl uncordon {}
+#    # If you added taints, remove them
+#    kubectl get nodes -l node-role.kubernetes.io/control-plane -o name | \
+#      xargs -I {} kubectl taint nodes {} node-role.kubernetes.io/control-plane- || true
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows blocked children
+# - PodCliqueScalingGroup shows member 'app' is blocked
+# - 'app' PodClique shows pods in Pending state
+# - 'sidecar' PodClique shows gang scheduling blocked
+# - 'backup' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: scheduling-error-cordoned-nodes-sg
+  namespace: default
+  labels:
+    app: scheduling-error-cordoned-nodes-sg
+    demo: group3-scheduling
+    scenario: 03-cordoned-nodes-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing app and sidecar
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - app
+          - sidecar
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique that cannot be scheduled due to cordoned nodes
+      # Part of the scaling group
+      - name: app
+        spec:
+          roleName: app
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: app
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: sidecar
+        spec:
+          roleName: sidecar
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: sidecar
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone backup service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: backup
+        spec:
+          roleName: backup
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: backup
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Backup service started"
+                    while true; do
+                      echo "$(date): Running backup job..."
+                      sleep 3600  # Run every hour
+                    done
+                resources:
+                  requests:
+                    cpu: 5m
+                    memory: 16Mi
