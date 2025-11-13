@@ -77,6 +77,11 @@ type PodCliqueSetStatus struct {
 	// have MinAvailableBreached condition = False.
 	// +kubebuilder:default=0
 	AvailableReplicas int32 `json:"availableReplicas"`
+	// UnavailableReplicaIndices contains the indexes of replicas that are currently unavailable.
+	// A replica is considered unavailable when any of its constituent components (PCSGs or standalone PCLQs)
+	// do not meet their MinAvailable requirements.
+	// +optional
+	UnavailableReplicaIndices []int32 `json:"unavailableReplicaIndices,omitempty"`
 	// Selector is the label selector that determines which pods are part of the PodGang.
 	// PodGang is a unit of scale and this selector is used by HPA to scale the PodGang based on metrics captured for the pods that match this selector.
 	Selector *string `json:"hpaPodSelector,omitempty"`

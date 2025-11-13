@@ -656,6 +656,11 @@ func (in *PodCliqueSetStatus) DeepCopyInto(out *PodCliqueSetStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.UnavailableReplicaIndices != nil {
+		in, out := &in.UnavailableReplicaIndices, &out.UnavailableReplicaIndices
+		*out = make([]int32, len(*in))
+		copy(*out, *in)
+	}
 	if in.Selector != nil {
 		in, out := &in.Selector, &out.Selector
 		*out = new(string)

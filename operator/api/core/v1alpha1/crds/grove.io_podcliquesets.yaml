@@ -10158,6 +10158,15 @@ spec:
                       type: string
                     type: array
                 type: object
+              unavailableReplicaIndices:
+                description: |-
+                  UnavailableReplicaIndices contains the indexes of replicas that are currently unavailable.
+                  A replica is considered unavailable when any of its constituent components (PCSGs or standalone PCLQs)
+                  do not meet their MinAvailable requirements.
+                items:
+                  format: int32
+                  type: integer
+                type: array
               updatedReplicas:
                 default: 0
                 description: UpdatedReplicas is the number of replicas that have been

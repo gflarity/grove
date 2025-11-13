@@ -19,6 +19,7 @@ package podcliqueset
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 
 	apicommonconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
@@ -61,23 +62,25 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 func (r *Reconciler) mutateReplicas(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) error {
 	// Set basic replica count
 	pcs.Status.Replicas = pcs.Spec.Replicas
-	availableReplicas, updatedReplicas, err := r.computeAvailableAndUpdatedReplicas(ctx, logger, pcs)
+	availableReplicas, updatedReplicas, unavailableIndices, err := r.computeReplicaMetrics(ctx, logger, pcs)
 	if err != nil {
-		return fmt.Errorf("could not compute available replicas: %w", err)
+		return fmt.Errorf("could not compute replica metrics: %w", err)
 	}
 	pcs.Status.AvailableReplicas = availableReplicas
 	pcs.Status.UpdatedReplicas = updatedReplicas
+	pcs.Status.UnavailableReplicaIndices = unavailableIndices
 	return nil
 }
 
-// computeAvailableAndUpdatedReplicas calculates the number of available replicas for a PodCliqueSet.
+// computeReplicaMetrics calculates the number of available replicas and tracks unavailable replica indexes for a PodCliqueSet.
 // It checks both standalone PodCliques and PodCliqueScalingGroups to determine availability.
 // A replica is considered available if it has all its required components (PCSGs and standalone PCLQs) available.
-func (r *Reconciler) computeAvailableAndUpdatedReplicas(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) (int32, int32, error) {
+func (r *Reconciler) computeReplicaMetrics(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) (int32, int32, []int32, error) {
 	var (
-		availableReplicas int32
-		updatedReplicas   int32
-		pcsObjectKey      = client.ObjectKeyFromObject(pcs)
+		availableReplicas  int32
+		updatedReplicas    int32
+		unavailableIndices = []int32{}
+		pcsObjectKey       = client.ObjectKeyFromObject(pcs)
 	)
 
 	expectedPCSGFQNsPerPCSReplica := componentutils.GetExpectedPCSGFQNsPerPCSReplica(pcs)
@@ -86,7 +89,7 @@ func (r *Reconciler) computeAvailableAndUpdatedReplicas(ctx context.Context, log
 	// Fetch all PCSGs for this PCS
 	pcsgs, err := componentutils.GetPCSGsForPCS(ctx, r.client, pcsObjectKey)
 	if err != nil {
-		return availableReplicas, updatedReplicas, err
+		return availableReplicas, updatedReplicas, unavailableIndices, err
 	}
 	// Filter the PCSGs that belong to the expected set of PCSGs for PCS, this ensures that we do not
 	// consider any stray PCSGs that might have been created externally.
@@ -97,7 +100,7 @@ func (r *Reconciler) computeAvailableAndUpdatedReplicas(ctx context.Context, log
 	// Fetch all standalone PodCliques for this PCS
 	standalonePCLQs, err := componentutils.GetPodCliquesWithParentPCS(ctx, r.client, pcsObjectKey)
 	if err != nil {
-		return availableReplicas, updatedReplicas, err
+		return availableReplicas, updatedReplicas, unavailableIndices, err
 	}
 	// Filter the PCLQs that belong to the expected set of standalone PCLQs for PCS, this ensures that we do not
 	// consider any stray PCLQs that might have been created externally.
@@ -116,16 +119,25 @@ func (r *Reconciler) computeAvailableAndUpdatedReplicas(ctx context.Context, log
 		// Check if this PCS replica is available based on all its components
 		isReplicaAvailable, isReplicaUpdated := r.computeReplicaStatus(pcs.Status.CurrentGenerationHash, replicaPCSGs,
 			replicaStandalonePCLQs, len(expectedPCSGFQNsPerPCSReplica[replicaIndex]), len(expectedStandAlonePCLQFQNsPerPCSReplica[replicaIndex]))
+		
+		// Track unavailable replica indexes for observability and debugging.
+		// This enables operators to quickly identify which specific replicas
+		// are problematic without inspecting all replicas individually.
 		if isReplicaAvailable {
 			availableReplicas++
+		} else {
+			unavailableIndices = append(unavailableIndices, int32(replicaIndex))
 		}
 		if isReplicaUpdated {
 			updatedReplicas++
 		}
 	}
 
-	logger.Info("Calculated available and updated replicas for PCS", "pcs", pcsObjectKey, "availableReplicas", availableReplicas, "updatedReplicas", updatedReplicas, "totalReplicas", pcs.Spec.Replicas)
-	return availableReplicas, updatedReplicas, nil
+	// Sort for consistent ordering
+	slices.Sort(unavailableIndices)
+
+	logger.Info("Calculated replica metrics for PCS", "pcs", pcsObjectKey, "availableReplicas", availableReplicas, "updatedReplicas", updatedReplicas, "unavailableReplicaIndices", unavailableIndices, "totalReplicas", pcs.Spec.Replicas)
+	return availableReplicas, updatedReplicas, unavailableIndices, nil
 }
 
 // computeReplicaStatus determines if a replica is available and updated based on its components.
