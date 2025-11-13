@@ -1,0 +1,1160 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+)
+
+// header defines a table header with expansion and alignment
+type header struct {
+	name      string
+	expansion int
+	align     int
+}
+
+// Pane represents which pane is active
+type Pane int
+
+const (
+	ResourcesPane Pane = iota
+	EventsPane
+)
+
+// ViewType represents the current view in the hierarchy
+type ViewType int
+
+const (
+	ForestView ViewType = iota
+	PodCliqueSetView
+	PodCliqueScalingGroupView
+	PodCliqueView
+	PodView
+)
+
+// ViewState tracks the current navigation state
+type ViewState struct {
+	viewType            ViewType
+	selectedPodCliqueSet string
+	selectedScalingGroup string
+	selectedPodClique    string
+	selectedPod          string
+}
+
+// Resource represents a generic resource item
+type Resource struct {
+	Name         string
+	Type         string
+	Ready        string
+	Status       string
+	Namespace    string
+	ParentType   string
+	ParentName   string
+	YAML         string  // For Pod detail view
+}
+
+// Event represents a Kubernetes event
+type Event struct {
+	Type     string
+	Message  string
+	Resource string
+	Age      string
+	Level    string
+	Parent   string  // Parent resource name for filtering
+}
+
+// App encapsulates the split-pane application
+type App struct {
+	*tview.Application
+	activePane      Pane
+	resourcesTable  *tview.Table
+	resourcesView   *tview.TextView  // For Pod YAML view
+	eventsTable     *tview.Table
+	statusBar       *tview.TextView
+	mainFlex        *tview.Flex      // Main layout container
+	viewState       ViewState
+	allResources    map[string][]Resource  // Key is parent identifier
+	allEvents       []Event
+	podYAMLData     map[string]string  // Pod name -> YAML content
+}
+
+func NewApp() *App {
+	app := &App{
+		Application:  tview.NewApplication(),
+		activePane:   ResourcesPane,
+		allResources: make(map[string][]Resource),
+		podYAMLData:  make(map[string]string),
+		viewState: ViewState{
+			viewType: ForestView,
+		},
+	}
+	app.initializeFakeData()
+	return app
+}
+
+// initializeFakeData creates hardcoded test data
+func (a *App) initializeFakeData() {
+	// Forest view - root level PodCliqueSets
+	a.allResources["forest"] = []Resource{
+		{Name: "web-frontend", Type: "PodCliqueSet", Ready: "3/3", Status: "Running", Namespace: "production"},
+		{Name: "api-backend", Type: "PodCliqueSet", Ready: "5/5", Status: "Running", Namespace: "production"},
+		{Name: "ml-training", Type: "PodCliqueSet", Ready: "10/10", Status: "Running", Namespace: "research"},
+		{Name: "db-cluster", Type: "PodCliqueSet", Ready: "3/3", Status: "Running", Namespace: "production"},
+	}
+
+	// PodCliqueSet: web-frontend (contains PodCliques and PodCliqueScalingGroups)
+	a.allResources["PodCliqueSet/web-frontend"] = []Resource{
+		{Name: "web-frontend-primary", Type: "PodClique", Ready: "2/2", Status: "Running", Namespace: "production", ParentType: "PodCliqueSet", ParentName: "web-frontend"},
+		{Name: "web-frontend-canary", Type: "PodClique", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodCliqueSet", ParentName: "web-frontend"},
+		{Name: "web-autoscaler", Type: "PodCliqueScalingGroup", Ready: "5/5", Status: "Running", Namespace: "production", ParentType: "PodCliqueSet", ParentName: "web-frontend"},
+	}
+
+	// PodCliqueSet: api-backend
+	a.allResources["PodCliqueSet/api-backend"] = []Resource{
+		{Name: "api-v1", Type: "PodClique", Ready: "3/3", Status: "Running", Namespace: "production", ParentType: "PodCliqueSet", ParentName: "api-backend"},
+		{Name: "api-v2", Type: "PodClique", Ready: "2/2", Status: "Running", Namespace: "production", ParentType: "PodCliqueSet", ParentName: "api-backend"},
+		{Name: "api-scaler", Type: "PodCliqueScalingGroup", Ready: "10/10", Status: "Scaling", Namespace: "production", ParentType: "PodCliqueSet", ParentName: "api-backend"},
+	}
+
+	// PodCliqueSet: ml-training
+	a.allResources["PodCliqueSet/ml-training"] = []Resource{
+		{Name: "gpu-workers", Type: "PodCliqueScalingGroup", Ready: "10/10", Status: "Running", Namespace: "research", ParentType: "PodCliqueSet", ParentName: "ml-training"},
+		{Name: "coordinator", Type: "PodClique", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodCliqueSet", ParentName: "ml-training"},
+	}
+
+	// PodCliqueSet: db-cluster
+	a.allResources["PodCliqueSet/db-cluster"] = []Resource{
+		{Name: "postgres-primary", Type: "PodClique", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodCliqueSet", ParentName: "db-cluster"},
+		{Name: "postgres-replicas", Type: "PodClique", Ready: "2/2", Status: "Running", Namespace: "production", ParentType: "PodCliqueSet", ParentName: "db-cluster"},
+	}
+
+	// PodCliqueScalingGroup: web-autoscaler (contains PodCliques)
+	a.allResources["PodCliqueScalingGroup/web-autoscaler"] = []Resource{
+		{Name: "web-autoscaler-0", Type: "PodClique", Ready: "2/2", Status: "Running", Namespace: "production", ParentType: "PodCliqueScalingGroup", ParentName: "web-autoscaler"},
+		{Name: "web-autoscaler-1", Type: "PodClique", Ready: "2/2", Status: "Running", Namespace: "production", ParentType: "PodCliqueScalingGroup", ParentName: "web-autoscaler"},
+		{Name: "web-autoscaler-2", Type: "PodClique", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodCliqueScalingGroup", ParentName: "web-autoscaler"},
+	}
+
+	// PodCliqueScalingGroup: api-scaler
+	a.allResources["PodCliqueScalingGroup/api-scaler"] = []Resource{
+		{Name: "api-scaler-0", Type: "PodClique", Ready: "3/3", Status: "Running", Namespace: "production", ParentType: "PodCliqueScalingGroup", ParentName: "api-scaler"},
+		{Name: "api-scaler-1", Type: "PodClique", Ready: "3/3", Status: "Running", Namespace: "production", ParentType: "PodCliqueScalingGroup", ParentName: "api-scaler"},
+		{Name: "api-scaler-2", Type: "PodClique", Ready: "2/4", Status: "Scaling", Namespace: "production", ParentType: "PodCliqueScalingGroup", ParentName: "api-scaler"},
+	}
+
+	// PodCliqueScalingGroup: gpu-workers
+	a.allResources["PodCliqueScalingGroup/gpu-workers"] = []Resource{
+		{Name: "gpu-workers-0", Type: "PodClique", Ready: "8/8", Status: "Running", Namespace: "research", ParentType: "PodCliqueScalingGroup", ParentName: "gpu-workers"},
+		{Name: "gpu-workers-1", Type: "PodClique", Ready: "2/2", Status: "Running", Namespace: "research", ParentType: "PodCliqueScalingGroup", ParentName: "gpu-workers"},
+	}
+
+	// PodClique: web-frontend-primary (contains Pods)
+	a.allResources["PodClique/web-frontend-primary"] = []Resource{
+		{Name: "web-frontend-primary-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "web-frontend-primary"},
+		{Name: "web-frontend-primary-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "web-frontend-primary"},
+	}
+
+	// PodClique: web-frontend-canary
+	a.allResources["PodClique/web-frontend-canary"] = []Resource{
+		{Name: "web-frontend-canary-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "web-frontend-canary"},
+	}
+
+	// PodClique: api-v1
+	a.allResources["PodClique/api-v1"] = []Resource{
+		{Name: "api-v1-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-v1"},
+		{Name: "api-v1-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-v1"},
+		{Name: "api-v1-2", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-v1"},
+	}
+
+	// PodClique: coordinator
+	a.allResources["PodClique/coordinator"] = []Resource{
+		{Name: "coordinator-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "coordinator"},
+	}
+
+	// PodClique: api-v2
+	a.allResources["PodClique/api-v2"] = []Resource{
+		{Name: "api-v2-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-v2"},
+		{Name: "api-v2-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-v2"},
+	}
+
+	// PodClique: web-autoscaler-0
+	a.allResources["PodClique/web-autoscaler-0"] = []Resource{
+		{Name: "web-autoscaler-0-pod-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "web-autoscaler-0"},
+		{Name: "web-autoscaler-0-pod-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "web-autoscaler-0"},
+	}
+
+	// PodClique: web-autoscaler-1
+	a.allResources["PodClique/web-autoscaler-1"] = []Resource{
+		{Name: "web-autoscaler-1-pod-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "web-autoscaler-1"},
+		{Name: "web-autoscaler-1-pod-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "web-autoscaler-1"},
+	}
+
+	// PodClique: web-autoscaler-2
+	a.allResources["PodClique/web-autoscaler-2"] = []Resource{
+		{Name: "web-autoscaler-2-pod-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "web-autoscaler-2"},
+	}
+
+	// PodClique: api-scaler-0
+	a.allResources["PodClique/api-scaler-0"] = []Resource{
+		{Name: "api-scaler-0-pod-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-scaler-0"},
+		{Name: "api-scaler-0-pod-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-scaler-0"},
+		{Name: "api-scaler-0-pod-2", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-scaler-0"},
+	}
+
+	// PodClique: api-scaler-1
+	a.allResources["PodClique/api-scaler-1"] = []Resource{
+		{Name: "api-scaler-1-pod-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-scaler-1"},
+		{Name: "api-scaler-1-pod-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-scaler-1"},
+		{Name: "api-scaler-1-pod-2", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-scaler-1"},
+	}
+
+	// PodClique: api-scaler-2
+	a.allResources["PodClique/api-scaler-2"] = []Resource{
+		{Name: "api-scaler-2-pod-0", Type: "Pod", Ready: "1/1", Status: "Pending", Namespace: "production", ParentType: "PodClique", ParentName: "api-scaler-2"},
+		{Name: "api-scaler-2-pod-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "api-scaler-2"},
+	}
+
+	// PodClique: gpu-workers-0
+	a.allResources["PodClique/gpu-workers-0"] = []Resource{
+		{Name: "gpu-workers-0-pod-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-0"},
+		{Name: "gpu-workers-0-pod-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-0"},
+		{Name: "gpu-workers-0-pod-2", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-0"},
+		{Name: "gpu-workers-0-pod-3", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-0"},
+		{Name: "gpu-workers-0-pod-4", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-0"},
+		{Name: "gpu-workers-0-pod-5", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-0"},
+		{Name: "gpu-workers-0-pod-6", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-0"},
+		{Name: "gpu-workers-0-pod-7", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-0"},
+	}
+
+	// PodClique: gpu-workers-1
+	a.allResources["PodClique/gpu-workers-1"] = []Resource{
+		{Name: "gpu-workers-1-pod-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-1"},
+		{Name: "gpu-workers-1-pod-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "research", ParentType: "PodClique", ParentName: "gpu-workers-1"},
+	}
+
+	// PodClique: postgres-primary
+	a.allResources["PodClique/postgres-primary"] = []Resource{
+		{Name: "postgres-primary-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "postgres-primary"},
+	}
+
+	// PodClique: postgres-replicas
+	a.allResources["PodClique/postgres-replicas"] = []Resource{
+		{Name: "postgres-replicas-0", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "postgres-replicas"},
+		{Name: "postgres-replicas-1", Type: "Pod", Ready: "1/1", Status: "Running", Namespace: "production", ParentType: "PodClique", ParentName: "postgres-replicas"},
+	}
+
+	// Pod YAML data
+	a.podYAMLData["web-frontend-primary-0"] = `apiVersion: v1
+kind: Pod
+metadata:
+  name: web-frontend-primary-0
+  namespace: production
+  labels:
+    app: web-frontend
+    clique: web-frontend-primary
+    pod-index: "0"
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+status:
+  phase: Running
+  conditions:
+  - type: Ready
+    status: "True"
+    lastTransitionTime: "2024-11-13T10:00:00Z"
+  - type: ContainersReady
+    status: "True"
+    lastTransitionTime: "2024-11-13T10:00:05Z"
+  podIP: 10.244.1.15
+  hostIP: 192.168.1.100
+  startTime: "2024-11-13T09:59:50Z"
+  containerStatuses:
+  - name: nginx
+    ready: true
+    restartCount: 0
+    state:
+      running:
+        startedAt: "2024-11-13T10:00:04Z"`
+
+	a.podYAMLData["web-frontend-primary-1"] = `apiVersion: v1
+kind: Pod
+metadata:
+  name: web-frontend-primary-1
+  namespace: production
+  labels:
+    app: web-frontend
+    clique: web-frontend-primary
+    pod-index: "1"
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+status:
+  phase: Running
+  conditions:
+  - type: Ready
+    status: "True"
+  podIP: 10.244.1.16
+  hostIP: 192.168.1.100`
+
+	a.podYAMLData["web-frontend-canary-0"] = `apiVersion: v1
+kind: Pod
+metadata:
+  name: web-frontend-canary-0
+  namespace: production
+  labels:
+    app: web-frontend
+    clique: web-frontend-canary
+    canary: "true"
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.22-alpine
+    ports:
+    - containerPort: 80
+status:
+  phase: Running
+  podIP: 10.244.1.17`
+
+	a.podYAMLData["api-v1-0"] = `apiVersion: v1
+kind: Pod
+metadata:
+  name: api-v1-0
+  namespace: production
+  labels:
+    app: api
+    version: v1
+    clique: api-v1
+spec:
+  containers:
+  - name: api
+    image: myapi:v1.0
+    ports:
+    - containerPort: 8080
+status:
+  phase: Running
+  conditions:
+  - type: Ready
+    status: "True"
+  podIP: 10.244.2.20`
+
+	a.podYAMLData["coordinator-0"] = `apiVersion: v1
+kind: Pod
+metadata:
+  name: coordinator-0
+  namespace: research
+  labels:
+    app: ml-training
+    role: coordinator
+    clique: coordinator
+spec:
+  containers:
+  - name: coordinator
+    image: ml-coordinator:latest
+    ports:
+    - containerPort: 9000
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+status:
+  phase: Running
+  podIP: 10.244.3.10`
+
+	// Events
+	a.allEvents = []Event{
+		{Type: "ScalingComplete", Message: "Scaled from 2 to 3 replicas", Resource: "web-frontend", Age: "5m", Level: "Normal", Parent: "web-frontend"},
+		{Type: "PodAdded", Message: "Successfully added pod web-frontend-primary-0", Resource: "web-frontend-primary-0", Age: "10m", Level: "Normal", Parent: "web-frontend-primary"},
+		{Type: "PodReady", Message: "Pod is ready", Resource: "web-frontend-primary-1", Age: "10m", Level: "Normal", Parent: "web-frontend-primary"},
+		{Type: "ScalingStarted", Message: "Started scaling operation", Resource: "api-scaler", Age: "2m", Level: "Normal", Parent: "api-scaler"},
+		{Type: "PodScheduled", Message: "Successfully scheduled pod", Resource: "api-scaler-2-0", Age: "1m", Level: "Normal", Parent: "api-scaler-2"},
+		{Type: "ImagePull", Message: "Pulling image", Resource: "api-scaler-2-1", Age: "30s", Level: "Normal", Parent: "api-scaler-2"},
+		{Type: "ResourceQuota", Message: "Within quota limits", Resource: "ml-training", Age: "1h", Level: "Normal", Parent: "ml-training"},
+		{Type: "PodStarted", Message: "Container started", Resource: "gpu-workers-0-0", Age: "2h", Level: "Normal", Parent: "gpu-workers-0"},
+		{Type: "HealthCheck", Message: "Health check passed", Resource: "api-v1-0", Age: "15m", Level: "Normal", Parent: "api-v1"},
+		{Type: "Warning", Message: "High memory usage detected", Resource: "api-v1-1", Age: "5m", Level: "Warning", Parent: "api-v1"},
+		{Type: "ConfigUpdate", Message: "Configuration reloaded", Resource: "web-frontend-canary-0", Age: "20m", Level: "Normal", Parent: "web-frontend-canary"},
+		// Pod-specific events
+		{Type: "Pulled", Message: "Container image nginx:1.21 pulled", Resource: "web-frontend-primary-0", Age: "15m", Level: "Normal", Parent: "web-frontend-primary-0"},
+		{Type: "Created", Message: "Created container nginx", Resource: "web-frontend-primary-0", Age: "15m", Level: "Normal", Parent: "web-frontend-primary-0"},
+		{Type: "Started", Message: "Started container nginx", Resource: "web-frontend-primary-0", Age: "15m", Level: "Normal", Parent: "web-frontend-primary-0"},
+		{Type: "Pulled", Message: "Container image nginx:1.21 pulled", Resource: "web-frontend-primary-1", Age: "15m", Level: "Normal", Parent: "web-frontend-primary-1"},
+		{Type: "Created", Message: "Created container nginx", Resource: "web-frontend-primary-1", Age: "15m", Level: "Normal", Parent: "web-frontend-primary-1"},
+		{Type: "Started", Message: "Started container nginx", Resource: "web-frontend-primary-1", Age: "15m", Level: "Normal", Parent: "web-frontend-primary-1"},
+		{Type: "Pulled", Message: "Container image nginx:1.22-alpine pulled", Resource: "web-frontend-canary-0", Age: "25m", Level: "Normal", Parent: "web-frontend-canary-0"},
+		{Type: "Started", Message: "Started container nginx", Resource: "web-frontend-canary-0", Age: "25m", Level: "Normal", Parent: "web-frontend-canary-0"},
+		{Type: "Pulled", Message: "Container image myapi:v1.0 pulled", Resource: "api-v1-0", Age: "1h", Level: "Normal", Parent: "api-v1-0"},
+		{Type: "HealthCheckPassed", Message: "Readiness probe succeeded", Resource: "api-v1-0", Age: "15m", Level: "Normal", Parent: "api-v1-0"},
+		{Type: "Pulled", Message: "Container image ml-coordinator:latest pulled", Resource: "coordinator-0", Age: "3h", Level: "Normal", Parent: "coordinator-0"},
+		{Type: "Started", Message: "Started container coordinator", Resource: "coordinator-0", Age: "3h", Level: "Normal", Parent: "coordinator-0"},
+		
+		// api-backend PodCliqueSet events
+		{Type: "Deployed", Message: "API backend deployed successfully", Resource: "api-backend", Age: "2h", Level: "Normal", Parent: "api-backend"},
+		{Type: "ScalingComplete", Message: "API backend scaling completed", Resource: "api-backend", Age: "30m", Level: "Normal", Parent: "api-backend"},
+		
+		// api-v2 PodClique events
+		{Type: "Rollout", Message: "Rolling out new version", Resource: "api-v2", Age: "1h", Level: "Normal", Parent: "api-v2"},
+		{Type: "PodCreated", Message: "Created pod api-v2-0", Resource: "api-v2-0", Age: "1h", Level: "Normal", Parent: "api-v2"},
+		{Type: "PodCreated", Message: "Created pod api-v2-1", Resource: "api-v2-1", Age: "1h", Level: "Normal", Parent: "api-v2"},
+		
+		// db-cluster PodCliqueSet events
+		{Type: "Deployed", Message: "Database cluster deployed", Resource: "db-cluster", Age: "4h", Level: "Normal", Parent: "db-cluster"},
+		{Type: "HealthCheck", Message: "All database nodes healthy", Resource: "db-cluster", Age: "10m", Level: "Normal", Parent: "db-cluster"},
+		{Type: "BackupComplete", Message: "Database backup completed successfully", Resource: "db-cluster", Age: "1h", Level: "Normal", Parent: "db-cluster"},
+		
+		// postgres-primary PodClique events
+		{Type: "LeaderElected", Message: "Elected as primary database node", Resource: "postgres-primary", Age: "4h", Level: "Normal", Parent: "postgres-primary"},
+		{Type: "PodReady", Message: "Primary database pod is ready", Resource: "postgres-primary-0", Age: "4h", Level: "Normal", Parent: "postgres-primary"},
+		{Type: "Pulled", Message: "Container image postgres:14 pulled", Resource: "postgres-primary-0", Age: "4h", Level: "Normal", Parent: "postgres-primary-0"},
+		{Type: "Started", Message: "Started postgres container", Resource: "postgres-primary-0", Age: "4h", Level: "Normal", Parent: "postgres-primary-0"},
+		{Type: "VolumeAttached", Message: "Persistent volume attached", Resource: "postgres-primary-0", Age: "4h", Level: "Normal", Parent: "postgres-primary-0"},
+		
+		// postgres-replicas PodClique events
+		{Type: "ReplicationStarted", Message: "Started replication from primary", Resource: "postgres-replicas", Age: "3h", Level: "Normal", Parent: "postgres-replicas"},
+		{Type: "SyncComplete", Message: "Initial sync completed", Resource: "postgres-replicas", Age: "3h", Level: "Normal", Parent: "postgres-replicas"},
+		{Type: "Pulled", Message: "Container image postgres:14 pulled", Resource: "postgres-replicas-0", Age: "3h", Level: "Normal", Parent: "postgres-replicas-0"},
+		{Type: "Started", Message: "Started postgres container", Resource: "postgres-replicas-0", Age: "3h", Level: "Normal", Parent: "postgres-replicas-0"},
+		{Type: "Pulled", Message: "Container image postgres:14 pulled", Resource: "postgres-replicas-1", Age: "3h", Level: "Normal", Parent: "postgres-replicas-1"},
+		{Type: "Started", Message: "Started postgres container", Resource: "postgres-replicas-1", Age: "3h", Level: "Normal", Parent: "postgres-replicas-1"},
+		{Type: "ReplicationLag", Message: "Replication lag is 2ms", Resource: "postgres-replicas-1", Age: "5m", Level: "Normal", Parent: "postgres-replicas-1"},
+		
+		// web-autoscaler events
+		{Type: "ScalingDecision", Message: "Scaling up based on CPU metrics", Resource: "web-autoscaler", Age: "15m", Level: "Normal", Parent: "web-autoscaler"},
+		{Type: "PodCliqueAdded", Message: "Added PodClique web-autoscaler-2", Resource: "web-autoscaler-2", Age: "15m", Level: "Normal", Parent: "web-autoscaler"},
+		
+		// gpu-workers events
+		{Type: "GPUAllocated", Message: "GPU resources allocated", Resource: "gpu-workers", Age: "2h", Level: "Normal", Parent: "gpu-workers"},
+		{Type: "TrainingStarted", Message: "ML training job started", Resource: "gpu-workers-0", Age: "2h", Level: "Normal", Parent: "gpu-workers-0"},
+		{Type: "Checkpoint", Message: "Training checkpoint saved", Resource: "gpu-workers-0", Age: "30m", Level: "Normal", Parent: "gpu-workers-0"},
+		
+		// More varied event levels
+		{Type: "SlowResponse", Message: "API response time above threshold", Resource: "api-v1", Age: "20m", Level: "Warning", Parent: "api-v1"},
+		{Type: "DiskSpaceWarning", Message: "Database disk usage at 75%", Resource: "postgres-primary-0", Age: "1h", Level: "Warning", Parent: "postgres-primary-0"},
+		{Type: "NetworkError", Message: "Temporary network connectivity issue", Resource: "web-autoscaler-1", Age: "45m", Level: "Warning", Parent: "web-autoscaler-1"},
+	}
+}
+
+// getCurrentViewKey returns the key for looking up resources in allResources map
+func (a *App) getCurrentViewKey() string {
+	switch a.viewState.viewType {
+	case ForestView:
+		return "forest"
+	case PodCliqueSetView:
+		return "PodCliqueSet/" + a.viewState.selectedPodCliqueSet
+	case PodCliqueScalingGroupView:
+		return "PodCliqueScalingGroup/" + a.viewState.selectedScalingGroup
+	case PodCliqueView:
+		return "PodClique/" + a.viewState.selectedPodClique
+	case PodView:
+		return "" // Pod view doesn't list resources, it shows YAML
+	}
+	return "forest"
+}
+
+// getViewTitle returns a formatted breadcrumb title for the current view
+func (a *App) getViewTitle() string {
+	switch a.viewState.viewType {
+	case ForestView:
+		return "Forest"
+	case PodCliqueSetView:
+		return fmt.Sprintf("Forest > [cyan]%s[-]", a.viewState.selectedPodCliqueSet)
+	case PodCliqueScalingGroupView:
+		return fmt.Sprintf("Forest > %s > [purple]%s[-]", a.viewState.selectedPodCliqueSet, a.viewState.selectedScalingGroup)
+	case PodCliqueView:
+		parent := a.viewState.selectedPodCliqueSet
+		if a.viewState.selectedScalingGroup != "" {
+			parent = fmt.Sprintf("%s > %s", a.viewState.selectedPodCliqueSet, a.viewState.selectedScalingGroup)
+		}
+		return fmt.Sprintf("Forest > %s > [aqua]%s[-]", parent, a.viewState.selectedPodClique)
+	case PodView:
+		parent := a.viewState.selectedPodCliqueSet
+		if a.viewState.selectedScalingGroup != "" {
+			parent = fmt.Sprintf("%s > %s", a.viewState.selectedPodCliqueSet, a.viewState.selectedScalingGroup)
+		}
+		return fmt.Sprintf("Forest > %s > %s > [lime]%s[-]", parent, a.viewState.selectedPodClique, a.viewState.selectedPod)
+	}
+	return "Forest"
+}
+
+func (a *App) createResourcesTable() *tview.Table {
+	table := tview.NewTable().
+		SetBorders(false).
+		SetSelectable(true, false).
+		SetSeparator(' ').
+		SetFixed(1, 0)
+
+	table.SetBackgroundColor(tcell.ColorBlack)
+	table.SetBorder(true)
+	table.SetBorderColor(tcell.ColorYellow) // Active border
+	table.SetTitle(" [yellow::b]Resources[-] ")
+	table.SetTitleAlign(tview.AlignLeft)
+
+	return table
+}
+
+// refreshResourcesView updates the top pane based on current view state
+func (a *App) refreshResourcesView() {
+	// For Pod view, show YAML instead of table
+	if a.viewState.viewType == PodView {
+		a.refreshPodYAMLView()
+		return
+	}
+	a.refreshResourcesTable()
+}
+
+// refreshPodYAMLView shows the Pod YAML in the resources pane
+func (a *App) refreshPodYAMLView() {
+	if a.resourcesView == nil {
+		return
+	}
+	
+	// Update title with breadcrumb
+	if a.activePane == ResourcesPane {
+		a.resourcesView.SetTitle(fmt.Sprintf(" [yellow::b]Pod Status[-] [dimgray]|[-] %s ", a.getViewTitle()))
+		a.resourcesView.SetBorderColor(tcell.ColorYellow)
+	} else {
+		a.resourcesView.SetTitle(fmt.Sprintf(" [dimgray]Pod Status |[-] %s ", a.getViewTitle()))
+		a.resourcesView.SetBorderColor(tcell.ColorDimGray)
+	}
+	
+	// Get YAML for selected pod
+	yaml, exists := a.podYAMLData[a.viewState.selectedPod]
+	if !exists {
+		yaml = fmt.Sprintf("# No YAML data available for pod: %s", a.viewState.selectedPod)
+	}
+	
+	a.resourcesView.SetText(yaml)
+	a.resourcesView.ScrollToBeginning()
+}
+
+// refreshResourcesTable updates the resources table based on current view state
+func (a *App) refreshResourcesTable() {
+	table := a.resourcesTable
+	
+	// Clear table
+	table.Clear()
+	
+	// Update title with breadcrumb
+	if a.activePane == ResourcesPane {
+		table.SetTitle(fmt.Sprintf(" [yellow::b]Resources[-] [dimgray]|[-] %s ", a.getViewTitle()))
+	} else {
+		table.SetTitle(fmt.Sprintf(" [dimgray]Resources |[-] %s ", a.getViewTitle()))
+	}
+	
+	// Headers with expansion settings
+	headers := []header{
+		{"NAME", 3, tview.AlignLeft},
+		{"RESOURCE TYPE", 2, tview.AlignLeft},
+		{"READY", 1, tview.AlignCenter},
+		{"STATUS", 2, tview.AlignLeft},
+		{"NAMESPACE", 2, tview.AlignLeft},
+	}
+	
+	for col, hdr := range headers {
+		cell := tview.NewTableCell(hdr.name).
+			SetTextColor(tcell.ColorDimGray).
+			SetSelectable(false).
+			SetExpansion(hdr.expansion).
+			SetAlign(hdr.align)
+		
+		if col == 0 {
+			cell.SetText(" " + hdr.name)
+		}
+		table.SetCell(0, col, cell)
+	}
+
+	statusColors := map[string]tcell.Color{
+		"Running": tcell.ColorGreen,
+		"Scaling": tcell.ColorYellow,
+		"Pending": tcell.ColorOrange,
+	}
+
+	typeColors := map[string]tcell.Color{
+		"PodClique":             tcell.ColorAqua,
+		"PodCliqueSet":          tcell.ColorBlue,
+		"PodCliqueScalingGroup": tcell.ColorPurple,
+		"Pod":                   tcell.ColorLime,
+	}
+
+	// Get resources for current view
+	viewKey := a.getCurrentViewKey()
+	resources, exists := a.allResources[viewKey]
+	if !exists {
+		resources = []Resource{}
+	}
+
+	// Add data rows
+	for row, resource := range resources {
+		rowData := []string{
+			resource.Name,
+			resource.Type,
+			resource.Ready,
+			resource.Status,
+			resource.Namespace,
+		}
+		
+		for col, cellText := range rowData {
+			cell := tview.NewTableCell(cellText).
+				SetExpansion(headers[col].expansion).
+				SetAlign(headers[col].align)
+			
+			if col == 0 {
+				cell.SetText(" " + cellText)
+			}
+
+			// Color based on column
+			switch col {
+			case 1: // TYPE column
+				if color, ok := typeColors[cellText]; ok {
+					cell.SetTextColor(color)
+				}
+			case 3: // STATUS column
+				if color, ok := statusColors[cellText]; ok {
+					cell.SetTextColor(color)
+				}
+			}
+
+			table.SetCell(row+1, col, cell)
+		}
+	}
+
+	// Selection handler
+	table.SetSelectionChangedFunc(func(row, column int) {
+		// Clear previous selection
+		for r := 1; r < table.GetRowCount(); r++ {
+			for c := 0; c < table.GetColumnCount(); c++ {
+				if cell := table.GetCell(r, c); cell != nil {
+					cell.SetBackgroundColor(tcell.ColorBlack)
+				}
+			}
+		}
+		
+		// Highlight current row
+		if row > 0 {
+			for c := 0; c < table.GetColumnCount(); c++ {
+				if cell := table.GetCell(row, c); cell != nil {
+					cell.SetBackgroundColor(tcell.NewRGBColor(40, 40, 40))
+				}
+			}
+		}
+		
+		if a.activePane == ResourcesPane && row > 0 {
+			a.updateStatusBar()
+			a.refreshEventsTable()
+		}
+	})
+	
+	// Select first data row if available
+	if table.GetRowCount() > 1 {
+		table.Select(1, 0)
+	}
+}
+
+func (a *App) createEventsTable() *tview.Table {
+	table := tview.NewTable().
+		SetBorders(false).
+		SetSelectable(true, false).
+		SetSeparator(' ').
+		SetFixed(1, 0)
+
+	table.SetBackgroundColor(tcell.ColorBlack)
+	table.SetBorder(true)
+	table.SetBorderColor(tcell.ColorDimGray) // Inactive border
+	table.SetTitle(" [dimgray]Events[-] ")
+	table.SetTitleAlign(tview.AlignLeft)
+
+	return table
+}
+
+// getFilteredEvents returns events filtered by current selection
+func (a *App) getFilteredEvents() []Event {
+	// In Pod view, show events for that specific pod
+	if a.viewState.viewType == PodView {
+		filtered := []Event{}
+		for _, event := range a.allEvents {
+			if event.Parent == a.viewState.selectedPod {
+				filtered = append(filtered, event)
+			}
+		}
+		return filtered
+	}
+	
+	// In table views, check if there's a selection
+	row, _ := a.resourcesTable.GetSelection()
+	if row < 1 || row >= a.resourcesTable.GetRowCount() {
+		// No selection, filter by current view
+		filterKey := ""
+		switch a.viewState.viewType {
+		case ForestView:
+			return a.allEvents // Show all events in Forest view
+		case PodCliqueSetView:
+			filterKey = a.viewState.selectedPodCliqueSet
+		case PodCliqueScalingGroupView:
+			filterKey = a.viewState.selectedScalingGroup
+		case PodCliqueView:
+			filterKey = a.viewState.selectedPodClique
+		}
+		
+		filtered := []Event{}
+		for _, event := range a.allEvents {
+			if strings.Contains(event.Parent, filterKey) {
+				filtered = append(filtered, event)
+			}
+		}
+		return filtered
+	}
+	
+	// Get the selected resource name
+	selectedName := strings.TrimSpace(a.resourcesTable.GetCell(row, 0).Text)
+	
+	// Filter events by selected resource
+	filtered := []Event{}
+	for _, event := range a.allEvents {
+		if event.Parent == selectedName || strings.HasPrefix(event.Parent, selectedName+"-") {
+			filtered = append(filtered, event)
+		}
+	}
+	
+	return filtered
+}
+
+// refreshEventsTable updates the events table based on current selection
+func (a *App) refreshEventsTable() {
+	table := a.eventsTable
+	
+	// Clear table
+	table.Clear()
+	
+	// Headers with expansion settings
+	headers := []header{
+		{"LEVEL", 1, tview.AlignLeft},
+		{"TYPE", 3, tview.AlignLeft},
+		{"MESSAGE", 5, tview.AlignLeft},
+		{"RESOURCE", 2, tview.AlignLeft},
+		{"AGE", 1, tview.AlignRight},
+	}
+	
+	for col, hdr := range headers {
+		cell := tview.NewTableCell(hdr.name).
+			SetTextColor(tcell.ColorDimGray).
+			SetSelectable(false).
+			SetExpansion(hdr.expansion).
+			SetAlign(hdr.align)
+		
+		if col == 0 {
+			cell.SetText(" " + hdr.name)
+		}
+		table.SetCell(0, col, cell)
+	}
+
+	levelColors := map[string]tcell.Color{
+		"Normal":  tcell.ColorGreen,
+		"Warning": tcell.ColorYellow,
+		"Error":   tcell.ColorRed,
+	}
+
+	// Get filtered events
+	events := a.getFilteredEvents()
+
+	// Add data rows
+	for row, event := range events {
+		rowData := []string{
+			event.Level,
+			event.Type,
+			event.Message,
+			event.Resource,
+			event.Age,
+		}
+		
+		for col, cellText := range rowData {
+			cell := tview.NewTableCell(cellText).
+				SetExpansion(headers[col].expansion).
+				SetAlign(headers[col].align)
+			
+			if col == 0 {
+				cell.SetText(" " + cellText)
+			}
+
+			// Color based on column
+			if col == 0 { // LEVEL column (now first)
+				if color, ok := levelColors[cellText]; ok {
+					cell.SetTextColor(color)
+				}
+			}
+
+			table.SetCell(row+1, col, cell)
+		}
+	}
+
+	// Selection handler
+	table.SetSelectionChangedFunc(func(row, column int) {
+		// Clear previous selection
+		for r := 1; r < table.GetRowCount(); r++ {
+			for c := 0; c < table.GetColumnCount(); c++ {
+				if cell := table.GetCell(r, c); cell != nil {
+					cell.SetBackgroundColor(tcell.ColorBlack)
+				}
+			}
+		}
+		
+		// Highlight current row
+		if row > 0 {
+			for c := 0; c < table.GetColumnCount(); c++ {
+				if cell := table.GetCell(row, c); cell != nil {
+					cell.SetBackgroundColor(tcell.NewRGBColor(40, 40, 40))
+				}
+			}
+		}
+		
+		if a.activePane == EventsPane && row > 0 {
+			a.updateStatusBar()
+		}
+	})
+	
+	// Select first data row if available
+	if table.GetRowCount() > 1 {
+		table.Select(1, 0)
+	}
+}
+
+// navigateInto drills down into the selected resource
+func (a *App) navigateInto() {
+	// Can't navigate if in Pod view
+	if a.viewState.viewType == PodView {
+		return
+	}
+	
+	row, _ := a.resourcesTable.GetSelection()
+	if row < 1 {
+		return
+	}
+	
+	selectedName := strings.TrimSpace(a.resourcesTable.GetCell(row, 0).Text)
+	selectedType := strings.TrimSpace(a.resourcesTable.GetCell(row, 1).Text)
+	
+	// Determine the next view based on current view and selected type
+	switch selectedType {
+	case "PodCliqueSet":
+		a.viewState.viewType = PodCliqueSetView
+		a.viewState.selectedPodCliqueSet = selectedName
+		a.viewState.selectedScalingGroup = ""
+		a.viewState.selectedPodClique = ""
+		a.viewState.selectedPod = ""
+	case "PodCliqueScalingGroup":
+		a.viewState.viewType = PodCliqueScalingGroupView
+		a.viewState.selectedScalingGroup = selectedName
+		a.viewState.selectedPodClique = ""
+		a.viewState.selectedPod = ""
+	case "PodClique":
+		a.viewState.viewType = PodCliqueView
+		a.viewState.selectedPodClique = selectedName
+		a.viewState.selectedPod = ""
+	case "Pod":
+		// Enter Pod detail view
+		a.viewState.viewType = PodView
+		a.viewState.selectedPod = selectedName
+		a.switchToPodView()
+	}
+	
+	a.refreshResourcesView()
+	a.refreshEventsTable()
+	a.updateStatusBar()
+}
+
+// navigateBack goes up one level in the hierarchy
+func (a *App) navigateBack() {
+	switch a.viewState.viewType {
+	case ForestView:
+		// Already at root, nothing to do
+		return
+	case PodCliqueSetView:
+		// Go back to Forest
+		a.viewState.viewType = ForestView
+		a.viewState.selectedPodCliqueSet = ""
+		a.viewState.selectedScalingGroup = ""
+		a.viewState.selectedPodClique = ""
+		a.viewState.selectedPod = ""
+	case PodCliqueScalingGroupView:
+		// Go back to PodCliqueSet
+		a.viewState.viewType = PodCliqueSetView
+		a.viewState.selectedScalingGroup = ""
+		a.viewState.selectedPodClique = ""
+		a.viewState.selectedPod = ""
+	case PodCliqueView:
+		// Go back to parent (either PodCliqueSet or PodCliqueScalingGroup)
+		if a.viewState.selectedScalingGroup != "" {
+			a.viewState.viewType = PodCliqueScalingGroupView
+		} else {
+			a.viewState.viewType = PodCliqueSetView
+		}
+		a.viewState.selectedPodClique = ""
+		a.viewState.selectedPod = ""
+	case PodView:
+		// Go back to PodClique view
+		a.viewState.viewType = PodCliqueView
+		a.viewState.selectedPod = ""
+		a.switchToTableView()
+	}
+	
+	a.refreshResourcesView()
+	a.refreshEventsTable()
+	a.updateStatusBar()
+}
+
+func (a *App) updateBorders() {
+	if a.viewState.viewType == PodView {
+		// Pod view uses TextView instead of Table
+		if a.activePane == ResourcesPane {
+			a.resourcesView.SetBorderColor(tcell.ColorYellow)
+			a.resourcesView.SetTitle(fmt.Sprintf(" [yellow::b]Pod Status[-] [dimgray]|[-] %s ", a.getViewTitle()))
+			a.eventsTable.SetBorderColor(tcell.ColorDimGray)
+			a.eventsTable.SetTitle(" [dimgray]Events[-] ")
+		} else {
+			a.resourcesView.SetBorderColor(tcell.ColorDimGray)
+			a.resourcesView.SetTitle(fmt.Sprintf(" [dimgray]Pod Status |[-] %s ", a.getViewTitle()))
+			a.eventsTable.SetBorderColor(tcell.ColorYellow)
+			a.eventsTable.SetTitle(" [yellow::b]Events[-] ")
+		}
+	} else {
+		// Table view
+		if a.activePane == ResourcesPane {
+			a.resourcesTable.SetBorderColor(tcell.ColorYellow)
+			a.resourcesTable.SetTitle(fmt.Sprintf(" [yellow::b]Resources[-] [dimgray]|[-] %s ", a.getViewTitle()))
+			a.eventsTable.SetBorderColor(tcell.ColorDimGray)
+			a.eventsTable.SetTitle(" [dimgray]Events[-] ")
+		} else {
+			a.resourcesTable.SetBorderColor(tcell.ColorDimGray)
+			a.resourcesTable.SetTitle(fmt.Sprintf(" [dimgray]Resources |[-] %s ", a.getViewTitle()))
+			a.eventsTable.SetBorderColor(tcell.ColorYellow)
+			a.eventsTable.SetTitle(" [yellow::b]Events[-] ")
+		}
+	}
+}
+
+func (a *App) switchPane() {
+	if a.activePane == ResourcesPane {
+		a.activePane = EventsPane
+		a.SetFocus(a.eventsTable)
+	} else {
+		a.activePane = ResourcesPane
+		if a.viewState.viewType == PodView {
+			a.SetFocus(a.resourcesView)
+		} else {
+			a.SetFocus(a.resourcesTable)
+		}
+	}
+	a.updateBorders()
+	a.updateStatusBar()
+}
+
+// switchToPodView switches the layout to show Pod YAML view
+func (a *App) switchToPodView() {
+	// Switch the top pane from table to text view
+	a.mainFlex.Clear()
+	a.mainFlex.AddItem(a.resourcesView, 0, 1, a.activePane == ResourcesPane)
+	a.mainFlex.AddItem(a.eventsTable, 0, 1, a.activePane == EventsPane)
+	
+	if a.activePane == ResourcesPane {
+		a.SetFocus(a.resourcesView)
+	}
+}
+
+// switchToTableView switches the layout back to showing resource table
+func (a *App) switchToTableView() {
+	// Switch the top pane from text view to table
+	a.mainFlex.Clear()
+	a.mainFlex.AddItem(a.resourcesTable, 0, 1, a.activePane == ResourcesPane)
+	a.mainFlex.AddItem(a.eventsTable, 0, 1, a.activePane == EventsPane)
+	
+	if a.activePane == ResourcesPane {
+		a.SetFocus(a.resourcesTable)
+	}
+}
+
+func (a *App) updateStatusBar() {
+	var text string
+	
+	// Pod view has different status bar
+	if a.viewState.viewType == PodView {
+		if a.activePane == ResourcesPane {
+			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> scroll <[white]Esc[dimgray]> back <[white]q[dimgray]> quit"
+			text = fmt.Sprintf(" [yellow]Pod Status[-] [dimgray]|[-] Viewing: [white]%s[-] [dimgray]|[-] %s", a.viewState.selectedPod, shortcuts)
+		} else {
+			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate <[white]Esc[dimgray]> back <[white]q[dimgray]> quit"
+			text = fmt.Sprintf(" [yellow]Events[-] [dimgray]|[-] Pod: [white]%s[-] [dimgray]|[-] %s", a.viewState.selectedPod, shortcuts)
+		}
+		a.statusBar.SetText(text)
+		return
+	}
+	
+	// Table views
+	if a.activePane == ResourcesPane {
+		row, _ := a.resourcesTable.GetSelection()
+		if row > 0 && row < a.resourcesTable.GetRowCount() {
+			name := strings.TrimSpace(a.resourcesTable.GetCell(row, 0).Text)
+			resourceType := strings.TrimSpace(a.resourcesTable.GetCell(row, 1).Text)
+			
+			// Show different shortcuts based on whether we can drill down
+			canDrillDown := true  // All resources can be drilled down now
+			canGoBack := a.viewState.viewType != ForestView
+			
+			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
+			if canDrillDown {
+				shortcuts += " <[white]Enter[dimgray]> drill down"
+			}
+			if canGoBack {
+				shortcuts += " <[white]Esc[dimgray]> back"
+			}
+			shortcuts += " <[white]q[dimgray]> quit"
+			
+			text = fmt.Sprintf(" [yellow]Resources[-] [dimgray]|[-] Selected: [white]%s[-] [dimgray](%s)[-] [dimgray]|[-] %s", name, resourceType, shortcuts)
+		} else {
+			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
+			if a.viewState.viewType != ForestView {
+				shortcuts += " <[white]Esc[dimgray]> back"
+			}
+			shortcuts += " <[white]q[dimgray]> quit"
+			text = fmt.Sprintf(" [yellow]Resources[-] [dimgray]|[-] %s", shortcuts)
+		}
+	} else {
+		row, _ := a.eventsTable.GetSelection()
+		if row > 0 && row < a.eventsTable.GetRowCount() {
+			eventType := strings.TrimSpace(a.eventsTable.GetCell(row, 0).Text)
+			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
+			if a.viewState.viewType != ForestView {
+				shortcuts += " <[white]Esc[dimgray]> back"
+			}
+			shortcuts += " <[white]q[dimgray]> quit"
+			text = fmt.Sprintf(" [yellow]Events[-] [dimgray]|[-] Selected: [white]%s[-] [dimgray]|[-] %s", eventType, shortcuts)
+		} else {
+			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
+			if a.viewState.viewType != ForestView {
+				shortcuts += " <[white]Esc[dimgray]> back"
+			}
+			shortcuts += " <[white]q[dimgray]> quit"
+			text = fmt.Sprintf(" [yellow]Events[-] [dimgray]|[-] %s", shortcuts)
+		}
+	}
+	a.statusBar.SetText(text)
+}
+
+func (a *App) setupKeyBindings() {
+	// Global key handler
+	a.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyTab:
+			a.switchPane()
+			return nil
+		case tcell.KeyEsc:
+			// Go back in hierarchy
+			a.navigateBack()
+			return nil
+		case tcell.KeyCtrlC:
+			a.Stop()
+			return nil
+		case tcell.KeyRune:
+			if event.Rune() == 'q' {
+				a.Stop()
+				return nil
+			}
+		}
+		return event
+	})
+
+	// Resources table handler
+	a.resourcesTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEnter {
+			// Drill down into selected resource
+			a.navigateInto()
+			return nil
+		}
+		return event
+	})
+
+	// Events table handler - no special enter behavior needed
+	a.eventsTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		return event
+	})
+}
+
+func (a *App) Run() error {
+	// Set dark theme
+	tview.Styles.PrimitiveBackgroundColor = tcell.ColorBlack
+	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
+	tview.Styles.BorderColor = tcell.ColorDarkGray
+
+	// Create components
+	a.resourcesTable = a.createResourcesTable()
+	a.eventsTable = a.createEventsTable()
+	
+	// Create Pod YAML view
+	a.resourcesView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true).
+		SetWrap(false)
+	a.resourcesView.SetBorder(true)
+	a.resourcesView.SetBorderColor(tcell.ColorYellow)
+	a.resourcesView.SetTitle(" [yellow::b]Pod Status[-] ")
+	a.resourcesView.SetTitleAlign(tview.AlignLeft)
+	a.resourcesView.SetBackgroundColor(tcell.ColorBlack)
+
+	// Create header bar
+	headerBar := tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft)
+	headerBar.SetText(" [yellow::b]🌳 Forest[-] [dimgray]|[-] [green]Grove Operator[-] [dimgray]|[-] [cyan]Hierarchical Resource Viewer[-]")
+	headerBar.SetBackgroundColor(tcell.ColorBlack)
+
+	// Create status bar
+	a.statusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft)
+	a.statusBar.SetBackgroundColor(tcell.ColorBlack)
+
+	// Setup key bindings
+	a.setupKeyBindings()
+
+	// Create layout with two vertical panes (starts with table view)
+	a.mainFlex = tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(a.resourcesTable, 0, 1, true).
+		AddItem(a.eventsTable, 0, 1, false)
+
+	// Create overall layout
+	rootFlex := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(headerBar, 1, 0, false).
+		AddItem(a.mainFlex, 0, 1, true).
+		AddItem(a.statusBar, 1, 0, false)
+
+	// Populate tables with initial data
+	a.refreshResourcesView()
+	a.refreshEventsTable()
+
+	// Initial status
+	a.updateStatusBar()
+
+	// Set root and run
+	return a.SetRoot(rootFlex, true).SetFocus(a.resourcesTable).Run()
+}
+
+func main() {
+	app := NewApp()
+	if err := app.Run(); err != nil {
+		panic(err)
+	}
+}
