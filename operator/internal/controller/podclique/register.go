@@ -56,12 +56,7 @@ func (r *Reconciler) RegisterWithManager(mgr ctrl.Manager) error {
 			MaxConcurrentReconciles: *r.config.ConcurrentSyncs,
 		}).
 		For(&grovecorev1alpha1.PodClique{},
-			builder.WithPredicates(
-				predicate.And(
-					predicate.GenerationChangedPredicate{},
-					managedPodCliquePredicate(),
-				),
-			),
+			builder.WithPredicates(managedPodCliquePredicate()),
 		).
 		Owns(&corev1.Pod{}, builder.WithPredicates(r.podPredicate())).
 		Watches(
@@ -93,7 +88,12 @@ func managedPodCliquePredicate() predicate.Predicate {
 			return grovectrlutils.IsManagedPodClique(e.Object, expectedOwnerKinds...)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			return grovectrlutils.IsManagedPodClique(e.ObjectOld, expectedOwnerKinds...)
+			if !grovectrlutils.IsManagedPodClique(e.ObjectOld, expectedOwnerKinds...) {
+				return false
+			}
+			// Allow reconciliation for status-only updates that indicate operational state changes
+			// (e.g., schedule-gated pods that need periodic reconciliation)
+			return true
 		},
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 	}
@@ -150,7 +150,15 @@ func hasPodStatusChanged(updateEvent event.UpdateEvent) bool {
 	return hasReadyConditionChanged(oldPod.Status.Conditions, newPod.Status.Conditions) ||
 		hasLastTerminationStateChanged(oldPod.Status.InitContainerStatuses, newPod.Status.InitContainerStatuses) ||
 		hasLastTerminationStateChanged(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses) ||
-		hasStartedAndReadyChangedForAnyContainer(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses)
+		hasStartedAndReadyChangedForAnyContainer(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses) ||
+		hasSchedulingGatesChanged(oldPod, newPod)
+}
+
+// hasSchedulingGatesChanged checks if the Pod's scheduling gates have changed
+func hasSchedulingGatesChanged(oldPod, newPod *corev1.Pod) bool {
+	oldHasGates := len(oldPod.Spec.SchedulingGates) > 0
+	newHasGates := len(newPod.Spec.SchedulingGates) > 0
+	return oldHasGates != newHasGates
 }
 
 // hasReadyConditionChanged checks if the Pod's Ready condition status has transitioned

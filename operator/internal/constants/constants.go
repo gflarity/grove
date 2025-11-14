@@ -108,3 +108,38 @@ const (
 	// ReasonComputeDomainDeleteFailed is an event reason which represents that the deletion of a ComputeDomain failed.
 	ReasonComputeDomainDeleteFailed = "ComputeDomainDeleteFailed"
 )
+
+// constants for scheduling gate events
+// These events help operators understand why pods are blocked from scheduling and what's needed to unblock them.
+// All events reference user-facing resources (PodCliques, Pods) rather than internal implementation details (PodGangs).
+const (
+	// ReasonScheduleGateRemoved indicates a schedule gate was successfully removed from a pod.
+	// Emitted when: A pod's schedule gate is removed after gang formation completes (for base gangs) 
+	// or after base gang becomes ready (for scaled gangs).
+	// Action: None required - normal progression. Pod will be scheduled by kube-scheduler.
+	ReasonScheduleGateRemoved = "ScheduleGateRemoved"
+
+	// ReasonScheduleGateWaitingGangFormation indicates pod is waiting for all pods in the gang to be created and labeled.
+	// Emitted when: A pod has a schedule gate but is not yet assigned to a PodGang, indicating gang formation
+	// is still in progress.
+	// Action: Wait for all pods in the PodClique to be created. Check PodClique controller if stuck.
+	ReasonScheduleGateWaitingGangFormation = "ScheduleGateWaitingGangFormation"
+
+	// ReasonScheduleGateWaitingBasePodCliques indicates pod in scaled gang waiting for base PodCliques to schedule.
+	// Emitted when: A pod in a scaled gang (replica 1+) is waiting for the base gang (replica 0) PodCliques
+	// to meet their MinAvailable requirements. Event includes specific blocking PodCliques with status details.
+	// Action: Check referenced base PodCliques. Event shows which PodCliques are blocking (e.g., "my-app-0-worker (2/3 scheduled)").
+	ReasonScheduleGateWaitingBasePodCliques = "ScheduleGateWaitingBasePodCliques"
+
+	// ReasonPodsPendingCreation indicates gang formation blocked waiting for pods to be created.
+	// Emitted when: A PodGang cannot be created because not all expected pods exist yet. Event includes
+	// specific PodCliques with pending pod counts.
+	// Action: Wait for pod creation. Check PodClique controllers if creation is stuck.
+	ReasonPodsPendingCreation = "PodsPendingCreation"
+
+	// ReasonGangFormationComplete indicates all pods for a gang have been created and labeled.
+	// Emitted when: All expected pods for a gang are created and tracked in the PodGang. Schedule gates
+	// will be removed next.
+	// Action: None required - normal progression.
+	ReasonGangFormationComplete = "GangFormationComplete"
+)
