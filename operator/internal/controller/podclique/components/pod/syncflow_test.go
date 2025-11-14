@@ -562,3 +562,271 @@ func createTestPodClique(name string, minAvailable, scheduledReplicas int32) *gr
 		},
 	}
 }
+
+// Tests for getBlockingPodCliquesInfo helper function
+func TestGetBlockingPodCliquesInfo(t *testing.T) {
+	tests := []struct {
+		name              string
+		basePodGangName   string
+		podGang           *groveschedulerv1alpha1.PodGang
+		podCliques        []*grovecorev1alpha1.PodClique
+		expectedBlocking  []string
+		expectError       bool
+		errorContains     string
+		description       string
+	}{
+		{
+			name:            "All PodCliques scheduled - returns empty slice",
+			basePodGangName: "simple1-0",
+			podGang: &groveschedulerv1alpha1.PodGang{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "simple1-0",
+					Namespace: "default",
+				},
+				Spec: groveschedulerv1alpha1.PodGangSpec{
+					PodGroups: []groveschedulerv1alpha1.PodGroup{
+						{Name: "simple1-0-worker", MinReplicas: 3},
+						{Name: "simple1-0-ps", MinReplicas: 2},
+					},
+				},
+			},
+			podCliques: []*grovecorev1alpha1.PodClique{
+				createTestPodClique("simple1-0-worker", 3, 3),
+				createTestPodClique("simple1-0-ps", 2, 2),
+			},
+			expectedBlocking: []string{},
+			expectError:      false,
+			description:      "When all PodCliques are scheduled, should return empty slice",
+		},
+		{
+			name:            "Some PodCliques blocking - returns correct details",
+			basePodGangName: "simple1-0",
+			podGang: &groveschedulerv1alpha1.PodGang{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "simple1-0",
+					Namespace: "default",
+				},
+				Spec: groveschedulerv1alpha1.PodGangSpec{
+					PodGroups: []groveschedulerv1alpha1.PodGroup{
+						{Name: "simple1-0-worker", MinReplicas: 3},
+						{Name: "simple1-0-ps", MinReplicas: 2},
+					},
+				},
+			},
+			podCliques: []*grovecorev1alpha1.PodClique{
+				createTestPodClique("simple1-0-worker", 3, 2),
+				createTestPodClique("simple1-0-ps", 2, 2),
+			},
+			expectedBlocking: []string{"simple1-0-worker (2/3 scheduled)"},
+			expectError:      false,
+			description:      "When some PodCliques are blocking, should return correct formatted strings",
+		},
+		{
+			name:            "Multiple PodCliques blocking - includes all in result",
+			basePodGangName: "simple1-0",
+			podGang: &groveschedulerv1alpha1.PodGang{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "simple1-0",
+					Namespace: "default",
+				},
+				Spec: groveschedulerv1alpha1.PodGangSpec{
+					PodGroups: []groveschedulerv1alpha1.PodGroup{
+						{Name: "simple1-0-worker", MinReplicas: 3},
+						{Name: "simple1-0-ps", MinReplicas: 2},
+					},
+				},
+			},
+			podCliques: []*grovecorev1alpha1.PodClique{
+				createTestPodClique("simple1-0-worker", 3, 1),
+				createTestPodClique("simple1-0-ps", 2, 0),
+			},
+			expectedBlocking: []string{
+				"simple1-0-worker (1/3 scheduled)",
+				"simple1-0-ps (0/2 scheduled)",
+			},
+			expectError: false,
+			description: "When multiple PodCliques are blocking, all should be included",
+		},
+		{
+			name:            "PodGang not found - returns error",
+			basePodGangName: "nonexistent-podgang",
+			podGang:         nil, // Not added to fake client
+			podCliques:      []*grovecorev1alpha1.PodClique{},
+			expectedBlocking: nil,
+			expectError:     true,
+			errorContains:   "failed to get base PodGang",
+			description:     "When PodGang not found, should return appropriate error",
+		},
+		{
+			name:            "PodClique not found - skips gracefully",
+			basePodGangName: "simple1-0",
+			podGang: &groveschedulerv1alpha1.PodGang{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "simple1-0",
+					Namespace: "default",
+				},
+				Spec: groveschedulerv1alpha1.PodGangSpec{
+					PodGroups: []groveschedulerv1alpha1.PodGroup{
+						{Name: "simple1-0-worker", MinReplicas: 3},
+						{Name: "simple1-0-missing", MinReplicas: 2},
+					},
+				},
+			},
+			podCliques: []*grovecorev1alpha1.PodClique{
+				createTestPodClique("simple1-0-worker", 3, 2),
+				// simple1-0-missing is intentionally not created
+			},
+			expectedBlocking: []string{"simple1-0-worker (2/3 scheduled)"},
+			expectError:      false,
+			description:      "When PodClique not found, should skip gracefully",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create scheme
+			scheme := runtime.NewScheme()
+			_ = grovecorev1alpha1.AddToScheme(scheme)
+			_ = groveschedulerv1alpha1.AddToScheme(scheme)
+
+			// Build client with test objects
+			clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
+			if tt.podGang != nil {
+				clientBuilder = clientBuilder.WithObjects(tt.podGang)
+			}
+			for _, pclq := range tt.podCliques {
+				clientBuilder = clientBuilder.WithObjects(pclq)
+			}
+			fakeClient := clientBuilder.Build()
+
+			// Create resource with fake client
+			r := _resource{client: fakeClient}
+
+			// Call the function
+			blockingInfo, err := r.getBlockingPodCliquesInfo(
+				context.Background(),
+				logr.Discard(),
+				"default",
+				tt.basePodGangName,
+			)
+
+			// Assert error behavior
+			if tt.expectError {
+				require.Error(t, err, tt.description)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				require.NoError(t, err, tt.description)
+				assert.Equal(t, tt.expectedBlocking, blockingInfo, tt.description)
+			}
+		})
+	}
+}
+
+// Tests for getReplicaIndexFromPodClique helper function
+func TestGetReplicaIndexFromPodClique(t *testing.T) {
+	tests := []struct {
+		name          string
+		pclq          *grovecorev1alpha1.PodClique
+		expectedIndex int
+		expectError   bool
+		description   string
+	}{
+		{
+			name: "PodClique with label - extracts correct index",
+			pclq: &grovecorev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-app-0-worker",
+					Namespace: "default",
+					Labels: map[string]string{
+						common.LabelPodCliqueSetReplicaIndex: "0",
+					},
+				},
+			},
+			expectedIndex: 0,
+			expectError:   false,
+			description:   "Should extract replica index from label",
+		},
+		{
+			name: "PodClique with label - replica index 5",
+			pclq: &grovecorev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-app-5-worker",
+					Namespace: "default",
+					Labels: map[string]string{
+						common.LabelPodCliqueSetReplicaIndex: "5",
+					},
+				},
+			},
+			expectedIndex: 5,
+			expectError:   false,
+			description:   "Should extract larger replica index from label",
+		},
+		{
+			name: "PodClique without label - parses from name",
+			pclq: &grovecorev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-app-2-worker",
+					Namespace: "default",
+					Labels:    map[string]string{}, // No replica index label
+				},
+			},
+			expectedIndex: 2,
+			expectError:   false,
+			description:   "Should parse replica index from name when label missing",
+		},
+		{
+			name: "PodClique without label - name parsing replica 0",
+			pclq: &grovecorev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "simple1-0-ps",
+					Namespace: "default",
+					Labels:    map[string]string{},
+				},
+			},
+			expectedIndex: 0,
+			expectError:   false,
+			description:   "Should parse replica index 0 from name",
+		},
+		{
+			name: "PodClique with complex name",
+			pclq: &grovecorev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-complex-app-name-3-worker-node",
+					Namespace: "default",
+					Labels:    map[string]string{},
+				},
+			},
+			expectedIndex: 3,
+			expectError:   false,
+			description:   "Should parse replica index from complex name",
+		},
+		{
+			name: "Invalid format - no numeric parts",
+			pclq: &grovecorev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-app-worker",
+					Namespace: "default",
+					Labels:    map[string]string{},
+				},
+			},
+			expectedIndex: 0,
+			expectError:   true,
+			description:   "Should return error when no numeric parts found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			index, err := getReplicaIndexFromPodClique(tt.pclq)
+
+			if tt.expectError {
+				require.Error(t, err, tt.description)
+			} else {
+				require.NoError(t, err, tt.description)
+				assert.Equal(t, tt.expectedIndex, index, tt.description)
+			}
+		})
+	}
+}

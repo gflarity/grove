@@ -197,7 +197,7 @@ func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, num
 			Type:               constants.ConditionTypeMinAvailableBreached,
 			Status:             metav1.ConditionFalse,
 			Reason:             constants.ConditionReasonInsufficientScheduledPods,
-			Message:            fmt.Sprintf("Insufficient scheduled pods. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
+			Message:            fmt.Sprintf("Insufficient scheduled pods. expected at least: %d, scheduled: %d, schedule-gated: %d", minAvailable, scheduledReplicas, pclq.Status.ScheduleGatedReplicas),
 			LastTransitionTime: now,
 		}
 	}
@@ -212,7 +212,7 @@ func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, num
 			Type:               constants.ConditionTypeMinAvailableBreached,
 			Status:             metav1.ConditionTrue,
 			Reason:             constants.ConditionReasonInsufficientReadyPods,
-			Message:            fmt.Sprintf("Insufficient ready or starting pods. expected at least: %d, found: %d", minAvailable, readyOrStartingPods),
+			Message:            fmt.Sprintf("Insufficient ready or starting pods. expected at least: %d, found: %d, schedule-gated: %d", minAvailable, readyOrStartingPods, pclq.Status.ScheduleGatedReplicas),
 			LastTransitionTime: now,
 		}
 	}
@@ -236,12 +236,17 @@ func mutatePodCliqueScheduledCondition(pclq *grovecorev1alpha1.PodClique) {
 // computePodCliqueScheduledCondition calculates the PodCliqueScheduled condition based on minimum availability requirements
 func computePodCliqueScheduledCondition(pclq *grovecorev1alpha1.PodClique) metav1.Condition {
 	now := metav1.Now()
-	if pclq.Status.ScheduledReplicas < *pclq.Spec.MinAvailable {
+	minAvailable := *pclq.Spec.MinAvailable
+	scheduledReplicas := pclq.Status.ScheduledReplicas
+	scheduleGatedReplicas := pclq.Status.ScheduleGatedReplicas
+	totalReplicas := pclq.Status.Replicas
+	
+	if scheduledReplicas < minAvailable {
 		return metav1.Condition{
 			Type:               constants.ConditionTypePodCliqueScheduled,
 			Status:             metav1.ConditionFalse,
 			Reason:             constants.ConditionReasonInsufficientScheduledPods,
-			Message:            fmt.Sprintf("Insufficient scheduled pods. expected at least: %d, found: %d", *pclq.Spec.MinAvailable, pclq.Status.ScheduledReplicas),
+			Message:            fmt.Sprintf("Insufficient scheduled pods. expected at least: %d, scheduled: %d, schedule-gated: %d, total replicas: %d", minAvailable, scheduledReplicas, scheduleGatedReplicas, totalReplicas),
 			LastTransitionTime: now,
 		}
 	}
@@ -249,7 +254,7 @@ func computePodCliqueScheduledCondition(pclq *grovecorev1alpha1.PodClique) metav
 		Type:               constants.ConditionTypePodCliqueScheduled,
 		Status:             metav1.ConditionTrue,
 		Reason:             constants.ConditionReasonSufficientScheduledPods,
-		Message:            fmt.Sprintf("Sufficient scheduled pods found. expected at least: %d, found: %d", *pclq.Spec.MinAvailable, pclq.Status.ScheduledReplicas),
+		Message:            fmt.Sprintf("Sufficient scheduled pods found. expected at least: %d, scheduled: %d", minAvailable, scheduledReplicas),
 		LastTransitionTime: now,
 	}
 }

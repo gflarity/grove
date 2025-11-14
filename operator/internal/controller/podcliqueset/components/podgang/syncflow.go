@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 
 	apicommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/clustertopology"
-	"github.com/ai-dynamo/grove/operator/internal/constants"
+	internalconstants "github.com/ai-dynamo/grove/operator/internal/constants"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
@@ -448,14 +450,14 @@ func (r _resource) deleteExcessPodGangs(sc *syncContext) error {
 		pg := emptyPodGang(pgObjectKey)
 		sc.logger.Info("Delete excess PodGang", "objectKey", client.ObjectKeyFromObject(pg))
 		if err := client.IgnoreNotFound(r.client.Delete(sc.ctx, pg)); err != nil {
-			r.eventRecorder.Eventf(sc.pcs, corev1.EventTypeWarning, constants.ReasonPodGangDeleteFailed, "Error deleting PodGang %v: %v", pgObjectKey, err)
+			r.eventRecorder.Eventf(sc.pcs, corev1.EventTypeWarning, internalconstants.ReasonPodGangDeleteFailed, "Error deleting PodGang %v: %v", pgObjectKey, err)
 			return groveerr.WrapError(err,
 				errCodeDeleteExcessPodGang,
 				component.OperationSync,
 				fmt.Sprintf("failed to delete PodGang %v", pgObjectKey),
 			)
 		}
-		r.eventRecorder.Eventf(sc.pcs, corev1.EventTypeNormal, constants.ReasonPodGangDeleteSuccessful, "Deleted PodGang %v", pgObjectKey)
+		r.eventRecorder.Eventf(sc.pcs, corev1.EventTypeNormal, internalconstants.ReasonPodGangDeleteSuccessful, "Deleted PodGang %v", pgObjectKey)
 		sc.deletedPodGangNames = append(sc.deletedPodGangNames, podGangToDelete)
 		sc.logger.Info("Triggered delete of excess PodGang", "objectKey", client.ObjectKeyFromObject(pg))
 	}
@@ -473,10 +475,12 @@ func (r _resource) createOrUpdatePodGangs(sc *syncContext) syncFlowResult {
 		numPendingPods := r.getPodsPendingCreationOrAssociation(sc, podGang)
 		if isPodGangPendingCreation && numPendingPods > 0 {
 			sc.logger.Info("skipping creation of PodGang as all desired replicas have not yet been created or assigned", "fqn", podGang.fqn, "numPendingPodsToCreateOrAssociate", numPendingPods)
+			// Task 4.1: Record event for pods pending creation
+			r.recordPodsPendingCreationEvent(sc, podGang, numPendingPods)
 			result.recordPodGangPendingCreation(podGang.fqn)
 			continue
 		}
-		if err := r.createOrUpdatePodGang(sc, podGang); err != nil {
+		if err := r.createOrUpdatePodGang(sc, podGang, isPodGangPendingCreation); err != nil {
 			sc.logger.Error(err, "failed to create PodGang", "PodGangName", podGang.fqn)
 			result.recordError(err)
 			return result
@@ -533,7 +537,7 @@ func (r _resource) getPodsPendingCreationOrAssociation(sc *syncContext, podGang 
 }
 
 // createOrUpdatePodGang creates or updates a single PodGang resource.
-func (r _resource) createOrUpdatePodGang(sc *syncContext, pgInfo *podGangInfo) error {
+func (r _resource) createOrUpdatePodGang(sc *syncContext, pgInfo *podGangInfo, wasJustCreated bool) error {
 	pgObjectKey := client.ObjectKey{
 		Namespace: sc.pcs.Namespace,
 		Name:      pgInfo.fqn,
@@ -544,14 +548,20 @@ func (r _resource) createOrUpdatePodGang(sc *syncContext, pgInfo *podGangInfo) e
 		return r.buildResource(sc.pcs, pgInfo, pg)
 	})
 	if err != nil {
-		r.eventRecorder.Eventf(sc.pcs, corev1.EventTypeWarning, constants.ReasonPodGangCreateOrUpdateFailed, "Error Creating/Updating PodGang %v: %v", pgObjectKey, err)
+		r.eventRecorder.Eventf(sc.pcs, corev1.EventTypeWarning, internalconstants.ReasonPodGangCreateOrUpdateFailed, "Error Creating/Updating PodGang %v: %v", pgObjectKey, err)
 		return groveerr.WrapError(err,
 			errCodeCreateOrPatchPodGang,
 			component.OperationSync,
 			fmt.Sprintf("Failed to CreateOrPatch PodGang %v", pgObjectKey),
 		)
 	}
-	r.eventRecorder.Eventf(sc.pcs, corev1.EventTypeNormal, constants.ReasonPodGangCreateOrUpdateSuccessful, "Created/Updated PodGang %v", pgObjectKey)
+	r.eventRecorder.Eventf(sc.pcs, corev1.EventTypeNormal, internalconstants.ReasonPodGangCreateOrUpdateSuccessful, "Created/Updated PodGang %v", pgObjectKey)
+	
+	// Task 4.2: Record event for gang formation complete (only on first creation)
+	if wasJustCreated {
+		r.recordGangFormationCompleteEvent(sc, pgInfo)
+	}
+	
 	sc.logger.Info("Triggered CreateOrPatch of PodGang", "objectKey", pgObjectKey)
 	return nil
 }
@@ -736,4 +746,149 @@ type pclqInfo struct {
 	// topologyConstraint holds the topology pack constraint for the PodClique.
 	// These will be cleared when TAS is disabled.
 	topologyConstraint *groveschedulerv1alpha1.TopologyConstraint
+}
+
+// getPendingPodsSummary returns a summary of pending pods grouped by PodClique.
+// Returns map of PodClique name to pending pod count.
+// Instead of saying "waiting for 5 pods," we can say "waiting for 3 pods in my-app-0-worker, 2 in my-app-0-ps."
+func getPendingPodsSummary(sc *syncContext, podGang *podGangInfo) map[string]int {
+	pendingSummary := make(map[string]int)
+	
+	// Get existing PodClique names for quick lookup
+	existingPCLQNames := make(map[string]bool)
+	for _, pclq := range sc.existingPCLQs {
+		existingPCLQNames[pclq.Name] = true
+	}
+
+	// Count pending pods from non-existent PodCliques
+	for _, pclqInfo := range podGang.pclqs {
+		if !existingPCLQNames[pclqInfo.fqn] {
+			// Entire PodClique doesn't exist yet - all replicas are pending
+			pendingSummary[pclqInfo.fqn] = int(pclqInfo.replicas)
+		}
+	}
+
+	// Count pending pods from existing PodCliques
+	pclqs := sc.getPodCliques(podGang)
+	for _, pclq := range pclqs {
+		existingPCLQPods := sc.existingPCLQPods[pclq.Name]
+		
+		// Calculate pods pending creation
+		numPodsPendingCreate := max(0, int(pclq.Spec.Replicas)-len(existingPCLQPods))
+		
+		// Count pods pending PodGang label assignment
+		numPodsPendingAssignment := 0
+		for _, existingPod := range existingPCLQPods {
+			podGangLabelValue, ok := existingPod.GetLabels()[apicommon.LabelPodGang]
+			if !ok || podGangLabelValue != podGang.fqn {
+				numPodsPendingAssignment++
+			}
+		}
+		
+		totalPending := numPodsPendingCreate + numPodsPendingAssignment
+		if totalPending > 0 {
+			pendingSummary[pclq.Name] = totalPending
+		}
+	}
+
+	return pendingSummary
+}
+
+// extractReplicaIndexFromPodGangName extracts the replica index from a PodGang name.
+// Task 4.3: Helper to extract replica index from PodGang name.
+// PodGang names follow patterns:
+// - Base gang: "<pcs-name>-<replica-index>" (e.g., "my-app-0")
+// - Scaled gang: "<pcs-name>-<replica-index>-<pcsg-name>-<gang-index>" (e.g., "my-app-0-sga-0")
+func extractReplicaIndexFromPodGangName(podGangName string) int {
+	parts := strings.Split(podGangName, "-")
+	if len(parts) < 2 {
+		return -1
+	}
+	
+	// The replica index is typically the second part (after the PCS name)
+	// For both base and scaled gangs, this pattern holds
+	if replicaIndex, err := strconv.Atoi(parts[1]); err == nil {
+		return replicaIndex
+	}
+	
+	return -1
+}
+
+// recordPodsPendingCreationEvent records an event when PodGang creation is blocked by pending pods.
+// Task 4.1: Add Events for Pods Pending Creation.
+func (r _resource) recordPodsPendingCreationEvent(sc *syncContext, podGang *podGangInfo, numPendingPods int) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Log panic but don't fail reconciliation
+			sc.logger.V(4).Info("Panic recording event", "panic", r)
+		}
+	}()
+	
+	if r.eventRecorder == nil {
+		return
+	}
+	
+	// Get replica index from PodGang name
+	replicaIndex := extractReplicaIndexFromPodGangName(podGang.fqn)
+	
+	// Get detailed summary of pending pods by PodClique
+	pendingSummary := getPendingPodsSummary(sc, podGang)
+	
+	var eventMsg string
+	if len(pendingSummary) > 0 {
+		// Build detailed message with PodClique breakdown
+		details := make([]string, 0, len(pendingSummary))
+		for pclqName, count := range pendingSummary {
+			details = append(details, fmt.Sprintf("%s: %d pods", pclqName, count))
+		}
+		sort.Strings(details) // Sort for consistent ordering
+		
+		if replicaIndex >= 0 {
+			eventMsg = fmt.Sprintf("Replica %d gang formation blocked: waiting for pods to be created (%s)",
+				replicaIndex, strings.Join(details, ", "))
+		} else {
+			eventMsg = fmt.Sprintf("Gang formation blocked: waiting for pods to be created (%s)",
+				strings.Join(details, ", "))
+		}
+	} else {
+		// Fallback if we can't get details
+		if replicaIndex >= 0 {
+			eventMsg = fmt.Sprintf("Replica %d gang formation blocked: waiting for %d pods to be created or assigned",
+				replicaIndex, numPendingPods)
+		} else {
+			eventMsg = fmt.Sprintf("Gang formation blocked: waiting for %d pods to be created or assigned",
+				numPendingPods)
+		}
+	}
+	
+	r.eventRecorder.Event(sc.pcs, corev1.EventTypeNormal, internalconstants.ReasonPodsPendingCreation, eventMsg)
+}
+
+// recordGangFormationCompleteEvent records an event when a PodGang is successfully created.
+// Task 4.2: Add Events for Gang Formation Complete.
+func (r _resource) recordGangFormationCompleteEvent(sc *syncContext, pgInfo *podGangInfo) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Log panic but don't fail reconciliation
+			sc.logger.V(4).Info("Panic recording event", "panic", r)
+		}
+	}()
+	
+	if r.eventRecorder == nil {
+		return
+	}
+	
+	// Parse replica index from PodGang name
+	replicaIndex := extractReplicaIndexFromPodGangName(pgInfo.fqn)
+	
+	var eventMsg string
+	if replicaIndex >= 0 {
+		eventMsg = fmt.Sprintf("Replica %d gang formation complete: all %d PodCliques have required pods created and tracked",
+			replicaIndex, len(pgInfo.pclqs))
+	} else {
+		eventMsg = fmt.Sprintf("Gang formation complete: all %d PodCliques have required pods created and tracked",
+			len(pgInfo.pclqs))
+	}
+	
+	r.eventRecorder.Event(sc.pcs, corev1.EventTypeNormal, internalconstants.ReasonGangFormationComplete, eventMsg)
 }

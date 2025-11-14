@@ -22,9 +22,12 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/ai-dynamo/grove/operator/api/common"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/ai-dynamo/grove/operator/internal/constants"
 	"github.com/ai-dynamo/grove/operator/internal/controller/common/component"
 	componentutils "github.com/ai-dynamo/grove/operator/internal/controller/common/component/utils"
 	groveerr "github.com/ai-dynamo/grove/operator/internal/errors"
@@ -260,11 +263,36 @@ func (r _resource) checkAndRemovePodSchedulingGates(sc *syncContext, logger logr
 			podObjectKey := client.ObjectKeyFromObject(p)
 			if !slices.Contains(sc.podNamesUpdatedInPCLQPodGangs, p.Name) {
 				logger.Info("Pod has scheduling gate but it has not yet been updated in PodGang", "podObjectKey", podObjectKey)
+				// Task 3.1: Event for gang formation waiting
+				// Get blocking PodCliques to provide actionable information
+				blockingInfo, err := r.getBlockingPodCliquesInGang(sc.ctx, logger, sc)
+				var eventMsg string
+				if err != nil {
+					// Fallback if we can't get blocking info
+					logger.V(4).Info("Failed to get blocking PodCliques info", "error", err)
+					eventMsg = fmt.Sprintf("Pod %s schedule gate blocked: waiting for gang formation to complete (all pods in PodClique %s must be created and tracked)",
+						p.Name, sc.pclq.Name)
+				} else if len(blockingInfo) > 0 {
+					// Show which specific PodCliques are blocking
+					eventMsg = fmt.Sprintf("Pod %s schedule gate blocked: waiting for gang formation - blocked by %s",
+						p.Name, strings.Join(blockingInfo, ", "))
+				} else {
+					// All PodCliques have created their pods, waiting for PodGang to be created
+					eventMsg = fmt.Sprintf("Pod %s schedule gate blocked: waiting for gang formation to complete (all pods created, waiting for PodGang resource)",
+						p.Name)
+				}
+				r.recordEvent(p, corev1.EventTypeNormal,
+					constants.ReasonScheduleGateWaitingGangFormation,
+					eventMsg)
 				skippedScheduleGatedPods = append(skippedScheduleGatedPods, p.Name)
 				continue
 			}
-			shouldSkip := r.shouldSkipPodSchedulingGateRemoval(logger, p, basePodGangScheduled, basePodGangName)
+			shouldSkip, skipReason := r.shouldSkipPodSchedulingGateRemoval(logger, sc, p, basePodGangScheduled, basePodGangName)
 			if shouldSkip {
+				// Task 3.2: Event for base PodClique waiting (if applicable)
+				if skipReason != "" {
+					r.recordEvent(p, corev1.EventTypeNormal, constants.ReasonScheduleGateWaitingBasePodCliques, skipReason)
+				}
 				skippedScheduleGatedPods = append(skippedScheduleGatedPods, p.Name)
 				continue
 			}
@@ -277,6 +305,10 @@ func (r _resource) checkAndRemovePodSchedulingGates(sc *syncContext, logger logr
 						return err
 					}
 					logger.Info("Removed scheduling gate from pod", "podObjectKey", podObjectKey)
+					// Task 3.3: Event for successful gate removal
+					r.recordEvent(p, corev1.EventTypeNormal,
+						constants.ReasonScheduleGateRemoved,
+						fmt.Sprintf("Removed schedule gate from pod %s - pod is now eligible for scheduling", p.Name))
 					return nil
 				},
 			}
@@ -364,26 +396,88 @@ func (r _resource) checkBasePodGangScheduledForPodClique(ctx context.Context, lo
 
 // shouldSkipPodSchedulingGateRemoval implements the core PodGang scheduling gate logic.
 // It returns true if the pod scheduling gate removal should be skipped, false otherwise.
-func (r _resource) shouldSkipPodSchedulingGateRemoval(logger logr.Logger, pod *corev1.Pod, basePodGangReady bool, basePodGangName string) bool {
+// It also returns a user-facing event message explaining why the gate removal was skipped.
+// For base gang pods, it always returns a message so operators know what the pod is waiting for.
+func (r _resource) shouldSkipPodSchedulingGateRemoval(logger logr.Logger, sc *syncContext, pod *corev1.Pod, basePodGangReady bool, basePodGangName string) (bool, string) {
 	if basePodGangName == "" {
 		// BASE PODGANG POD: This PodClique has no base PodGang dependency
 		// These pods form the core gang and get their gates removed immediately once assigned to PodGang
 		// They represent the minimum viable cluster (first minAvailable replicas) that must start together
+		// However, they still need ALL PodCliques in the gang to create their pods before the PodGang can be formed
+		
+		// Get blocking PodCliques to provide visibility
+		blockingInfo, err := r.getBlockingPodCliquesInGang(sc.ctx, logger, sc)
+		if err != nil {
+			logger.Info("Proceeding with gate removal for base PodGang pod",
+				"podObjectKey", client.ObjectKeyFromObject(pod))
+			return false, ""
+		}
+		
+		if len(blockingInfo) > 0 {
+			// Other PodCliques in the gang are still creating pods - inform the operator
+			eventMsg := fmt.Sprintf("Pod %s schedule gate blocked: waiting for gang formation - blocked by %s",
+				pod.Name, strings.Join(blockingInfo, ", "))
+			return true, eventMsg
+		}
+		
+		// All PodCliques have created their pods, gate can be removed
 		logger.Info("Proceeding with gate removal for base PodGang pod",
 			"podObjectKey", client.ObjectKeyFromObject(pod))
-		return false
+		return false, ""
 	}
 	// SCALED PODGANG POD: This PodClique depends on a base PodGang
 	if basePodGangReady {
 		logger.Info("Base PodGang is ready, proceeding with gate removal for scaled PodGang pod",
 			"podObjectKey", client.ObjectKeyFromObject(pod),
 			"basePodGangName", basePodGangName)
-		return false
+		return false, ""
 	}
+	// Base PodGang is not ready - generate detailed event message
 	logger.Info("Scaled PodGang pod has scheduling gate but base PodGang is not ready yet, skipping scheduling gate removal",
 		"podObjectKey", client.ObjectKeyFromObject(pod),
 		"basePodGangName", basePodGangName)
-	return true
+	
+	// Get replica index for user-facing message
+	replicaIndex, err := getReplicaIndexFromPodClique(sc.pclq)
+	if err != nil {
+		logger.V(4).Info("Unable to extract replica index from PodClique", "error", err)
+		replicaIndex = -1 // Use -1 as sentinel value if we can't determine index
+	}
+	
+	// Get blocking PodClique details
+	blockingInfo, err := r.getBlockingPodCliquesInfo(sc.ctx, logger, sc.pclq.Namespace, basePodGangName)
+	if err != nil {
+		// API error - log but use fallback message
+		logger.V(4).Info("Unable to get blocking PodCliques info", "error", err)
+		if replicaIndex >= 0 {
+			return true, fmt.Sprintf("Pod %s schedule gate blocked: waiting for base PodCliques in replica %d to schedule",
+				pod.Name, replicaIndex)
+		}
+		return true, fmt.Sprintf("Pod %s schedule gate blocked: waiting for base PodCliques to schedule", pod.Name)
+	}
+	
+	// Build detailed message with blocking info
+	var eventMsg string
+	if len(blockingInfo) > 0 {
+		// We have specific blocking PodCliques to report
+		if replicaIndex >= 0 {
+			eventMsg = fmt.Sprintf("Pod %s schedule gate blocked: waiting for base PodCliques in replica %d to schedule: %s",
+				pod.Name, replicaIndex, strings.Join(blockingInfo, ", "))
+		} else {
+			eventMsg = fmt.Sprintf("Pod %s schedule gate blocked: waiting for base PodCliques to schedule: %s",
+				pod.Name, strings.Join(blockingInfo, ", "))
+		}
+	} else {
+		// All PodCliques have sufficient scheduled replicas, but PodGang not marked ready yet
+		if replicaIndex >= 0 {
+			eventMsg = fmt.Sprintf("Pod %s schedule gate blocked: waiting for base PodCliques in replica %d to become ready",
+				pod.Name, replicaIndex)
+		} else {
+			eventMsg = fmt.Sprintf("Pod %s schedule gate blocked: waiting for base PodCliques to become ready", pod.Name)
+		}
+	}
+	
+	return true, eventMsg
 }
 
 // hasPodGangSchedulingGate checks if a pod has the PodGang scheduling gate
@@ -481,4 +575,147 @@ func getPodCliqueExpectationsStoreKey(logger logr.Logger, operation string, pclq
 		)
 	}
 	return pclqExpStoreKey, nil
+}
+
+// getBlockingPodCliquesInfo returns detailed information about PodCliques blocking the base PodGang.
+// Returns a slice of human-readable strings like "my-app-0-worker (2/3 scheduled)".
+// This function translates PodGang scheduling status into user-facing PodClique information,
+// hiding implementation details (PodGang) from end users.
+func (r _resource) getBlockingPodCliquesInfo(
+	ctx context.Context,
+	logger logr.Logger,
+	namespace, basePodGangName string,
+) ([]string, error) {
+	// Get the base PodGang resource
+	basePodGang, err := componentutils.GetPodGang(ctx, r.client, basePodGangName, namespace)
+	if err != nil {
+		return nil, groveerr.WrapError(err,
+			errCodeGetPodGang,
+			component.OperationSync,
+			fmt.Sprintf("failed to get base PodGang %s in namespace %s", basePodGangName, namespace),
+		)
+	}
+
+	blockingInfo := make([]string, 0)
+
+	// Iterate through PodGroups to identify blocking PodCliques
+	for _, podGroup := range basePodGang.Spec.PodGroups {
+		pclqName := podGroup.Name
+		pclq := &grovecorev1alpha1.PodClique{}
+		pclqKey := client.ObjectKey{Name: pclqName, Namespace: namespace}
+
+		if err := r.client.Get(ctx, pclqKey, pclq); err != nil {
+			if apierrors.IsNotFound(err) {
+				// PodClique not found - skip gracefully but log for visibility
+				logger.V(4).Info("PodClique not found when checking blocking status, skipping",
+					"pclqName", pclqName,
+					"basePodGangName", basePodGangName)
+				continue
+			}
+			// API errors should be propagated
+			return nil, groveerr.WrapError(err,
+				errCodeGetPodClique,
+				component.OperationSync,
+				fmt.Sprintf("failed to get PodClique %s in namespace %s for blocking info", pclqName, namespace),
+			)
+		}
+
+		// Check if this PodClique is blocking (ScheduledReplicas < MinReplicas)
+		if pclq.Status.ScheduledReplicas < podGroup.MinReplicas {
+			blockingInfo = append(blockingInfo,
+				fmt.Sprintf("%s (%d/%d scheduled)", pclqName, pclq.Status.ScheduledReplicas, podGroup.MinReplicas))
+		}
+	}
+
+	return blockingInfo, nil
+}
+
+// getBlockingPodCliquesInGang returns information about PodCliques in the same gang that are blocking gang formation.
+// This checks all PodCliques in the same gang (identified by the podgang name label) and returns those that
+// haven't created all their pods yet. Returns a slice of human-readable strings like "my-app-0-api (0/2 pods created)".
+func (r _resource) getBlockingPodCliquesInGang(
+	ctx context.Context,
+	logger logr.Logger,
+	sc *syncContext,
+) ([]string, error) {
+	podGangName := sc.pclq.Labels[common.LabelPodGang]
+	
+	if podGangName == "" {
+		// PodClique doesn't have a PodGang label yet
+		return nil, nil
+	}
+
+	// List all PodCliques in the same gang
+	pclqList := &grovecorev1alpha1.PodCliqueList{}
+	if err := r.client.List(ctx, pclqList, 
+		client.InNamespace(sc.pclq.Namespace),
+		client.MatchingLabels{common.LabelPodGang: podGangName}); err != nil {
+		return nil, err
+	}
+
+	blockingInfo := make([]string, 0)
+	
+	for _, pclq := range pclqList.Items {
+		// Skip the current PodClique
+		if pclq.Name == sc.pclq.Name {
+			continue
+		}
+
+		// Check if this PodClique has created all its pods
+		// We check if replicas (actual pods) < spec.replicas (desired)
+		if pclq.Status.Replicas < pclq.Spec.Replicas {
+			blockingMsg := fmt.Sprintf("%s (%d/%d pods created)", pclq.Name, pclq.Status.Replicas, pclq.Spec.Replicas)
+			blockingInfo = append(blockingInfo, blockingMsg)
+		}
+	}
+
+	// Sort for consistent ordering
+	sort.Strings(blockingInfo)
+	return blockingInfo, nil
+}
+
+// getReplicaIndexFromPodClique extracts the PodCliqueSet replica index from a PodClique.
+// Returns the replica index or error if it cannot be determined.
+// Users think in terms of replicas (replica 0, replica 1), not PodGang names,
+// so this helper provides that user-facing context.
+func getReplicaIndexFromPodClique(pclq *grovecorev1alpha1.PodClique) (int, error) {
+	// First try to get from label (most reliable)
+	if replicaIndexStr, ok := pclq.Labels[common.LabelPodCliqueSetReplicaIndex]; ok {
+		replicaIndex, err := strconv.Atoi(replicaIndexStr)
+		if err == nil {
+			return replicaIndex, nil
+		}
+	}
+
+	// Fallback: parse from name if label is missing
+	// PodClique names follow pattern: <pcs-name>-<replica-index>-<clique-name>
+	// Example: "my-app-0-worker" -> replica index 0
+	parts := strings.Split(pclq.Name, "-")
+	
+	// Look for the first numeric part (likely to be the replica index)
+	// Skip the first part as it's typically the PCS name
+	for i := 1; i < len(parts); i++ {
+		if replicaIndex, err := strconv.Atoi(parts[i]); err == nil {
+			return replicaIndex, nil
+		}
+	}
+
+	return 0, fmt.Errorf("unable to extract replica index from PodClique %s (label missing and name parsing failed)", pclq.Name)
+}
+
+// recordEvent safely records a Kubernetes event, logging errors instead of propagating them.
+// Task 3.4: Event recording should never break reconciliation logic.
+func (r _resource) recordEvent(obj client.Object, eventType, reason, message string) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Log panic but don't fail reconciliation
+			fmt.Printf("Panic recording event: %v\n", r)
+		}
+	}()
+	
+	if r.eventRecorder == nil {
+		return
+	}
+	
+	r.eventRecorder.Event(obj, eventType, reason, message)
 }
