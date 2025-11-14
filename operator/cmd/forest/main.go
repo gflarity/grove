@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -29,6 +30,7 @@ type ViewType int
 const (
 	ForestView ViewType = iota
 	PodCliqueSetView
+	PodCliqueSetReplicaView
 	PodCliqueScalingGroupView
 	PodCliqueView
 	PodView
@@ -36,34 +38,15 @@ const (
 
 // ViewState tracks the current navigation state
 type ViewState struct {
-	viewType            ViewType
+	viewType             ViewType
 	selectedPodCliqueSet string
+	selectedReplicaIndex string // The replica index (e.g., "0", "1", "2")
 	selectedScalingGroup string
 	selectedPodClique    string
 	selectedPod          string
 }
 
-// Resource represents a generic resource item
-type Resource struct {
-	Name         string
-	Type         string
-	Ready        string
-	Status       string
-	Namespace    string
-	ParentType   string
-	ParentName   string
-	YAML         string  // For Pod detail view
-}
-
-// Event represents a Kubernetes event
-type Event struct {
-	Type     string  // Normal, Warning, Error
-	Reason   string  // The reason for the event
-	Age      string  // How long ago
-	From     string  // Component that generated the event
-	Message  string  // Detailed message
-	Parent   string  // Parent resource name for filtering
-}
+// Resource and Event types are defined in k8s_client.go
 
 // App encapsulates the split-pane application
 type App struct {
@@ -78,20 +61,246 @@ type App struct {
 	allResources    map[string][]Resource  // Key is parent identifier
 	allEvents       []Event
 	podYAMLData     map[string]string  // Pod name -> YAML content
+	k8sClient       *K8sClient         // Kubernetes client
+	ctx             context.Context    // Context for K8s operations
 }
 
 func NewApp() *App {
+	// Initialize Kubernetes client
+	k8sClient, err := NewK8sClient()
+	if err != nil {
+		// If we can't connect to Kubernetes, show an error but don't crash
+		// The app will show empty data
+		fmt.Printf("Warning: Failed to initialize Kubernetes client: %v\n", err)
+		k8sClient = nil
+	}
+
 	app := &App{
 		Application:  tview.NewApplication(),
 		activePane:   ResourcesPane,
 		allResources: make(map[string][]Resource),
 		podYAMLData:  make(map[string]string),
+		k8sClient:    k8sClient,
+		ctx:          context.Background(),
 		viewState: ViewState{
 			viewType: ForestView,
 		},
 	}
-	app.initializeFakeData()
+	
+	// Load initial data
+	app.loadForestData()
+	
 	return app
+}
+
+// loadForestData loads PodCliqueSet data from Kubernetes
+func (a *App) loadForestData() {
+	if a.k8sClient == nil {
+		// No K8s client, show empty data
+		a.allResources["forest"] = []Resource{}
+		return
+	}
+
+	resources, err := a.k8sClient.GetAllPodCliqueSets(a.ctx)
+	if err != nil {
+		fmt.Printf("Error loading PodCliqueSets: %v\n", err)
+		a.allResources["forest"] = []Resource{}
+		return
+	}
+
+	a.allResources["forest"] = resources
+}
+
+// loadPodCliqueSetReplicas loads replica index resources for a PodCliqueSet
+func (a *App) loadPodCliqueSetReplicas(pcsName, namespace string) {
+	if a.k8sClient == nil {
+		return
+	}
+
+	key := "PodCliqueSet/" + pcsName
+
+	// Get all replica indexes
+	replicaIndexes, err := a.k8sClient.GetReplicaIndexesForPodCliqueSet(a.ctx, pcsName, namespace)
+	if err != nil {
+		fmt.Printf("Error loading replica indexes: %v\n", err)
+		replicaIndexes = []string{}
+	}
+
+	// Create virtual PodCliqueSetReplica resources
+	resources := make([]Resource, 0, len(replicaIndexes))
+	for _, replicaIndex := range replicaIndexes {
+		// Get stats for this replica
+		scalingGroups, _ := a.k8sClient.GetPodCliqueScalingGroupsForPodCliqueSetReplica(a.ctx, pcsName, namespace, replicaIndex)
+		podCliques, _ := a.k8sClient.GetPodCliquesForPodCliqueSetReplica(a.ctx, pcsName, namespace, replicaIndex)
+		
+		// Calculate aggregate ready/scheduled counts
+		var totalReady, totalScheduled, totalReplicas int
+		for _, sg := range scalingGroups {
+			// Parse ready string like "3/5"
+			var ready, replicas int
+			fmt.Sscanf(sg.Ready, "%d/%d", &ready, &replicas)
+			totalReady += ready
+			totalReplicas += replicas
+			
+			var scheduled, scheduledMax int
+			fmt.Sscanf(sg.Scheduled, "%d/%d", &scheduled, &scheduledMax)
+			totalScheduled += scheduled
+		}
+		for _, pc := range podCliques {
+			var ready, replicas int
+			fmt.Sscanf(pc.Ready, "%d/%d", &ready, &replicas)
+			totalReady += ready
+			totalReplicas += replicas
+			
+			var scheduled, scheduledMax int
+			fmt.Sscanf(pc.Scheduled, "%d/%d", &scheduled, &scheduledMax)
+			totalScheduled += scheduled
+		}
+		
+		resources = append(resources, Resource{
+			Name:      fmt.Sprintf("%s-replica-%s", pcsName, replicaIndex),
+			Type:      "PodCliqueSetReplica",
+			Ready:     fmt.Sprintf("%d/%d", totalReady, totalReplicas),
+			Scheduled: fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
+			Status:    "",
+			Namespace: namespace,
+			ParentType: "PodCliqueSet",
+			ParentName: pcsName,
+		})
+	}
+
+	a.allResources[key] = resources
+}
+
+// loadPodCliqueSetReplicaChildren loads children resources for a specific PodCliqueSet replica
+func (a *App) loadPodCliqueSetReplicaChildren(pcsName, namespace, replicaIndex string) {
+	if a.k8sClient == nil {
+		return
+	}
+
+	key := "PodCliqueSetReplica/" + pcsName + "/" + replicaIndex
+
+	// Get PodCliqueScalingGroups for this replica
+	scalingGroups, err := a.k8sClient.GetPodCliqueScalingGroupsForPodCliqueSetReplica(a.ctx, pcsName, namespace, replicaIndex)
+	if err != nil {
+		fmt.Printf("Error loading PodCliqueScalingGroups: %v\n", err)
+		scalingGroups = []Resource{}
+	}
+
+	// Get standalone PodCliques for this replica
+	podCliques, err := a.k8sClient.GetPodCliquesForPodCliqueSetReplica(a.ctx, pcsName, namespace, replicaIndex)
+	if err != nil {
+		fmt.Printf("Error loading PodCliques: %v\n", err)
+		podCliques = []Resource{}
+	}
+
+	// Combine them
+	resources := append(scalingGroups, podCliques...)
+	a.allResources[key] = resources
+}
+
+// loadEventsForPodCliqueSet loads events for a PodCliqueSet (all replicas)
+func (a *App) loadEventsForPodCliqueSet(pcsName, namespace string) {
+	if a.k8sClient == nil {
+		a.allEvents = []Event{}
+		return
+	}
+
+	events, err := a.k8sClient.GetEventsForPodCliqueSet(a.ctx, pcsName, namespace)
+	if err != nil {
+		fmt.Printf("Error loading events: %v\n", err)
+		a.allEvents = []Event{}
+		return
+	}
+
+	a.allEvents = events
+}
+
+// loadEventsForPodCliqueSetReplica loads events for a specific PodCliqueSet replica
+func (a *App) loadEventsForPodCliqueSetReplica(pcsName, namespace, replicaIndex string) {
+	if a.k8sClient == nil {
+		a.allEvents = []Event{}
+		return
+	}
+
+	events, err := a.k8sClient.GetEventsForPodCliqueSetReplica(a.ctx, pcsName, namespace, replicaIndex)
+	if err != nil {
+		fmt.Printf("Error loading events: %v\n", err)
+		a.allEvents = []Event{}
+		return
+	}
+
+	a.allEvents = events
+}
+
+// loadPodCliqueScalingGroupChildren loads children resources for a PodCliqueScalingGroup
+func (a *App) loadPodCliqueScalingGroupChildren(pcsgName, namespace string) {
+	if a.k8sClient == nil {
+		return
+	}
+
+	key := "PodCliqueScalingGroup/" + pcsgName
+
+	// Get PodCliques that belong to this scaling group
+	podCliques, err := a.k8sClient.GetPodCliquesForPodCliqueScalingGroup(a.ctx, pcsgName, namespace)
+	if err != nil {
+		fmt.Printf("Error loading PodCliques for PodCliqueScalingGroup: %v\n", err)
+		podCliques = []Resource{}
+	}
+
+	a.allResources[key] = podCliques
+}
+
+// loadEventsForPodCliqueScalingGroup loads events for a PodCliqueScalingGroup
+func (a *App) loadEventsForPodCliqueScalingGroup(pcsgName, namespace string) {
+	if a.k8sClient == nil {
+		a.allEvents = []Event{}
+		return
+	}
+
+	events, err := a.k8sClient.GetEventsForPodCliqueScalingGroup(a.ctx, pcsgName, namespace)
+	if err != nil {
+		fmt.Printf("Error loading events for PodCliqueScalingGroup: %v\n", err)
+		a.allEvents = []Event{}
+		return
+	}
+
+	a.allEvents = events
+}
+
+// loadPodCliqueChildren loads children resources for a PodClique (Pods)
+func (a *App) loadPodCliqueChildren(podCliqueName, namespace string) {
+	if a.k8sClient == nil {
+		return
+	}
+
+	key := "PodClique/" + podCliqueName
+
+	// Get Pods that belong to this PodClique
+	pods, err := a.k8sClient.GetPodsForPodClique(a.ctx, podCliqueName, namespace)
+	if err != nil {
+		fmt.Printf("Error loading Pods for PodClique: %v\n", err)
+		pods = []Resource{}
+	}
+
+	a.allResources[key] = pods
+}
+
+// loadEventsForPodClique loads events for a PodClique
+func (a *App) loadEventsForPodClique(podCliqueName, namespace string) {
+	if a.k8sClient == nil {
+		a.allEvents = []Event{}
+		return
+	}
+
+	events, err := a.k8sClient.GetEventsForPodClique(a.ctx, podCliqueName, namespace)
+	if err != nil {
+		fmt.Printf("Error loading events for PodClique: %v\n", err)
+		a.allEvents = []Event{}
+		return
+	}
+
+	a.allEvents = events
 }
 
 // initializeFakeData creates hardcoded test data
@@ -633,6 +842,8 @@ func (a *App) getCurrentViewKey() string {
 		return "forest"
 	case PodCliqueSetView:
 		return "PodCliqueSet/" + a.viewState.selectedPodCliqueSet
+	case PodCliqueSetReplicaView:
+		return "PodCliqueSetReplica/" + a.viewState.selectedPodCliqueSet + "/" + a.viewState.selectedReplicaIndex
 	case PodCliqueScalingGroupView:
 		return "PodCliqueScalingGroup/" + a.viewState.selectedScalingGroup
 	case PodCliqueView:
@@ -650,18 +861,20 @@ func (a *App) getViewTitle() string {
 		return "Forest"
 	case PodCliqueSetView:
 		return fmt.Sprintf("Forest > [cyan]%s[-]", a.viewState.selectedPodCliqueSet)
+	case PodCliqueSetReplicaView:
+		return fmt.Sprintf("Forest > %s > [cyan]replica-%s[-]", a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex)
 	case PodCliqueScalingGroupView:
-		return fmt.Sprintf("Forest > %s > [purple]%s[-]", a.viewState.selectedPodCliqueSet, a.viewState.selectedScalingGroup)
+		return fmt.Sprintf("Forest > %s > replica-%s > [purple]%s[-]", a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex, a.viewState.selectedScalingGroup)
 	case PodCliqueView:
-		parent := a.viewState.selectedPodCliqueSet
+		parent := fmt.Sprintf("%s > replica-%s", a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex)
 		if a.viewState.selectedScalingGroup != "" {
-			parent = fmt.Sprintf("%s > %s", a.viewState.selectedPodCliqueSet, a.viewState.selectedScalingGroup)
+			parent = fmt.Sprintf("%s > replica-%s > %s", a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex, a.viewState.selectedScalingGroup)
 		}
 		return fmt.Sprintf("Forest > %s > [aqua]%s[-]", parent, a.viewState.selectedPodClique)
 	case PodView:
-		parent := a.viewState.selectedPodCliqueSet
+		parent := fmt.Sprintf("%s > replica-%s", a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex)
 		if a.viewState.selectedScalingGroup != "" {
-			parent = fmt.Sprintf("%s > %s", a.viewState.selectedPodCliqueSet, a.viewState.selectedScalingGroup)
+			parent = fmt.Sprintf("%s > replica-%s > %s", a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex, a.viewState.selectedScalingGroup)
 		}
 		return fmt.Sprintf("Forest > %s > %s > [lime]%s[-]", parent, a.viewState.selectedPodClique, a.viewState.selectedPod)
 	}
@@ -734,12 +947,24 @@ func (a *App) refreshResourcesTable() {
 	}
 	
 	// Headers with expansion settings
+	// Use "PHASE" for Pod view, "SCHEDULED" for other views
+	lastColumnHeader := "SCHEDULED"
+	if a.viewState.viewType == PodCliqueView {
+		// Check if we're showing Pods (not other resources)
+		viewKey := a.getCurrentViewKey()
+		if resources, exists := a.allResources[viewKey]; exists && len(resources) > 0 {
+			if resources[0].Type == "Pod" {
+				lastColumnHeader = "PHASE"
+			}
+		}
+	}
+	
 	headers := []header{
 		{"NAMESPACE", 2, tview.AlignLeft},
 		{"TYPE", 2, tview.AlignLeft},
 		{"NAME", 3, tview.AlignLeft},
 		{"READY", 1, tview.AlignCenter},
-		{"SCHEDULED", 2, tview.AlignLeft},
+		{lastColumnHeader, 2, tview.AlignLeft},
 	}
 	
 	for col, hdr := range headers {
@@ -764,6 +989,7 @@ func (a *App) refreshResourcesTable() {
 	typeColors := map[string]tcell.Color{
 		"PodClique":             tcell.ColorAqua,
 		"PodCliqueSet":          tcell.ColorBlue,
+		"PodCliqueSetReplica":   tcell.NewRGBColor(0, 255, 255), // Cyan
 		"PodCliqueScalingGroup": tcell.ColorPurple,
 		"Pod":                   tcell.ColorLime,
 	}
@@ -782,7 +1008,7 @@ func (a *App) refreshResourcesTable() {
 			resource.Type,
 			resource.Name,
 			resource.Ready,
-			resource.Status,
+			resource.Scheduled,
 		}
 		
 		for col, cellText := range rowData {
@@ -831,6 +1057,45 @@ func (a *App) refreshResourcesTable() {
 		}
 		
 		if a.activePane == ResourcesPane && row > 0 {
+			// If in Forest view and a PodCliqueSet is selected, load its events
+			if a.viewState.viewType == ForestView {
+				selectedName := strings.TrimSpace(table.GetCell(row, 2).Text)
+				selectedNamespace := strings.TrimSpace(table.GetCell(row, 0).Text)
+				selectedType := strings.TrimSpace(table.GetCell(row, 1).Text)
+				
+				if selectedType == "PodCliqueSet" {
+					a.loadEventsForPodCliqueSet(selectedName, selectedNamespace)
+				}
+			}
+			
+			// If in PodCliqueSetView and a PodCliqueSetReplica is selected, load its events
+			if a.viewState.viewType == PodCliqueSetView {
+				selectedName := strings.TrimSpace(table.GetCell(row, 2).Text)
+				selectedNamespace := strings.TrimSpace(table.GetCell(row, 0).Text)
+				selectedType := strings.TrimSpace(table.GetCell(row, 1).Text)
+				
+				if selectedType == "PodCliqueSetReplica" {
+					// Extract replica index from name
+					parts := strings.Split(selectedName, "-replica-")
+					if len(parts) == 2 {
+						a.loadEventsForPodCliqueSetReplica(a.viewState.selectedPodCliqueSet, selectedNamespace, parts[1])
+					}
+				}
+			}
+			
+			// If in PodCliqueSetReplicaView and a child resource is selected, load its events
+			if a.viewState.viewType == PodCliqueSetReplicaView {
+				selectedName := strings.TrimSpace(table.GetCell(row, 2).Text)
+				selectedNamespace := strings.TrimSpace(table.GetCell(row, 0).Text)
+				selectedType := strings.TrimSpace(table.GetCell(row, 1).Text)
+				
+				if selectedType == "PodCliqueScalingGroup" {
+					a.loadEventsForPodCliqueScalingGroup(selectedName, selectedNamespace)
+				} else if selectedType == "PodClique" {
+					a.loadEventsForPodClique(selectedName, selectedNamespace)
+				}
+			}
+			
 			a.updateStatusBar()
 			a.refreshEventsTable()
 		}
@@ -871,14 +1136,74 @@ func (a *App) getFilteredEvents() []Event {
 		return filtered
 	}
 	
+	// In Forest view, show events for the selected PodCliqueSet
+	if a.viewState.viewType == ForestView {
+		// Events are already filtered for the selected PodCliqueSet in allEvents
+		// when selection changes, so just return them all
+		return a.allEvents
+	}
+	
+	// In PodCliqueSetView, show events for the selected replica
+	if a.viewState.viewType == PodCliqueSetView {
+		// If a PodCliqueSetReplica is selected, show events for that replica
+		row, _ := a.resourcesTable.GetSelection()
+		if row >= 1 && row < a.resourcesTable.GetRowCount() {
+			selectedName := strings.TrimSpace(a.resourcesTable.GetCell(row, 2).Text)
+			selectedType := strings.TrimSpace(a.resourcesTable.GetCell(row, 1).Text)
+			
+			if selectedType == "PodCliqueSetReplica" {
+				// Extract replica index from name
+				parts := strings.Split(selectedName, "-replica-")
+				if len(parts) == 2 {
+					// Filter to just this replica's events
+					filtered := []Event{}
+					for _, event := range a.allEvents {
+						// Events should match resources from this replica
+						// This is already filtered in allEvents when the replica is selected
+						filtered = append(filtered, event)
+					}
+					return filtered
+				}
+			}
+		}
+		// No replica selected or invalid selection, show all events
+		return a.allEvents
+	}
+	
+	// In PodClique view, if a Pod is selected, show only that Pod's events
+	if a.viewState.viewType == PodCliqueView {
+		row, _ := a.resourcesTable.GetSelection()
+		if row >= 1 && row < a.resourcesTable.GetRowCount() {
+			selectedName := strings.TrimSpace(a.resourcesTable.GetCell(row, 2).Text)
+			selectedType := strings.TrimSpace(a.resourcesTable.GetCell(row, 1).Text)
+			
+			if selectedType == "Pod" {
+				// Filter to just this pod's events
+				filtered := []Event{}
+				for _, event := range a.allEvents {
+					if event.Parent == selectedName {
+						filtered = append(filtered, event)
+					}
+				}
+				return filtered
+			}
+		}
+		// No pod selected or invalid selection, show all events for the PodClique
+		return a.allEvents
+	}
+	
+	// In PodCliqueSetReplicaView, show all events for the replica
+	if a.viewState.viewType == PodCliqueSetReplicaView {
+		// Events are already filtered for this replica in allEvents
+		return a.allEvents
+	}
+	
 	// In table views, check if there's a selection
 	row, _ := a.resourcesTable.GetSelection()
 	if row < 1 || row >= a.resourcesTable.GetRowCount() {
 		// No selection, filter by current view
 		filterKey := ""
 		switch a.viewState.viewType {
-		case ForestView:
-			return a.allEvents // Show all events in Forest view
 		case PodCliqueSetView:
 			filterKey = a.viewState.selectedPodCliqueSet
 		case PodCliqueScalingGroupView:
@@ -1023,28 +1348,95 @@ func (a *App) navigateInto() {
 	
 	selectedType := strings.TrimSpace(a.resourcesTable.GetCell(row, 1).Text)
 	selectedName := strings.TrimSpace(a.resourcesTable.GetCell(row, 2).Text)
+	selectedNamespace := strings.TrimSpace(a.resourcesTable.GetCell(row, 0).Text)
 	
 	// Determine the next view based on current view and selected type
 	switch selectedType {
 	case "PodCliqueSet":
-		a.viewState.viewType = PodCliqueSetView
 		a.viewState.selectedPodCliqueSet = selectedName
+		a.viewState.selectedReplicaIndex = ""
 		a.viewState.selectedScalingGroup = ""
 		a.viewState.selectedPodClique = ""
 		a.viewState.selectedPod = ""
+		
+		// Get replica indexes for this PodCliqueSet
+		if a.k8sClient != nil {
+			replicaIndexes, err := a.k8sClient.GetReplicaIndexesForPodCliqueSet(a.ctx, selectedName, selectedNamespace)
+			if err != nil {
+				fmt.Printf("Error loading replica indexes: %v\n", err)
+				replicaIndexes = []string{}
+			}
+			
+			// If there's only 1 replica, skip directly to PodCliqueSetReplicaView
+			if len(replicaIndexes) == 1 {
+				a.viewState.viewType = PodCliqueSetReplicaView
+				a.viewState.selectedReplicaIndex = replicaIndexes[0]
+				
+				// Load children resources and events for this replica
+				a.loadPodCliqueSetReplicaChildren(selectedName, selectedNamespace, replicaIndexes[0])
+				a.loadEventsForPodCliqueSetReplica(selectedName, selectedNamespace, replicaIndexes[0])
+			} else {
+				// Multiple replicas, show PodCliqueSetView with replica list
+				a.viewState.viewType = PodCliqueSetView
+				
+				// Load replica list and events
+				a.loadPodCliqueSetReplicas(selectedName, selectedNamespace)
+				a.loadEventsForPodCliqueSet(selectedName, selectedNamespace)
+			}
+		} else {
+			// No k8s client, just show empty PodCliqueSetView
+			a.viewState.viewType = PodCliqueSetView
+			a.loadPodCliqueSetReplicas(selectedName, selectedNamespace)
+		}
+		
+	case "PodCliqueSetReplica":
+		// Extract replica index from name (format: "pcsname-replica-0")
+		parts := strings.Split(selectedName, "-replica-")
+		if len(parts) == 2 {
+			a.viewState.viewType = PodCliqueSetReplicaView
+			a.viewState.selectedReplicaIndex = parts[1]
+			a.viewState.selectedScalingGroup = ""
+			a.viewState.selectedPodClique = ""
+			a.viewState.selectedPod = ""
+			
+			// Load children resources and events for this replica
+			a.loadPodCliqueSetReplicaChildren(a.viewState.selectedPodCliqueSet, selectedNamespace, parts[1])
+			a.loadEventsForPodCliqueSetReplica(a.viewState.selectedPodCliqueSet, selectedNamespace, parts[1])
+		}
+		
 	case "PodCliqueScalingGroup":
 		a.viewState.viewType = PodCliqueScalingGroupView
 		a.viewState.selectedScalingGroup = selectedName
 		a.viewState.selectedPodClique = ""
 		a.viewState.selectedPod = ""
+		
+		// Load children resources and events for this PodCliqueScalingGroup
+		a.loadPodCliqueScalingGroupChildren(selectedName, selectedNamespace)
+		a.loadEventsForPodCliqueScalingGroup(selectedName, selectedNamespace)
 	case "PodClique":
 		a.viewState.viewType = PodCliqueView
 		a.viewState.selectedPodClique = selectedName
 		a.viewState.selectedPod = ""
+		
+		// Load children resources (Pods) and events for this PodClique
+		a.loadPodCliqueChildren(selectedName, selectedNamespace)
+		a.loadEventsForPodClique(selectedName, selectedNamespace)
 	case "Pod":
 		// Enter Pod detail view
 		a.viewState.viewType = PodView
 		a.viewState.selectedPod = selectedName
+		
+		// Load Pod YAML
+		if a.k8sClient != nil {
+			yaml, err := a.k8sClient.GetPodYAML(a.ctx, selectedName, selectedNamespace)
+			if err != nil {
+				fmt.Printf("Error loading Pod YAML: %v\n", err)
+				a.podYAMLData[selectedName] = fmt.Sprintf("# Error loading Pod YAML: %v", err)
+			} else {
+				a.podYAMLData[selectedName] = yaml
+			}
+		}
+		
 		a.switchToPodView()
 	}
 	
@@ -1063,21 +1455,63 @@ func (a *App) navigateBack() {
 		// Go back to Forest
 		a.viewState.viewType = ForestView
 		a.viewState.selectedPodCliqueSet = ""
+		a.viewState.selectedReplicaIndex = ""
 		a.viewState.selectedScalingGroup = ""
 		a.viewState.selectedPodClique = ""
 		a.viewState.selectedPod = ""
+		
+		// Reload forest data when going back to root
+		a.loadForestData()
+		a.allEvents = []Event{} // Clear events when at forest view
+		
+	case PodCliqueSetReplicaView:
+		// Go back to PodCliqueSet view (or Forest if only 1 replica)
+		// Check how many replicas there are
+		if a.k8sClient != nil {
+			// Get namespace from current resources
+			viewKey := a.getCurrentViewKey()
+			resources, exists := a.allResources[viewKey]
+			namespace := "default"
+			if exists && len(resources) > 0 {
+				namespace = resources[0].Namespace
+			}
+			
+			replicaIndexes, err := a.k8sClient.GetReplicaIndexesForPodCliqueSet(a.ctx, a.viewState.selectedPodCliqueSet, namespace)
+			if err == nil && len(replicaIndexes) == 1 {
+				// Only 1 replica, so we came directly from Forest view
+				a.viewState.viewType = ForestView
+				a.viewState.selectedPodCliqueSet = ""
+				a.viewState.selectedReplicaIndex = ""
+				a.loadForestData()
+				a.allEvents = []Event{}
+			} else {
+				// Multiple replicas, go back to PodCliqueSet view
+				a.viewState.viewType = PodCliqueSetView
+				a.viewState.selectedReplicaIndex = ""
+				a.viewState.selectedScalingGroup = ""
+				a.viewState.selectedPodClique = ""
+				a.viewState.selectedPod = ""
+				a.loadPodCliqueSetReplicas(a.viewState.selectedPodCliqueSet, namespace)
+				a.loadEventsForPodCliqueSet(a.viewState.selectedPodCliqueSet, namespace)
+			}
+		} else {
+			// No k8s client, assume multiple replicas
+			a.viewState.viewType = PodCliqueSetView
+			a.viewState.selectedReplicaIndex = ""
+		}
+		
 	case PodCliqueScalingGroupView:
-		// Go back to PodCliqueSet
-		a.viewState.viewType = PodCliqueSetView
+		// Go back to PodCliqueSetReplica
+		a.viewState.viewType = PodCliqueSetReplicaView
 		a.viewState.selectedScalingGroup = ""
 		a.viewState.selectedPodClique = ""
 		a.viewState.selectedPod = ""
 	case PodCliqueView:
-		// Go back to parent (either PodCliqueSet or PodCliqueScalingGroup)
+		// Go back to parent (either PodCliqueSetReplica or PodCliqueScalingGroup)
 		if a.viewState.selectedScalingGroup != "" {
 			a.viewState.viewType = PodCliqueScalingGroupView
 		} else {
-			a.viewState.viewType = PodCliqueSetView
+			a.viewState.viewType = PodCliqueSetReplicaView
 		}
 		a.viewState.selectedPodClique = ""
 		a.viewState.selectedPod = ""
@@ -1321,6 +1755,13 @@ func (a *App) Run() error {
 
 	// Populate tables with initial data
 	a.refreshResourcesView()
+	
+	// If we're in Forest view and there are PodCliqueSets, load events for the first one
+	if a.viewState.viewType == ForestView && len(a.allResources["forest"]) > 0 {
+		firstPCS := a.allResources["forest"][0]
+		a.loadEventsForPodCliqueSet(firstPCS.Name, firstPCS.Namespace)
+	}
+	
 	a.refreshEventsTable()
 
 	// Initial status
