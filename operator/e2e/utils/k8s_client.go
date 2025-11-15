@@ -73,6 +73,13 @@ func ApplyYAMLFile(ctx context.Context, yamlFilePath string, namespace string, r
 	return ApplyYAMLData(ctx, yamlData, namespace, dynamicClient, restMapper, logger)
 }
 
+// ApplyYAMLString applies YAML content from a string containing Kubernetes resources
+// namespace parameter is optional - pass empty string to use namespace from YAML
+func ApplyYAMLString(ctx context.Context, yamlContent string, namespace string, restConfig *rest.Config, logger *Logger) ([]AppliedResource, error) {
+	logger.Debug("📄 Applying resources from YAML string...")
+	return applyYAMLData(ctx, []byte(yamlContent), namespace, restConfig, logger)
+}
+
 // WaitForPods waits for pods to be ready in the specified namespaces
 // labelSelector is optional (pass empty string for all pods), timeout of 0 defaults to 5 minutes, interval of 0 defaults to 5 seconds
 // expectedCount is the expected number of pods (pass 0 to skip count validation)
