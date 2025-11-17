@@ -104,3 +104,55 @@ If the number of ready replicas falls below `minAvailable`:
 - Base cluster provides stable foundation 
 - Scale-out replicas add capacity without disrupting core functionality
 
+---
+
+## Schedule Gate Events and Troubleshooting
+
+Grove uses Kubernetes schedule gates to implement gang scheduling and startup ordering. When pods are blocked from scheduling, Grove emits informative events to help operators understand what's happening.
+
+### Schedule Gate Event Reference
+
+| Event Reason | Emitted On | Meaning | Action |
+|--------------|------------|---------|--------|
+| `ScheduleGateWaitingGangFormation` | **Pod** | Pod waiting for other PodCliques in gang to create pods | Check blocking PodCliques in event message |
+| `ScheduleGateWaitingBasePodCliques` | **Pod** | Scaled gang pod waiting for base gang | Check referenced base PodCliques |
+| `ScheduleGateRemoved` | **Pod** | Gate removed successfully | Pod can now be scheduled |
+| `PodsPendingCreation` | **PodCliqueSet** | Gang formation waiting for pod creation | Check PodClique controllers |
+| `GangFormationComplete` | **PodCliqueSet** | Gang successfully formed | Normal progression |
+
+### Enhanced Status Conditions
+
+PodClique status conditions now include schedule-gated replica counts for better visibility:
+
+```yaml
+status:
+  replicas: 3
+  scheduledReplicas: 0
+  scheduleGatedReplicas: 3  # Pods blocked by gates
+  conditions:
+  - type: PodCliqueScheduled
+    status: "False"
+    message: "Insufficient scheduled pods. expected at least: 3, scheduled: 0, schedule-gated: 3, total replicas: 3"
+```
+
+This immediately shows that all 3 pods exist but are blocked by schedule gates.
+
+### Quick Troubleshooting
+
+**Check schedule-gated pods:**
+```bash
+kubectl describe pod <pod-name>
+```
+
+**View schedule gate events:**
+```bash
+kubectl get events --field-selector reason=ScheduleGateWaitingGangFormation
+kubectl get events --field-selector reason=ScheduleGateWaitingBasePodCliques
+```
+
+**Check pod schedule gates:**
+```bash
+kubectl get pod <pod-name> -o jsonpath='{.spec.schedulingGates}' | jq
+```
+
+**For detailed troubleshooting guidance, see:** [Debugging Schedule Gates](./.agents/debugging-schedule-gates.md)
