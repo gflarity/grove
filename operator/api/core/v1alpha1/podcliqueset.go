@@ -71,6 +71,12 @@ type PodCliqueSetStatus struct {
 	// UpdatedReplicas is the number of replicas that have been updated to the desired revision of the PodCliqueSet.
 	// +kubebuilder:default=0
 	UpdatedReplicas int32 `json:"updatedReplicas"`
+	// ScheduledReplicas is the number of PodCliqueSet replicas that have been completely scheduled.
+	// A PodCliqueSet replica is considered scheduled when all standalone PodCliques within that replica
+	// have PodCliqueScheduled condition = True AND all PodCliqueScalingGroups (PCSG) within that replica
+	// have ScheduledReplicas >= MinAvailable.
+	// +kubebuilder:default=0
+	ScheduledReplicas int32 `json:"scheduledReplicas"`
 	// AvailableReplicas is the number of PodCliqueSet replicas that are available.
 	// A PodCliqueSet replica is considered available when all standalone PodCliques within that replica
 	// have MinAvailableBreached condition = False AND all PodCliqueScalingGroups (PCSG) within that replica

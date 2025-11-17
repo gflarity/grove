@@ -167,6 +167,13 @@ func WithPCSGAvailableReplicas(available int32) PCSGOption {
 	}
 }
 
+// WithPCSGScheduledReplicas sets specific ScheduledReplicas count for PCSG.
+func WithPCSGScheduledReplicas(scheduled int32) PCSGOption {
+	return func(pcsg *grovecorev1alpha1.PodCliqueScalingGroup) {
+		pcsg.Status.ScheduledReplicas = scheduled
+	}
+}
+
 // WithPCLQReplicaReadyStatus sets specific ReadyReplicas count for PodClique without touching conditions.
 func WithPCLQReplicaReadyStatus(ready int32) PCLQOption {
 	return func(pclq *grovecorev1alpha1.PodClique) {

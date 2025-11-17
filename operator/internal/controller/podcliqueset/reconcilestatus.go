@@ -62,21 +62,23 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 func (r *Reconciler) mutateReplicas(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) error {
 	// Set basic replica count
 	pcs.Status.Replicas = pcs.Spec.Replicas
-	availableReplicas, updatedReplicas, unavailableIndices, err := r.computeReplicaMetrics(ctx, logger, pcs)
+	scheduledReplicas, availableReplicas, updatedReplicas, unavailableIndices, err := r.computeReplicaMetrics(ctx, logger, pcs)
 	if err != nil {
 		return fmt.Errorf("could not compute replica metrics: %w", err)
 	}
+	pcs.Status.ScheduledReplicas = scheduledReplicas
 	pcs.Status.AvailableReplicas = availableReplicas
 	pcs.Status.UpdatedReplicas = updatedReplicas
 	pcs.Status.UnavailableReplicaIndices = unavailableIndices
 	return nil
 }
 
-// computeReplicaMetrics calculates the number of available replicas and tracks unavailable replica indexes for a PodCliqueSet.
-// It checks both standalone PodCliques and PodCliqueScalingGroups to determine availability.
-// A replica is considered available if it has all its required components (PCSGs and standalone PCLQs) available.
-func (r *Reconciler) computeReplicaMetrics(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) (int32, int32, []int32, error) {
+// computeReplicaMetrics calculates the number of scheduled, available replicas and tracks unavailable replica indexes for a PodCliqueSet.
+// It checks both standalone PodCliques and PodCliqueScalingGroups to determine scheduling and availability status.
+// A replica is considered scheduled when all its components are scheduled, and available when all components meet their MinAvailable requirements.
+func (r *Reconciler) computeReplicaMetrics(ctx context.Context, logger logr.Logger, pcs *grovecorev1alpha1.PodCliqueSet) (int32, int32, int32, []int32, error) {
 	var (
+		scheduledReplicas  int32
 		availableReplicas  int32
 		updatedReplicas    int32
 		unavailableIndices = []int32{}
@@ -89,7 +91,7 @@ func (r *Reconciler) computeReplicaMetrics(ctx context.Context, logger logr.Logg
 	// Fetch all PCSGs for this PCS
 	pcsgs, err := componentutils.GetPCSGsForPCS(ctx, r.client, pcsObjectKey)
 	if err != nil {
-		return availableReplicas, updatedReplicas, unavailableIndices, err
+		return scheduledReplicas, availableReplicas, updatedReplicas, unavailableIndices, err
 	}
 	// Filter the PCSGs that belong to the expected set of PCSGs for PCS, this ensures that we do not
 	// consider any stray PCSGs that might have been created externally.
@@ -100,7 +102,7 @@ func (r *Reconciler) computeReplicaMetrics(ctx context.Context, logger logr.Logg
 	// Fetch all standalone PodCliques for this PCS
 	standalonePCLQs, err := componentutils.GetPodCliquesWithParentPCS(ctx, r.client, pcsObjectKey)
 	if err != nil {
-		return availableReplicas, updatedReplicas, unavailableIndices, err
+		return scheduledReplicas, availableReplicas, updatedReplicas, unavailableIndices, err
 	}
 	// Filter the PCLQs that belong to the expected set of standalone PCLQs for PCS, this ensures that we do not
 	// consider any stray PCLQs that might have been created externally.
@@ -116,13 +118,16 @@ func (r *Reconciler) computeReplicaMetrics(ctx context.Context, logger logr.Logg
 		replicaIndexStr := strconv.Itoa(replicaIndex)
 		replicaStandalonePCLQs := standalonePCLQsByReplica[replicaIndexStr]
 		replicaPCSGs := pcsgsByReplica[replicaIndexStr]
-		// Check if this PCS replica is available based on all its components
-		isReplicaAvailable, isReplicaUpdated := r.computeReplicaStatus(pcs.Status.CurrentGenerationHash, replicaPCSGs,
+		// Check if this PCS replica is scheduled, available, and updated based on all its components
+		isReplicaScheduled, isReplicaAvailable, isReplicaUpdated := r.computeReplicaStatus(pcs.Status.CurrentGenerationHash, replicaPCSGs,
 			replicaStandalonePCLQs, len(expectedPCSGFQNsPerPCSReplica[replicaIndex]), len(expectedStandAlonePCLQFQNsPerPCSReplica[replicaIndex]))
 		
-		// Track unavailable replica indexes for observability and debugging.
+		// Track scheduled and unavailable replica indexes for observability and debugging.
 		// This enables operators to quickly identify which specific replicas
 		// are problematic without inspecting all replicas individually.
+		if isReplicaScheduled {
+			scheduledReplicas++
+		}
 		if isReplicaAvailable {
 			availableReplicas++
 		} else {
@@ -136,23 +141,30 @@ func (r *Reconciler) computeReplicaMetrics(ctx context.Context, logger logr.Logg
 	// Sort for consistent ordering
 	slices.Sort(unavailableIndices)
 
-	logger.Info("Calculated replica metrics for PCS", "pcs", pcsObjectKey, "availableReplicas", availableReplicas, "updatedReplicas", updatedReplicas, "unavailableReplicaIndices", unavailableIndices, "totalReplicas", pcs.Spec.Replicas)
-	return availableReplicas, updatedReplicas, unavailableIndices, nil
+	logger.Info("Calculated replica metrics for PCS", "pcs", pcsObjectKey, "scheduledReplicas", scheduledReplicas, "availableReplicas", availableReplicas, "updatedReplicas", updatedReplicas, "unavailableReplicaIndices", unavailableIndices, "totalReplicas", pcs.Spec.Replicas)
+	return scheduledReplicas, availableReplicas, updatedReplicas, unavailableIndices, nil
 }
 
-// computeReplicaStatus determines if a replica is available and updated based on its components.
-func (r *Reconciler) computeReplicaStatus(pcsGenerationHash *string, replicaPCSGs []grovecorev1alpha1.PodCliqueScalingGroup, standalonePCLQs []grovecorev1alpha1.PodClique, expectedPCSGs int, expectedStandalonePCLQs int) (bool, bool) {
-	pclqsAvailable, pclqsUpdated := r.computePCLQsStatus(expectedStandalonePCLQs, standalonePCLQs)
-	pcsgsAvailable, pcsgsUpdated := r.computePCSGsStatus(pcsGenerationHash, expectedPCSGs, replicaPCSGs)
-	return pclqsAvailable && pcsgsAvailable, pclqsUpdated && pcsgsUpdated
+// computeReplicaStatus determines if a replica is scheduled, available, and updated based on its components.
+func (r *Reconciler) computeReplicaStatus(pcsGenerationHash *string, replicaPCSGs []grovecorev1alpha1.PodCliqueScalingGroup, standalonePCLQs []grovecorev1alpha1.PodClique, expectedPCSGs int, expectedStandalonePCLQs int) (bool, bool, bool) {
+	pclqsScheduled, pclqsAvailable, pclqsUpdated := r.computePCLQsStatus(expectedStandalonePCLQs, standalonePCLQs)
+	pcsgsScheduled, pcsgsAvailable, pcsgsUpdated := r.computePCSGsStatus(pcsGenerationHash, expectedPCSGs, replicaPCSGs)
+	return pclqsScheduled && pcsgsScheduled, pclqsAvailable && pcsgsAvailable, pclqsUpdated && pcsgsUpdated
 }
 
-// computePCLQsStatus checks if standalone PodCliques are available and updated.
-func (r *Reconciler) computePCLQsStatus(expectedStandalonePCLQs int, existingPCLQs []grovecorev1alpha1.PodClique) (isAvailable, isUpdated bool) {
+// computePCLQsStatus checks if standalone PodCliques are scheduled, available, and updated.
+func (r *Reconciler) computePCLQsStatus(expectedStandalonePCLQs int, existingPCLQs []grovecorev1alpha1.PodClique) (isScheduled, isAvailable, isUpdated bool) {
 	nonTerminatedPCLQs := lo.Filter(existingPCLQs, func(pclq grovecorev1alpha1.PodClique, _ int) bool {
 		return !k8sutils.IsResourceTerminating(pclq.ObjectMeta)
 	})
 
+	// A replica is considered scheduled when all PodCliques have the PodCliqueScheduled condition = True
+	isScheduled = len(nonTerminatedPCLQs) == expectedStandalonePCLQs &&
+		lo.EveryBy(nonTerminatedPCLQs, func(pclq grovecorev1alpha1.PodClique) bool {
+			return k8sutils.IsConditionTrue(pclq.Status.Conditions, apicommonconstants.ConditionTypePodCliqueScheduled)
+		})
+
+	// A replica is considered available when all PodCliques have sufficient ready replicas
 	isAvailable = len(nonTerminatedPCLQs) == expectedStandalonePCLQs &&
 		lo.EveryBy(nonTerminatedPCLQs, func(pclq grovecorev1alpha1.PodClique) bool {
 			return pclq.Status.ReadyReplicas >= *pclq.Spec.MinAvailable
@@ -165,12 +177,19 @@ func (r *Reconciler) computePCLQsStatus(expectedStandalonePCLQs int, existingPCL
 	return
 }
 
-// computePCSGsStatus checks if PodCliqueScalingGroups are available and updated.
-func (r *Reconciler) computePCSGsStatus(pcsGenerationHash *string, expectedPCSGs int, pcsgs []grovecorev1alpha1.PodCliqueScalingGroup) (isAvailable, isUpdated bool) {
+// computePCSGsStatus checks if PodCliqueScalingGroups are scheduled, available, and updated.
+func (r *Reconciler) computePCSGsStatus(pcsGenerationHash *string, expectedPCSGs int, pcsgs []grovecorev1alpha1.PodCliqueScalingGroup) (isScheduled, isAvailable, isUpdated bool) {
 	nonTerminatedPCSGs := lo.Filter(pcsgs, func(pcsg grovecorev1alpha1.PodCliqueScalingGroup, _ int) bool {
 		return !k8sutils.IsResourceTerminating(pcsg.ObjectMeta)
 	})
 
+	// A replica is considered scheduled when all PCSGs have scheduledReplicas >= minAvailable
+	isScheduled = expectedPCSGs == len(nonTerminatedPCSGs) &&
+		lo.EveryBy(nonTerminatedPCSGs, func(pcsg grovecorev1alpha1.PodCliqueScalingGroup) bool {
+			return pcsg.Status.ScheduledReplicas >= *pcsg.Spec.MinAvailable
+		})
+
+	// A replica is considered available when all PCSGs have availableReplicas >= minAvailable
 	isAvailable = expectedPCSGs == len(nonTerminatedPCSGs) &&
 		lo.EveryBy(nonTerminatedPCSGs, func(pcsg grovecorev1alpha1.PodCliqueScalingGroup) bool {
 			return pcsg.Status.AvailableReplicas >= *pcsg.Spec.MinAvailable
