@@ -42,6 +42,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 		name                         string
 		setupPCS                     func() *grovecorev1alpha1.PodCliqueSet
 		childResources               func() []client.Object
+		expectedScheduled            int32
 		expectedAvailable            int32
 		expectedUnavailableIndices   []int32
 	}{
@@ -59,16 +60,17 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 				return []client.Object{
 					// Healthy PCSGs
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
-						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-compute", testNamespace, testPCSName, 1).
-						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
 					// Healthy standalone PodCliques
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
+			expectedScheduled:          2,
 			expectedAvailable:          2,
 			expectedUnavailableIndices: []int32{},
 		},
@@ -84,15 +86,16 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			childResources: func() []client.Object {
 				return []client.Object{
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
-						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-compute", testNamespace, testPCSName, 1).
 						WithOptions(testutils.WithPCSGMinAvailableBreached()).Build(),
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
 						WithOptions(testutils.WithPCLQTerminating(), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
+			expectedScheduled:          1,
 			expectedAvailable:          1,
 			expectedUnavailableIndices: []int32{1},
 		},
@@ -114,6 +117,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 						WithOptions(testutils.WithPCLQAvailable(), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
+			expectedScheduled:          0,
 			expectedAvailable:          0,
 			expectedUnavailableIndices: []int32{0},
 		},
@@ -125,6 +129,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 					Build()
 			},
 			childResources:             func() []client.Object { return []client.Object{} },
+			expectedScheduled:          1,
 			expectedAvailable:          1,
 			expectedUnavailableIndices: []int32{},
 		},
@@ -141,15 +146,16 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			childResources: func() []client.Object {
 				return []client.Object{
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "monitor", testNamespace, 0).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "monitor", testNamespace, 1).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
+			expectedScheduled:          2,
 			expectedAvailable:          2,
 			expectedUnavailableIndices: []int32{},
 		},
@@ -166,15 +172,16 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			childResources: func() []client.Object {
 				return []client.Object{
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
-						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-storage", testNamespace, testPCSName, 0).
-						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-compute", testNamespace, testPCSName, 1).
-						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-storage", testNamespace, testPCSName, 1).
-						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
 				}
 			},
+			expectedScheduled:          2,
 			expectedAvailable:          2,
 			expectedUnavailableIndices: []int32{},
 		},
@@ -193,6 +200,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 						WithOptions(testutils.WithPCLQTerminating(), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 				}
 			},
+			expectedScheduled:          0,
 			expectedAvailable:          0,
 			expectedUnavailableIndices: []int32{0},
 		},
@@ -211,6 +219,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 						WithOptions(testutils.WithPCSGUnknownCondition()).Build(),
 				}
 			},
+			expectedScheduled:          0,
 			expectedAvailable:          0,
 			expectedUnavailableIndices: []int32{0},
 		},
@@ -229,6 +238,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 						WithOptions(testutils.WithPCLQNoConditions()).Build(),
 				}
 			},
+			expectedScheduled:          0,
 			expectedAvailable:          0,
 			expectedUnavailableIndices: []int32{0},
 		},
@@ -243,6 +253,7 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 					Build()
 			},
 			childResources:             func() []client.Object { return []client.Object{} },
+			expectedScheduled:          0,
 			expectedAvailable:          0,
 			expectedUnavailableIndices: []int32{0},
 		},
@@ -258,11 +269,12 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			childResources: func() []client.Object {
 				return []client.Object{
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-unexpected", testNamespace, testPCSName, 0).
 						WithOptions(testutils.WithPCSGAvailableReplicas(1)).Build(),
 				}
 			},
+			expectedScheduled:          1,
 			expectedAvailable:          1,
 			expectedUnavailableIndices: []int32{},
 		},
@@ -282,16 +294,17 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 						WithOptions(testutils.WithPCLQTerminating(), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					// Replica 1 - available
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					// Replica 2 - unavailable (no conditions)
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 2).
 						WithOptions(testutils.WithPCLQNoConditions()).Build(),
 					// Replica 3 - available
 					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 3).
-						WithOptions(testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1), testutils.WithPCLQCurrentPCSGenerationHash(pcsGenerationHash)).Build(),
 					// Replica 4 - unavailable (missing - no resources created)
 				}
 			},
+			expectedScheduled:          2,
 			expectedAvailable:          2,
 			expectedUnavailableIndices: []int32{0, 2, 4},
 		},
@@ -324,8 +337,112 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 						WithOptions(testutils.WithPCSGUnknownCondition()).Build(),
 				}
 			},
+			expectedScheduled:          0,
 			expectedAvailable:          0,
 			expectedUnavailableIndices: []int32{0, 1, 2},
+		},
+		// Scheduled vs Available test cases
+		{
+			name: "scheduled but not yet available - PodCliques scheduled but pods not ready",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				return testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, pcsUID).
+					WithReplicas(2).
+					WithStandaloneClique("worker").
+					WithPodCliqueSetGenerationHash(&pcsGenerationHash).
+					Build()
+			},
+			childResources: func() []client.Object {
+				return []client.Object{
+					// Replica 0 - scheduled but MinAvailable breached
+					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
+						WithOptions(testutils.WithPCLQScheduledButBreached(), testutils.WithPCLQReplicaReadyStatus(0)).Build(),
+					// Replica 1 - fully available
+					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1)).Build(),
+				}
+			},
+			expectedScheduled:          2, // Both scheduled
+			expectedAvailable:          1, // Only replica 1 available
+			expectedUnavailableIndices: []int32{0},
+		},
+		{
+			name: "scheduled but not available - PCSG scheduled but not enough available",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				return testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, pcsUID).
+					WithReplicas(2).
+					WithScalingGroup("compute", []string{"frontend"}).
+					WithPodCliqueSetGenerationHash(&pcsGenerationHash).
+					Build()
+			},
+			childResources: func() []client.Object {
+				return []client.Object{
+					// Replica 0 - scheduled but only 1 available (needs 1 for minAvailable, has it)
+					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
+					// Replica 1 - scheduled but 0 available (breaches minAvailable)
+					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-compute", testNamespace, testPCSName, 1).
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(0)).Build(),
+				}
+			},
+			expectedScheduled:          2, // Both replicas scheduled
+			expectedAvailable:          1, // Only replica 0 available
+			expectedUnavailableIndices: []int32{1},
+		},
+		{
+			name: "not scheduled and not available - PodCliques still schedule-gated",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				return testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, pcsUID).
+					WithReplicas(2).
+					WithStandaloneClique("worker").
+					WithPodCliqueSetGenerationHash(&pcsGenerationHash).
+					Build()
+			},
+			childResources: func() []client.Object {
+				return []client.Object{
+					// Replica 0 - not scheduled
+					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
+						WithOptions(testutils.WithPCLQNotScheduled()).Build(),
+					// Replica 1 - scheduled and available
+					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1)).Build(),
+				}
+			},
+			expectedScheduled:          1, // Only replica 1 scheduled
+			expectedAvailable:          1, // Only replica 1 available
+			expectedUnavailableIndices: []int32{0},
+		},
+		{
+			name: "mixed state - some scheduled, some available, with PCSG and standalone",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				return testutils.NewPodCliqueSetBuilder(testPCSName, testNamespace, pcsUID).
+					WithReplicas(3).
+					WithStandaloneClique("worker").
+					WithScalingGroup("compute", []string{"frontend"}).
+					WithPodCliqueSetGenerationHash(&pcsGenerationHash).
+					Build()
+			},
+			childResources: func() []client.Object {
+				return []client.Object{
+					// Replica 0 - fully scheduled and available
+					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 0).
+						WithOptions(testutils.WithPCLQScheduledAndAvailable(), testutils.WithPCLQReplicaReadyStatus(1)).Build(),
+					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-0-compute", testNamespace, testPCSName, 0).
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(1)).Build(),
+					// Replica 1 - scheduled but not available (pods not ready yet)
+					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 1).
+						WithOptions(testutils.WithPCLQScheduledButBreached(), testutils.WithPCLQReplicaReadyStatus(0)).Build(),
+					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-1-compute", testNamespace, testPCSName, 1).
+						WithOptions(testutils.WithPCSGScheduledReplicas(1), testutils.WithPCSGAvailableReplicas(0)).Build(),
+					// Replica 2 - not scheduled yet
+					testutils.NewPodCliqueBuilder(testPCSName, uuid.NewUUID(), "worker", testNamespace, 2).
+						WithOptions(testutils.WithPCLQNotScheduled()).Build(),
+					testutils.NewPodCliqueScalingGroupBuilder("test-pcs-2-compute", testNamespace, testPCSName, 2).
+						WithOptions(testutils.WithPCSGScheduledReplicas(0), testutils.WithPCSGAvailableReplicas(0)).Build(),
+				}
+			},
+			expectedScheduled:          2, // Replicas 0 and 1 scheduled
+			expectedAvailable:          1, // Only replica 0 available
+			expectedUnavailableIndices: []int32{1, 2},
 		},
 	}
 
@@ -337,9 +454,10 @@ func TestComputePCSAvailableReplicas(t *testing.T) {
 			existingObjects = append(existingObjects, tt.childResources()...)
 			cl := testutils.CreateDefaultFakeClient(existingObjects)
 			reconciler := &Reconciler{client: cl}
-			// Compute available replicas
-			available, _, unavailableIndices, err := reconciler.computeReplicaMetrics(context.Background(), logr.Discard(), pcs)
+			// Compute scheduled, available replicas and unavailable indices
+			scheduled, available, _, unavailableIndices, err := reconciler.computeReplicaMetrics(context.Background(), logr.Discard(), pcs)
 			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedScheduled, scheduled, "Scheduled replicas mismatch")
 			assert.Equal(t, tt.expectedAvailable, available, "Available replicas mismatch")
 			assert.Equal(t, tt.expectedUnavailableIndices, unavailableIndices, "Unavailable replica indices mismatch")
 		})

@@ -10158,6 +10158,15 @@ spec:
                       type: string
                     type: array
                 type: object
+              scheduledReplicas:
+                default: 0
+                description: |-
+                  ScheduledReplicas is the number of PodCliqueSet replicas that have been completely scheduled.
+                  A PodCliqueSet replica is considered scheduled when all standalone PodCliques within that replica
+                  have PodCliqueScheduled condition = True AND all PodCliqueScalingGroups (PCSG) within that replica
+                  have ScheduledReplicas >= MinAvailable.
+                format: int32
+                type: integer
               unavailableReplicaIndices:
                 description: |-
                   UnavailableReplicaIndices contains the indexes of replicas that are currently unavailable.
@@ -10175,6 +10184,7 @@ spec:
                 type: integer
             required:
             - availableReplicas
+            - scheduledReplicas
             - updatedReplicas
             type: object
         required:

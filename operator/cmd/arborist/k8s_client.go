@@ -107,13 +107,16 @@ func (k *K8sClient) GetAllPodCliqueSets(ctx context.Context) ([]Resource, error)
 		// Calculate ready status
 		replicas := pcs.Spec.Replicas
 		availableReplicas := pcs.Status.AvailableReplicas
+		scheduledReplicas := pcs.Status.ScheduledReplicas
 		ready := fmt.Sprintf("%d/%d", availableReplicas, replicas)
+		scheduled := fmt.Sprintf("%d/%d", scheduledReplicas, replicas)
 
 		resources = append(resources, Resource{
 			Name:      pcs.Name,
 			Type:      "PodCliqueSet",
 			Ready:     ready,
-			Status:    "", // Scheduled - leave empty for now
+			Scheduled: scheduled,
+			Status:    "",
 			Namespace: pcs.Namespace,
 		})
 	}
