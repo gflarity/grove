@@ -70,6 +70,7 @@ func (r _resource) getPCSReplicaDeletionWork(ctx context.Context, logger logr.Lo
 		now              = time.Now()
 		pcsObjectKey     = client.ObjectKeyFromObject(pcs)
 		terminationDelay = pcs.Spec.Template.TerminationDelay.Duration
+		gracePeriod      = pcs.Spec.Template.TerminationStartupGracePeriod.Duration
 		deletionTasks    = make([]utils.Task, 0, pcs.Spec.Replicas)
 		work             = &deletionWork{
 			minAvailableBreachedConstituents: make(map[int][]string),
@@ -77,7 +78,7 @@ func (r _resource) getPCSReplicaDeletionWork(ctx context.Context, logger logr.Lo
 	)
 
 	for pcsReplicaIndex := range int(pcs.Spec.Replicas) {
-		breachedPCSGNames, minPCSGWaitFor, err := r.getMinAvailableBreachedPCSGs(ctx, pcsObjectKey, pcsReplicaIndex, terminationDelay, now)
+		breachedPCSGNames, minPCSGWaitFor, err := r.getMinAvailableBreachedPCSGs(ctx, pcsObjectKey, pcsReplicaIndex, terminationDelay, gracePeriod, now)
 		if err != nil {
 			return nil, err
 		}
@@ -105,7 +106,7 @@ func (r _resource) getPCSReplicaDeletionWork(ctx context.Context, logger logr.Lo
 }
 
 // getMinAvailableBreachedPCSGs retrieves PCSGs that have breached MinAvailable for a PCS replica.
-func (r _resource) getMinAvailableBreachedPCSGs(ctx context.Context, pcsObjKey client.ObjectKey, pcsReplicaIndex int, terminationDelay time.Duration, since time.Time) ([]string, time.Duration, error) {
+func (r _resource) getMinAvailableBreachedPCSGs(ctx context.Context, pcsObjKey client.ObjectKey, pcsReplicaIndex int, terminationDelay time.Duration, gracePeriod time.Duration, since time.Time) ([]string, time.Duration, error) {
 	pcsgList := &grovecorev1alpha1.PodCliqueScalingGroupList{}
 	if err := r.client.List(ctx,
 		pcsgList,
@@ -119,7 +120,7 @@ func (r _resource) getMinAvailableBreachedPCSGs(ctx context.Context, pcsObjKey c
 	); err != nil {
 		return nil, 0, err
 	}
-	breachedPCSGNames, minWaitFor := getMinAvailableBreachedPCSGInfo(pcsgList.Items, terminationDelay, since)
+	breachedPCSGNames, minWaitFor := getMinAvailableBreachedPCSGInfo(pcsgList.Items, terminationDelay, gracePeriod, since)
 	return breachedPCSGNames, minWaitFor, nil
 }
 
@@ -143,7 +144,11 @@ func (r _resource) getMinAvailableBreachedPCLQsNotInPCSG(ctx context.Context, pc
 		skipPCSReplica = true
 		return
 	}
-	breachedPCLQNames, minWaitFor = componentutils.GetMinAvailableBreachedPCLQInfo(pclqs, pcs.Spec.Template.TerminationDelay.Duration, since)
+	breachedPCLQNames, minWaitFor = componentutils.GetMinAvailableBreachedPCLQInfo(
+		pclqs,
+		pcs.Spec.Template.TerminationDelay.Duration,
+		pcs.Spec.Template.TerminationStartupGracePeriod.Duration,
+		since)
 	return
 }
 
@@ -165,7 +170,8 @@ func (r _resource) getExistingPCLQsByNames(ctx context.Context, namespace string
 
 // getMinAvailableBreachedPCSGInfo filters PodCliqueScalingGroups that have grovecorev1alpha1.ConditionTypeMinAvailableBreached set to true.
 // It returns the names of all such PodCliqueScalingGroups and minimum of all the waitDurations.
-func getMinAvailableBreachedPCSGInfo(pcsgs []grovecorev1alpha1.PodCliqueScalingGroup, terminationDelay time.Duration, since time.Time) ([]string, time.Duration) {
+// PodCliqueScalingGroups within their startup grace period are excluded from consideration.
+func getMinAvailableBreachedPCSGInfo(pcsgs []grovecorev1alpha1.PodCliqueScalingGroup, terminationDelay time.Duration, gracePeriod time.Duration, since time.Time) ([]string, time.Duration) {
 	pcsgCandidateNames := make([]string, 0, len(pcsgs))
 	waitForDurations := make([]time.Duration, 0, len(pcsgs))
 	for _, pcsg := range pcsgs {
@@ -174,6 +180,14 @@ func getMinAvailableBreachedPCSGInfo(pcsgs []grovecorev1alpha1.PodCliqueScalingG
 			continue
 		}
 		if cond.Status == metav1.ConditionTrue {
+			// Check if PCSG is still within startup grace period
+			timeSinceCreation := since.Sub(pcsg.CreationTimestamp.Time)
+			if timeSinceCreation < gracePeriod {
+				// Still within grace period, don't consider for termination
+				continue
+			}
+			
+			// Past grace period, check termination delay
 			pcsgCandidateNames = append(pcsgCandidateNames, pcsg.Name)
 			waitFor := terminationDelay - since.Sub(cond.LastTransitionTime.Time)
 			waitForDurations = append(waitForDurations, waitFor)

@@ -28,7 +28,8 @@ import (
 )
 
 const (
-	defaultTerminationDelay = 4 * time.Hour
+	defaultTerminationDelay               = 4 * time.Hour
+	defaultTerminationStartupGracePeriod = 5 * time.Minute
 )
 
 // defaultPodCliqueSet adds defaults to a PodCliqueSet.
@@ -50,6 +51,9 @@ func defaultPodCliqueSetTemplateSpec(spec *grovecorev1alpha1.PodCliqueSetTemplat
 	spec.PodCliqueScalingGroupConfigs = defaultPodCliqueScalingGroupConfigs(spec.PodCliqueScalingGroupConfigs)
 	if spec.TerminationDelay == nil {
 		spec.TerminationDelay = &metav1.Duration{Duration: defaultTerminationDelay}
+	}
+	if spec.TerminationStartupGracePeriod == nil {
+		spec.TerminationStartupGracePeriod = &metav1.Duration{Duration: defaultTerminationStartupGracePeriod}
 	}
 
 	spec.HeadlessServiceConfig = defaultHeadlessServiceConfig(spec.HeadlessServiceConfig)

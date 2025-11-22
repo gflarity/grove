@@ -79,7 +79,11 @@ func (r _resource) prepareSyncContext(ctx context.Context, logger logr.Logger, p
 	// compute the PCSG indices that have their MinAvailableBreached condition set to true. Segregated these into two
 	// pcsgIndicesToTerminate will have the indices for which the TerminationDelay has expired.
 	// pcsgIndicesToRequeue will have the indices for which the TerminationDelay has not yet expired.
-	syncCtx.pcsgIndicesToTerminate, syncCtx.pcsgIndicesToRequeue = getMinAvailableBreachedPCSGIndices(logger, syncCtx.existingPCLQs, syncCtx.pcs.Spec.Template.TerminationDelay.Duration)
+	syncCtx.pcsgIndicesToTerminate, syncCtx.pcsgIndicesToRequeue = getMinAvailableBreachedPCSGIndices(
+		logger,
+		syncCtx.existingPCLQs,
+		syncCtx.pcs.Spec.Template.TerminationDelay.Duration,
+		syncCtx.pcs.Spec.Template.TerminationStartupGracePeriod.Duration)
 
 	// pre-compute expected PodTemplateHash for each PCLQ
 	syncCtx.expectedPCLQPodTemplateHashMap = getExpectedPCLQPodTemplateHashMap(syncCtx.pcs, pcsg)
@@ -228,13 +232,13 @@ func (r _resource) processMinAvailableBreachedPCSGReplicas(logger logr.Logger, s
 }
 
 // getMinAvailableBreachedPCSGIndices categorizes PCSG replicas based on MinAvailable breach status and termination delay
-func getMinAvailableBreachedPCSGIndices(logger logr.Logger, existingPCLQs []grovecorev1alpha1.PodClique, terminationDelay time.Duration) (pcsgIndicesToTerminate []string, pcsgIndicesToRequeue []string) {
+func getMinAvailableBreachedPCSGIndices(logger logr.Logger, existingPCLQs []grovecorev1alpha1.PodClique, terminationDelay time.Duration, gracePeriod time.Duration) (pcsgIndicesToTerminate []string, pcsgIndicesToRequeue []string) {
 	now := time.Now()
 	// group existing PCLQs by PCSG replica index. These are PCLQs that belong to one replica of PCSG.
 	pcsgReplicaIndexPCLQs := componentutils.GroupPCLQsByPCSGReplicaIndex(existingPCLQs)
 	// For each PCSG replica check if minAvailable for any constituent PCLQ has been violated. Those PCSG replicas should be marked for termination.
 	for pcsgReplicaIndex, pclqs := range pcsgReplicaIndexPCLQs {
-		pclqNames, minWaitFor := componentutils.GetMinAvailableBreachedPCLQInfo(pclqs, terminationDelay, now)
+		pclqNames, minWaitFor := componentutils.GetMinAvailableBreachedPCLQInfo(pclqs, terminationDelay, gracePeriod, now)
 		if len(pclqNames) > 0 {
 			logger.Info("minAvailable breached for PCLQs", "pcsgReplicaIndex", pcsgReplicaIndex, "pclqNames", pclqNames, "minWaitFor", minWaitFor)
 			if minWaitFor <= 0 {

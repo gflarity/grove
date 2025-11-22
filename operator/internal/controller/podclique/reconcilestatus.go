@@ -189,18 +189,6 @@ func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, num
 	scheduledReplicas := int(pclq.Status.ScheduledReplicas)
 	now := metav1.Now()
 
-	// If the number of scheduled pods is less than the minimum available, then minAvailable is not considered as breached.
-	// Consider a case where none of the PodCliques have been scheduled yet, then it should not cause the PodGang to be recreated all the time.
-	if scheduledReplicas < minAvailable {
-		return metav1.Condition{
-			Type:               constants.ConditionTypeMinAvailableBreached,
-			Status:             metav1.ConditionFalse,
-			Reason:             constants.ConditionReasonInsufficientScheduledPods,
-			Message:            fmt.Sprintf("Insufficient scheduled pods. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
-			LastTransitionTime: now,
-		}
-	}
-
 	readyOrStartingPods := scheduledReplicas - numPodsHavingAtleastOneContainerWithNonZeroExitCode - numPodsStartedButNotReady
 	// pclq.Status.ReadyReplicas do not account for Pods which are not yet ready and are in the process of starting/initializing.
 	// This allows sufficient time specially for pods that have long-running init containers or slow-to-start main containers.

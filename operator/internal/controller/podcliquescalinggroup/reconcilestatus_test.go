@@ -137,9 +137,22 @@ func TestComputeMinAvailableBreachedCondition(t *testing.T) {
 			minAvailable: ptr.To(int32(2)),
 			scheduled:    1,
 			available:    1,
-			pclqsMap:     make(map[string][]grovecorev1alpha1.PodClique),
-			wantStatus:   metav1.ConditionFalse,
-			wantReason:   "InsufficientScheduledPodCliqueScalingGroupReplicas",
+			pclqsMap: map[string][]grovecorev1alpha1.PodClique{
+				"0": {
+					{
+						Status: grovecorev1alpha1.PodCliqueStatus{
+							Conditions: []metav1.Condition{
+								{
+									Type:   constants.ConditionTypeMinAvailableBreached,
+									Status: metav1.ConditionTrue,
+								},
+							},
+						},
+					},
+				},
+			},
+			wantStatus: metav1.ConditionTrue,
+			wantReason: "InsufficientAvailablePodCliqueScalingGroupReplicas",
 		},
 		{
 			name:         "insufficient available",

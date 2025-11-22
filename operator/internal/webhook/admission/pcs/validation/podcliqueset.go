@@ -94,6 +94,7 @@ func (v *pcsValidator) validatePodGangTemplateSpec(fldPath *field.Path) ([]strin
 	}
 	allErrs = append(allErrs, v.validatePodCliqueScalingGroupConfigs(fldPath.Child("podCliqueScalingGroups"))...)
 	allErrs = append(allErrs, v.validateTerminationDelay(fldPath.Child("terminationDelay"))...)
+	allErrs = append(allErrs, v.validateTerminationStartupGracePeriod(fldPath.Child("terminationStartupGracePeriod"))...)
 
 	return warnings, allErrs
 }
@@ -251,6 +252,21 @@ func (v *pcsValidator) validateTerminationDelay(fldPath *field.Path) field.Error
 	}
 	if v.pcs.Spec.Template.TerminationDelay.Duration <= 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath, v.pcs.Spec.Template.TerminationDelay, "terminationDelay must be greater than 0"))
+	}
+
+	return allErrs
+}
+
+// validateTerminationStartupGracePeriod validates that terminationStartupGracePeriod is non-negative.
+func (v *pcsValidator) validateTerminationStartupGracePeriod(fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Optional field - defaulting webhook will set it if not provided
+	if v.pcs.Spec.Template.TerminationStartupGracePeriod == nil {
+		return allErrs
+	}
+	if v.pcs.Spec.Template.TerminationStartupGracePeriod.Duration < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath, v.pcs.Spec.Template.TerminationStartupGracePeriod, "terminationStartupGracePeriod must be non-negative"))
 	}
 
 	return allErrs

@@ -151,6 +151,13 @@ type PodCliqueSetTemplateSpec struct {
 	// Defaults to 4 hours.
 	// +optional
 	TerminationDelay *metav1.Duration `json:"terminationDelay,omitempty"`
+	// TerminationStartupGracePeriod is the grace period after replica creation before gang termination can be triggered.
+	// During this period, MinAvailable breaches will not trigger gang termination, allowing time for pods to schedule and start.
+	// This prevents premature termination of newly created replicas that haven't had a chance to become healthy yet.
+	// After the grace period expires, normal gang termination logic applies based on TerminationDelay.
+	// Defaults to 5 minutes.
+	// +optional
+	TerminationStartupGracePeriod *metav1.Duration `json:"terminationStartupGracePeriod,omitempty"`
 	// PodCliqueScalingGroupConfigs is a list of scaling groups for the PodCliqueSet.
 	PodCliqueScalingGroupConfigs []PodCliqueScalingGroupConfig `json:"podCliqueScalingGroups,omitempty"`
 }

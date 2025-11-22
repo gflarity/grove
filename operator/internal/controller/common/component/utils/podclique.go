@@ -88,7 +88,8 @@ func GroupPCLQsByPCSReplicaIndex(pclqs []grovecorev1alpha1.PodClique) map[string
 
 // GetMinAvailableBreachedPCLQInfo filters PodCliques that have grovecorev1alpha1.ConditionTypeMinAvailableBreached set to true.
 // For each such PodClique it returns the name of the PodClique a duration to wait for before terminationDelay is breached.
-func GetMinAvailableBreachedPCLQInfo(pclqs []grovecorev1alpha1.PodClique, terminationDelay time.Duration, since time.Time) ([]string, time.Duration) {
+// PodCliques within their startup grace period are excluded from consideration.
+func GetMinAvailableBreachedPCLQInfo(pclqs []grovecorev1alpha1.PodClique, terminationDelay time.Duration, gracePeriod time.Duration, since time.Time) ([]string, time.Duration) {
 	pclqCandidateNames := make([]string, 0, len(pclqs))
 	waitForDurations := make([]time.Duration, 0, len(pclqs))
 	for _, pclq := range pclqs {
@@ -97,6 +98,14 @@ func GetMinAvailableBreachedPCLQInfo(pclqs []grovecorev1alpha1.PodClique, termin
 			continue
 		}
 		if cond.Status == metav1.ConditionTrue {
+			// Check if PodClique is still within startup grace period
+			timeSinceCreation := since.Sub(pclq.CreationTimestamp.Time)
+			if timeSinceCreation < gracePeriod {
+				// Still within grace period, don't consider for termination
+				continue
+			}
+			
+			// Past grace period, check termination delay
 			pclqCandidateNames = append(pclqCandidateNames, pclq.Name)
 			waitFor := terminationDelay - since.Sub(cond.LastTransitionTime.Time)
 			waitForDurations = append(waitForDurations, waitFor)

@@ -164,14 +164,6 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 
 	minAvailable := int(*pcsg.Spec.MinAvailable)
 	scheduledReplicas := int(pcsg.Status.ScheduledReplicas)
-	if scheduledReplicas < minAvailable {
-		return metav1.Condition{
-			Type:    constants.ConditionTypeMinAvailableBreached,
-			Status:  metav1.ConditionFalse,
-			Reason:  constants.ConditionReasonInsufficientScheduledPCSGReplicas,
-			Message: fmt.Sprintf("Insufficient scheduled replicas. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
-		}
-	}
 	minAvailableBreachedReplicas := computeMinAvailableBreachedReplicas(logger, pclqsPerPCSGReplica)
 	availableReplicas := scheduledReplicas - minAvailableBreachedReplicas
 	if availableReplicas < minAvailable {

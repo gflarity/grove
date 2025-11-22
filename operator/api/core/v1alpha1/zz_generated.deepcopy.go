@@ -718,6 +718,11 @@ func (in *PodCliqueSetTemplateSpec) DeepCopyInto(out *PodCliqueSetTemplateSpec) 
 		*out = new(v1.Duration)
 		**out = **in
 	}
+	if in.TerminationStartupGracePeriod != nil {
+		in, out := &in.TerminationStartupGracePeriod, &out.TerminationStartupGracePeriod
+		*out = new(v1.Duration)
+		**out = **in
+	}
 	if in.PodCliqueScalingGroupConfigs != nil {
 		in, out := &in.PodCliqueScalingGroupConfigs, &out.PodCliqueScalingGroupConfigs
 		*out = make([]PodCliqueScalingGroupConfig, len(*in))
