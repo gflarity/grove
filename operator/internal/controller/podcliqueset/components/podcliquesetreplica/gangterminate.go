@@ -89,6 +89,15 @@ func (r _resource) getPCSReplicaDeletionWork(ctx context.Context, logger logr.Lo
 		if skipPCSReplicaIndex {
 			continue
 		}
+		
+		logger.Info("🔍 GT4-ROOT-CAUSE: Checking PCS replica for gang termination",
+			"pcs", pcsObjectKey,
+			"pcsReplicaIndex", pcsReplicaIndex,
+			"breachedPCSGNames", breachedPCSGNames,
+			"minPCSGWaitFor", minPCSGWaitFor,
+			"breachedPCLQNames", breachedPCLQNames,
+			"minPCLQWaitFor", minPCLQWaitFor)
+		
 		if (len(breachedPCSGNames) > 0 && minPCSGWaitFor <= 0) ||
 			(len(breachedPCLQNames) > 0 && minPCLQWaitFor <= 0) {
 			// terminate all PodCliques for this PCS replica index
@@ -96,6 +105,13 @@ func (r _resource) getPCSReplicaDeletionWork(ctx context.Context, logger logr.Lo
 			pclqGangTerminationTask := r.createPCSReplicaDeleteTask(logger, pcs, pcsReplicaIndex, reason)
 			deletionTasks = append(deletionTasks, pclqGangTerminationTask)
 			work.pcsIndicesToTerminate = append(work.pcsIndicesToTerminate, pcsReplicaIndex)
+			
+			logger.Info("🚨 GT4-ROOT-CAUSE: PCS REPLICA WILL BE GANG-TERMINATED - ALL PCSG REPLICAS IN THIS PCS REPLICA WILL BE DELETED!",
+				"pcs", pcsObjectKey,
+				"pcsReplicaIndex", pcsReplicaIndex,
+				"breachedPCSGNames", breachedPCSGNames,
+				"breachedPCLQNames", breachedPCLQNames,
+				"reason", reason)
 		} else if len(breachedPCSGNames) > 0 || len(breachedPCLQNames) > 0 {
 			work.minAvailableBreachedConstituents[pcsReplicaIndex] = append(work.minAvailableBreachedConstituents[pcsReplicaIndex], breachedPCLQNames...)
 			work.minAvailableBreachedConstituents[pcsReplicaIndex] = append(work.minAvailableBreachedConstituents[pcsReplicaIndex], breachedPCSGNames...)
@@ -191,6 +207,13 @@ func getMinAvailableBreachedPCSGInfo(pcsgs []grovecorev1alpha1.PodCliqueScalingG
 			pcsgCandidateNames = append(pcsgCandidateNames, pcsg.Name)
 			waitFor := terminationDelay - since.Sub(cond.LastTransitionTime.Time)
 			waitForDurations = append(waitForDurations, waitFor)
+			
+			// This is the smoking gun - if a PCSG has MinAvailableBreached=True, it will cause PCS replica deletion
+			// which deletes ALL PodCliques for that PCS replica (including all PCSG replicas)
+			fmt.Printf("🚨 GT4-ROOT-CAUSE: PCSG %s has MinAvailableBreached=True, timeSinceCreation=%v, gracePeriod=%v, waitFor=%v\n",
+				pcsg.Name, timeSinceCreation, gracePeriod, waitFor)
+			fmt.Printf("🚨 GT4-ROOT-CAUSE: PCSG status: scheduledReplicas=%d, availableReplicas=%d, updatedReplicas=%d, minAvailable=%d\n",
+				pcsg.Status.ScheduledReplicas, pcsg.Status.AvailableReplicas, pcsg.Status.UpdatedReplicas, *pcsg.Spec.MinAvailable)
 		}
 	}
 	if len(waitForDurations) == 0 {

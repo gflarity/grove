@@ -211,13 +211,28 @@ func (r _resource) processMinAvailableBreachedPCSGReplicas(logger logr.Logger, s
 	// If pcsg.spec.minAvailable is breached, then delegate the responsibility to the PodCliqueSet reconciler which after
 	// termination delay terminate the PodCliqueSet replica. No further processing is required to be done here.
 	minAvailableBreachedPCSGReplicas := len(sc.pcsgIndicesToTerminate) + len(sc.pcsgIndicesToRequeue)
+	
+	logger.Info("🔍 GT4-ROOT-CAUSE: Checking if PCSG replica-level gang termination should occur",
+		"pcsg", client.ObjectKeyFromObject(sc.pcsg),
+		"pcsgReplicas", sc.pcsg.Spec.Replicas,
+		"minAvailableBreachedPCSGReplicas", minAvailableBreachedPCSGReplicas,
+		"pcsgMinAvailable", *sc.pcsg.Spec.MinAvailable,
+		"indicesToTerminate", sc.pcsgIndicesToTerminate,
+		"indicesToRequeue", sc.pcsgIndicesToRequeue)
+	
 	if int(sc.pcsg.Spec.Replicas)-minAvailableBreachedPCSGReplicas < int(*sc.pcsg.Spec.MinAvailable) {
+		logger.Info("🚨 GT4-ROOT-CAUSE: PCSG minAvailable is breached - delegating to PCS controller for PCS replica deletion",
+			"pcsg", client.ObjectKeyFromObject(sc.pcsg),
+			"availablePCSGReplicas", int(sc.pcsg.Spec.Replicas)-minAvailableBreachedPCSGReplicas,
+			"pcsgMinAvailable", *sc.pcsg.Spec.MinAvailable)
 		return errPCCGMinAvailableBreached
 	}
 	// If pcsg.spec.minAvailable is not breached but if there is one more PCSG replica for which there is at least one PCLQ that has
 	// its minAvailable breached for a duration > terminationDelay then gang terminate such PCSG replicas.
 	if len(sc.pcsgIndicesToTerminate) > 0 {
-		logger.Info("Identified PodCliqueScalingGroup indices for gang termination", "indices", sc.pcsgIndicesToTerminate)
+		logger.Info("🔍 GT4-ROOT-CAUSE: PCSG replica-level gang termination will delete SPECIFIC PCSG replicas only",
+			"pcsg", client.ObjectKeyFromObject(sc.pcsg),
+			"indicesToTerminate", sc.pcsgIndicesToTerminate)
 		reason := fmt.Sprintf("Delete PodCliques %v for PodCliqueScalingGroup %v which have breached MinAvailable longer than TerminationDelay: %s", sc.pcsgIndicesToTerminate, client.ObjectKeyFromObject(sc.pcsg), sc.pcs.Spec.Template.TerminationDelay.Duration)
 		pclqGangTerminationTasks := r.createDeleteTasks(logger, sc.pcs, sc.pcsg.Name, sc.pcsgIndicesToTerminate, reason)
 		if err := r.triggerDeletionOfPodCliques(sc.ctx, logger, client.ObjectKeyFromObject(sc.pcsg), pclqGangTerminationTasks); err != nil {

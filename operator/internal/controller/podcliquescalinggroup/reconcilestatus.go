@@ -83,8 +83,23 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 func mutateReplicas(logger logr.Logger, currentPCSGenerationHash *string, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) {
 	pcsg.Status.Replicas = pcsg.Spec.Replicas
 	var scheduledReplicas, availableReplicas, updatedReplicas int32
+	
+	logger.Info("DEBUG: mutateReplicas - processing PCSG",
+		"pcsg", client.ObjectKeyFromObject(pcsg),
+		"totalReplicasInMap", len(pclqsPerPCSGReplica),
+		"expectedReplicas", pcsg.Spec.Replicas,
+		"numCliqueNames", len(pcsg.Spec.CliqueNames))
+	
 	for pcsgReplicaIndex, pclqs := range pclqsPerPCSGReplica {
+		logger.Info("DEBUG: Processing PCSG replica",
+			"pcsgReplicaIndex", pcsgReplicaIndex,
+			"numPodCliques", len(pclqs))
 		isScheduled, isAvailable, isUpdated := computeReplicaStatus(logger, currentPCSGenerationHash, pcsgReplicaIndex, len(pcsg.Spec.CliqueNames), pclqs)
+		logger.Info("DEBUG: PCSG replica status computed",
+			"pcsgReplicaIndex", pcsgReplicaIndex,
+			"isScheduled", isScheduled,
+			"isAvailable", isAvailable,
+			"isUpdated", isUpdated)
 		if isScheduled {
 			scheduledReplicas++
 		}
@@ -105,11 +120,33 @@ func mutateReplicas(logger logr.Logger, currentPCSGenerationHash *string, pcsg *
 
 // computeReplicaStatus processes a single PodCliqueScalingGroup replica and returns whether it is scheduled and available.
 func computeReplicaStatus(logger logr.Logger, currentPCSGenerationHash *string, pcsgReplicaIndex string, numPCSGCliqueNames int, pclqs []grovecorev1alpha1.PodClique) (isScheduled, isAvailable, isUpdated bool) {
+	// Detailed logging: Log ALL PodCliques for this replica before filtering
+	logger.Info("DEBUG: computeReplicaStatus - examining PCSG replica",
+		"pcsgReplicaIndex", pcsgReplicaIndex,
+		"totalPodCliques", len(pclqs),
+		"expectedPCSGReplicaPCLQSize", numPCSGCliqueNames)
+	for _, pclq := range pclqs {
+		logger.Info("DEBUG: PodClique in replica",
+			"pcsgReplicaIndex", pcsgReplicaIndex,
+			"pclqName", pclq.Name,
+			"isTerminating", k8sutils.IsResourceTerminating(pclq.ObjectMeta),
+			"deletionTimestamp", pclq.DeletionTimestamp,
+			"readyReplicas", pclq.Status.ReadyReplicas,
+			"replicas", pclq.Spec.Replicas,
+			"scheduledCondition", k8sutils.IsConditionTrue(pclq.Status.Conditions, constants.ConditionTypePodCliqueScheduled))
+	}
+	
 	nonTerminatedPCSGPodCliques := lo.Filter(pclqs, func(pclq grovecorev1alpha1.PodClique, _ int) bool {
 		return !k8sutils.IsResourceTerminating(pclq.ObjectMeta)
 	})
+	
+	logger.Info("DEBUG: After filtering terminating PodCliques",
+		"pcsgReplicaIndex", pcsgReplicaIndex,
+		"nonTerminatedCount", len(nonTerminatedPCSGPodCliques),
+		"expectedCount", numPCSGCliqueNames)
+	
 	if len(nonTerminatedPCSGPodCliques) != numPCSGCliqueNames {
-		logger.V(1).Info("PCSG replica does not have the expected number of PodCliques",
+		logger.Info("DEBUG: PCSG replica does not have the expected number of non-terminating PodCliques - returning early with isScheduled=false",
 			"pcsgReplicaIndex", pcsgReplicaIndex,
 			"expectedPCSGReplicaPCLQSize", numPCSGCliqueNames,
 			"actualPCSGReplicaPCLQSize", len(nonTerminatedPCSGPodCliques))
@@ -166,7 +203,20 @@ func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1a
 	scheduledReplicas := int(pcsg.Status.ScheduledReplicas)
 	minAvailableBreachedReplicas := computeMinAvailableBreachedReplicas(logger, pclqsPerPCSGReplica)
 	availableReplicas := scheduledReplicas - minAvailableBreachedReplicas
+	
+	logger.Info("🔍 GT4-ROOT-CAUSE: Computing PCSG MinAvailableBreached condition",
+		"pcsg", client.ObjectKeyFromObject(pcsg),
+		"minAvailable", minAvailable,
+		"scheduledReplicas", scheduledReplicas,
+		"minAvailableBreachedReplicas", minAvailableBreachedReplicas,
+		"availableReplicas", availableReplicas,
+		"totalReplicasInMap", len(pclqsPerPCSGReplica))
+	
 	if availableReplicas < minAvailable {
+		logger.Info("🚨 GT4-ROOT-CAUSE: PCSG will be marked MinAvailableBreached=True - THIS MAY TRIGGER PCS REPLICA DELETION!",
+			"pcsg", client.ObjectKeyFromObject(pcsg),
+			"minAvailable", minAvailable,
+			"availableReplicas", availableReplicas)
 		return metav1.Condition{
 			Type:    constants.ConditionTypeMinAvailableBreached,
 			Status:  metav1.ConditionTrue,

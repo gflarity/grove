@@ -430,8 +430,13 @@ func Test_GT4_GangTerminationMinReplicasPCSGOwned(t *testing.T) {
 	time.Sleep(2 * TerminationDelay)
 
 	logger.Info("9. Verify that both podcliques on PCSG pcs-0-sg-x-0 (pcs-0-sg-x-0-pc-b and pcs-0-sg-x-0-pc-c) are recreated but workload is not gang-terminated")
+	
+	// Log operator logs to understand what's happening
+	logger.Info("📋 Capturing operator logs for analysis...")
+	captureOperatorLogs(tc)
+	
 	// Verify at least 3 original pods remain (gang termination would replace all pod UIDs)
-	verifyNoGangTermination(tc, 3, originalPodUIDs)
+	verifyNoGangTerminationWithDetailedLogging(tc, 3, originalPodUIDs)
 
 	// Wait for pods to be recreated
 	time.Sleep(10 * time.Second)
@@ -645,6 +650,234 @@ func verifyNoGangTermination(tc TestContext, minExpectedRunning int, originalPod
 	if err != nil {
 		tc.T.Fatalf("Failed to verify no gang-termination: %v", err)
 	}
+}
+
+// verifyNoGangTerminationWithDetailedLogging verifies that gang-termination has not occurred by checking that original pod UIDs still exist
+// This version includes detailed PodClique and PCSG status logging
+func verifyNoGangTerminationWithDetailedLogging(tc TestContext, minExpectedRunning int, originalPodUIDs map[string]string) {
+	tc.T.Helper()
+
+	// First, log detailed status of PodCliques and PCSGs
+	logPodCliqueAndPCSGStatus(tc)
+
+	pollCount := 0
+	err := pollForCondition(tc, func() (bool, error) {
+		pollCount++
+		pods, err := tc.Clientset.CoreV1().Pods(tc.Namespace).List(tc.Ctx, metav1.ListOptions{
+			LabelSelector: tc.getLabelSelector(),
+		})
+		if err != nil {
+			return false, err
+		}
+
+		runningCount := 0
+		pendingCount := 0
+		terminatingCount := 0
+		currentUIDs := make(map[string]bool)
+		oldPodsRemaining := 0
+		newPodsCreated := 0
+
+		podsByClique := make(map[string][]string)
+
+		for _, pod := range pods.Items {
+			currentUIDs[string(pod.UID)] = true
+			cliqueName := pod.Labels["grove.io/podclique"]
+			podsByClique[cliqueName] = append(podsByClique[cliqueName], pod.Name)
+
+			switch pod.Status.Phase {
+			case v1.PodRunning:
+				runningCount++
+			case v1.PodPending:
+				pendingCount++
+			}
+			if pod.DeletionTimestamp != nil {
+				terminatingCount++
+			}
+
+			// Check if this is an original pod
+			if originalUID, wasOriginal := originalPodUIDs[pod.Name]; wasOriginal {
+				if string(pod.UID) == originalUID {
+					oldPodsRemaining++
+				} else {
+					newPodsCreated++
+				}
+			} else {
+				// This is a completely new pod (not in original list)
+				newPodsCreated++
+			}
+		}
+
+		runningOrPendingCount := runningCount + pendingCount
+		// Success criteria:
+		// 1. At least minExpectedRunning pods are running/pending
+		// 2. Most original pods still exist (allowing for the few we intentionally deleted)
+		success := runningOrPendingCount >= minExpectedRunning && oldPodsRemaining >= minExpectedRunning
+		status := "✅"
+		if !success {
+			status = "❌"
+		}
+		logger.Infof("%s [Poll %d] running=%d, pending=%d, terminating=%d, total=%d, original_remain=%d/%d, new_pods=%d (min_expected=%d)",
+			status, pollCount, runningCount, pendingCount, terminatingCount, len(pods.Items), oldPodsRemaining, len(originalPodUIDs), newPodsCreated, minExpectedRunning)
+
+		// Log per-clique breakdown
+		if pollCount%3 == 0 || !success {
+			logger.Infof("  Per-clique pod counts:")
+			for clique, podNames := range podsByClique {
+				logger.Infof("    %s: %d pods [%v]", clique, len(podNames), podNames)
+			}
+		}
+
+		return success, nil
+	})
+
+	if err != nil {
+		// Add detailed diagnostics on failure
+		logger.Errorf("❌ VERIFICATION FAILED: No gang-termination check failed after timeout")
+		logDetailedFailureDiagnostics(tc, originalPodUIDs)
+		tc.T.Fatalf("Failed to verify no gang-termination: %v", err)
+	}
+}
+
+// logPodCliqueAndPCSGStatus logs the current status of all PodCliques and PCSGs
+func logPodCliqueAndPCSGStatus(tc TestContext) {
+	logger.Info("📊 Checking PodClique and PCSG status:")
+
+	// Log PodClique status
+	pclqList, err := listPodCliques(tc)
+	if err != nil {
+		logger.Errorf("Failed to list PodCliques: %v", err)
+	} else {
+		for _, pclq := range pclqList.Items {
+			minAvailCond := getCondition(pclq.Status.Conditions, "MinAvailableBreached")
+			logger.Infof("  PodClique %s: replicas=%d/%d, minAvailable=%d, MinAvailableBreached=%s (since=%s)",
+				pclq.Name,
+				pclq.Status.ReadyReplicas,
+				pclq.Spec.Replicas,
+				pclq.Spec.MinAvailable,
+				conditionStatus(minAvailCond),
+				conditionLastTransition(minAvailCond))
+		}
+	}
+
+	// Log PCSG status
+	pcsgList, err := listPodCliqueScalingGroups(tc)
+	if err != nil {
+		logger.Errorf("Failed to list PCSGs: %v", err)
+	} else {
+		for _, pcsg := range pcsgList.Items {
+			minAvailCond := getCondition(pcsg.Status.Conditions, "MinAvailableBreached")
+			logger.Infof("  PCSG %s: available=%d/%d, scheduled=%d, minAvailable=%d, MinAvailableBreached=%s (since=%s), created=%s",
+				pcsg.Name,
+				pcsg.Status.AvailableReplicas,
+				pcsg.Spec.Replicas,
+				pcsg.Status.ScheduledReplicas,
+				*pcsg.Spec.MinAvailable,
+				conditionStatus(minAvailCond),
+				conditionLastTransition(minAvailCond),
+				pcsg.CreationTimestamp.Format(time.RFC3339))
+		}
+	}
+}
+
+// logDetailedFailureDiagnostics logs detailed diagnostics when verification fails
+func logDetailedFailureDiagnostics(tc TestContext, originalPodUIDs map[string]string) {
+	pods, listErr := utils.ListPods(tc.Ctx, tc.Clientset, tc.Namespace, tc.getLabelSelector())
+	if listErr != nil {
+		logger.Errorf("Failed to list pods for diagnostics: %v", listErr)
+		return
+	}
+
+	logger.Errorf("Current pod state:")
+	podsByClique := make(map[string][]v1.Pod)
+	for _, pod := range pods.Items {
+		cliqueName := pod.Labels["grove.io/podclique"]
+		podsByClique[cliqueName] = append(podsByClique[cliqueName], pod)
+	}
+
+	for clique, cliquePods := range podsByClique {
+		logger.Errorf("  Clique %s (%d pods):", clique, len(cliquePods))
+		for _, pod := range cliquePods {
+			wasOriginal := ""
+			if origUID, exists := originalPodUIDs[pod.Name]; exists {
+				if string(pod.UID) == origUID {
+					wasOriginal = " [ORIGINAL]"
+				} else {
+					wasOriginal = " [RECREATED - UID changed]"
+				}
+			} else {
+				wasOriginal = " [NEW - not in original list]"
+			}
+			logger.Errorf("    %s: phase=%s, ready=%v, terminating=%v, uid=%s%s",
+				pod.Name, pod.Status.Phase, utils.IsPodReady(&pod), pod.DeletionTimestamp != nil, pod.UID, wasOriginal)
+		}
+	}
+
+	// Re-log PodClique and PCSG status
+	logPodCliqueAndPCSGStatus(tc)
+}
+
+// Helper function to get condition status as string
+func conditionStatus(cond *metav1.Condition) string {
+	if cond == nil {
+		return "NotSet"
+	}
+	return string(cond.Status)
+}
+
+// Helper function to get condition last transition time
+func conditionLastTransition(cond *metav1.Condition) string {
+	if cond == nil {
+		return "N/A"
+	}
+	return fmt.Sprintf("%s (%.1fs ago)", cond.LastTransitionTime.Format("15:04:05"), time.Since(cond.LastTransitionTime.Time).Seconds())
+}
+
+// Helper function to get a condition by type
+func getCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == condType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
+// captureOperatorLogs captures and logs operator logs for debugging
+func captureOperatorLogs(tc TestContext) {
+	// Get operator pod logs
+	pods, err := tc.Clientset.CoreV1().Pods("grove-system").List(tc.Ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=grove-operator",
+	})
+	if err != nil {
+		logger.Errorf("Failed to list operator pods: %v", err)
+		return
+	}
+	
+	if len(pods.Items) == 0 {
+		logger.Errorf("No operator pods found")
+		return
+	}
+	
+	operatorPod := pods.Items[0]
+	logger.Infof("Fetching logs from operator pod: %s", operatorPod.Name)
+	
+	// Get logs from the last 60 seconds with timestamps
+	tailLines := int64(200)
+	logOptions := &v1.PodLogOptions{
+		TailLines:  &tailLines,
+		Timestamps: true,
+	}
+	
+	req := tc.Clientset.CoreV1().Pods("grove-system").GetLogs(operatorPod.Name, logOptions)
+	logs, err := req.DoRaw(tc.Ctx)
+	if err != nil {
+		logger.Errorf("Failed to get operator logs: %v", err)
+		return
+	}
+	
+	logger.Info("=== OPERATOR LOGS (last 200 lines) ===")
+	logger.Info(string(logs))
+	logger.Info("=== END OPERATOR LOGS ===")
 }
 
 // verifyGangTermination verifies that gang-termination has occurred and all pods were recreated

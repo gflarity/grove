@@ -25,10 +25,13 @@ import (
 	"testing"
 	"time"
 
+	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/e2e/setup"
 	"github.com/ai-dynamo/grove/operator/e2e/utils"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -507,4 +510,46 @@ func waitForRunningPods(tc TestContext, expectedRunning int) error {
 		count := utils.CountPodsByPhase(pods)
 		return count.Running == expectedRunning, nil
 	})
+}
+
+// listPodCliques lists all PodCliques for the workload
+func listPodCliques(tc TestContext) (*grovecorev1alpha1.PodCliqueList, error) {
+	unstructuredList, err := tc.DynamicClient.Resource(schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "podcliques",
+	}).Namespace(tc.Namespace).List(tc.Ctx, metav1.ListOptions{
+		LabelSelector: tc.getLabelSelector(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list podcliques: %w", err)
+	}
+
+	// Convert unstructured to typed
+	pclqList := &grovecorev1alpha1.PodCliqueList{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredList.UnstructuredContent(), pclqList); err != nil {
+		return nil, fmt.Errorf("failed to convert unstructured to PodCliqueList: %w", err)
+	}
+	return pclqList, nil
+}
+
+// listPodCliqueScalingGroups lists all PCSGs for the workload
+func listPodCliqueScalingGroups(tc TestContext) (*grovecorev1alpha1.PodCliqueScalingGroupList, error) {
+	unstructuredList, err := tc.DynamicClient.Resource(schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "podcliquescalinggroups",
+	}).Namespace(tc.Namespace).List(tc.Ctx, metav1.ListOptions{
+		LabelSelector: tc.getLabelSelector(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list podcliquescalinggroups: %w", err)
+	}
+
+	// Convert unstructured to typed
+	pcsgList := &grovecorev1alpha1.PodCliqueScalingGroupList{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredList.UnstructuredContent(), pcsgList); err != nil {
+		return nil, fmt.Errorf("failed to convert unstructured to PodCliqueScalingGroupList: %w", err)
+	}
+	return pcsgList, nil
 }
