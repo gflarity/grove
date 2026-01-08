@@ -17,18 +17,11 @@
 package defaulting
 
 import (
-	"time"
-
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/grove/operator/internal/utils"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
-)
-
-const (
-	defaultTerminationDelay = 4 * time.Hour
 )
 
 // defaultPodCliqueSet adds defaults to a PodCliqueSet.
@@ -45,13 +38,12 @@ func defaultPodCliqueSetSpec(spec *grovecorev1alpha1.PodCliqueSetSpec) {
 }
 
 // defaultPodCliqueSetTemplateSpec applies defaults to the template specification including cliques, scaling groups, and service configuration.
+// Note: TerminationDelay is intentionally NOT defaulted. If nil, gang termination is disabled.
+// Users must explicitly set terminationDelay to enable gang termination.
 func defaultPodCliqueSetTemplateSpec(spec *grovecorev1alpha1.PodCliqueSetTemplateSpec) {
 	spec.Cliques = defaultPodCliqueTemplateSpecs(spec.Cliques)
 	spec.PodCliqueScalingGroupConfigs = defaultPodCliqueScalingGroupConfigs(spec.PodCliqueScalingGroupConfigs)
-	if spec.TerminationDelay == nil {
-		spec.TerminationDelay = &metav1.Duration{Duration: defaultTerminationDelay}
-	}
-
+	// TerminationDelay is NOT defaulted - if nil, gang termination is disabled
 	spec.HeadlessServiceConfig = defaultHeadlessServiceConfig(spec.HeadlessServiceConfig)
 }
 

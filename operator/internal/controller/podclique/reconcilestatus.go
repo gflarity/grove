@@ -37,6 +37,8 @@ import (
 )
 
 // reconcileStatus updates the PodClique status
+// TODO we're preserving things for conistency with HasConditionChanged
+// but maybe we shouldn't?
 func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pclq *grovecorev1alpha1.PodClique) ctrlcommon.ReconcileStepResult {
 	pcsName := componentutils.GetPodCliqueSetName(pclq.ObjectMeta)
 	pclqObjectKey := client.ObjectKeyFromObject(pclq)
@@ -61,6 +63,10 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 		logger.Error(err, "failed to compute PodClique current hashes")
 		return ctrlcommon.ReconcileWithErrors("failed to compute PodClique current hashes", err)
 	}
+
+	// Capture old ReadyReplicas before mutation for transition-based breach detection
+	oldReadyReplicas := pclq.Status.ReadyReplicas
+
 	// mutate PodClique Status Replicas, ReadyReplicas, ScheduleGatedReplicas and UpdatedReplicas.
 	mutateReplicas(pclq, podCategories, len(existingPods))
 	mutateUpdatedReplica(pclq, existingPods)
@@ -69,9 +75,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 	// This prevents prematurely setting incorrect conditions.
 	if pclq.Status.ObservedGeneration != nil {
 		mutatePodCliqueScheduledCondition(pclq)
-		mutateMinAvailableBreachedCondition(pclq,
-			len(podCategories[k8sutils.PodHasAtleastOneContainerWithNonZeroExitCode]),
-			len(podCategories[k8sutils.PodStartedButNotReady]))
+		mutateMinAvailableBreachedCondition(pclq, oldReadyReplicas)
 	}
 
 	// mutate the selector that will be used by an autoscaler.
@@ -165,16 +169,18 @@ func mutateSelector(pcsName string, pclq *grovecorev1alpha1.PodClique) error {
 	return nil
 }
 
-// mutateMinAvailableBreachedCondition updates the MinAvailableBreached condition based on pod availability
-func mutateMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, numNotReadyPodsWithContainersInError, numPodsStartedButNotReady int) {
-	newCondition := computeMinAvailableBreachedCondition(pclq, numNotReadyPodsWithContainersInError, numPodsStartedButNotReady)
+// mutateMinAvailableBreachedCondition updates the MinAvailableBreached condition based on pod availability.
+// It uses transition-based detection: the condition is set to True only when ready replicas
+// transitions from >= MinAvailable to < MinAvailable.
+func mutateMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, oldReadyReplicas int32) {
+	newCondition := computeMinAvailableBreachedCondition(pclq, oldReadyReplicas)
 	if k8sutils.HasConditionChanged(pclq.Status.Conditions, newCondition) {
 		meta.SetStatusCondition(&pclq.Status.Conditions, newCondition)
 	}
 }
 
 // computeMinAvailableBreachedCondition calculates the MinAvailableBreached condition status based on pod availability
-func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, numPodsHavingAtleastOneContainerWithNonZeroExitCode, numPodsStartedButNotReady int) metav1.Condition {
+func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, oldReadyReplicas int32) metav1.Condition {
 	if componentutils.IsPCLQUpdateInProgress(pclq) {
 		return metav1.Condition{
 			Type:    constants.ConditionTypeMinAvailableBreached,
@@ -183,43 +189,57 @@ func computeMinAvailableBreachedCondition(pclq *grovecorev1alpha1.PodClique, num
 			Message: "Update is in progress",
 		}
 	}
+
 	// dereferencing is considered safe as MinAvailable will always be set by the defaulting webhook. If this changes in the future,
 	// make sure that you check for nil explicitly.
 	minAvailable := int(*pclq.Spec.MinAvailable)
-	scheduledReplicas := int(pclq.Status.ScheduledReplicas)
+	currentReadyReplicas := int(pclq.Status.ReadyReplicas)
+	existingCondition := meta.FindStatusCondition(pclq.Status.Conditions, constants.ConditionTypeMinAvailableBreached)
 	now := metav1.Now()
 
-	// If the number of scheduled pods is less than the minimum available, then minAvailable is not considered as breached.
-	// Consider a case where none of the PodCliques have been scheduled yet, then it should not cause the PodGang to be recreated all the time.
-	if scheduledReplicas < minAvailable {
+	// Check current state - if healthy, set/maintain False condition
+	if currentReadyReplicas >= minAvailable {
+		// Preserve existing False condition to maintain LastTransitionTime
+		// (consistent with True→True handling below and with HasConditionChanged which preserves conditions when unchanged)
+		if existingCondition != nil && existingCondition.Status == metav1.ConditionFalse {
+			return *existingCondition
+		}
 		return metav1.Condition{
 			Type:               constants.ConditionTypeMinAvailableBreached,
 			Status:             metav1.ConditionFalse,
-			Reason:             constants.ConditionReasonInsufficientScheduledPods,
-			Message:            fmt.Sprintf("Insufficient scheduled pods. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
+			Reason:             constants.ConditionReasonSufficientReadyPods,
+			Message:            fmt.Sprintf("Sufficient ready pods. expected at least: %d, found: %d", minAvailable, currentReadyReplicas),
 			LastTransitionTime: now,
 		}
 	}
 
-	readyOrStartingPods := scheduledReplicas - numPodsHavingAtleastOneContainerWithNonZeroExitCode - numPodsStartedButNotReady
-	// pclq.Status.ReadyReplicas do not account for Pods which are not yet ready and are in the process of starting/initializing.
-	// This allows sufficient time specially for pods that have long-running init containers or slow-to-start main containers.
-	// Therefore, we take Pods that are NotReady and at least one of their containers have exited with a non-zero exit code. Kubelet
-	// has attempted to start the containers within the Pod at least once and failed. These pods count towards unavailability.
-	if readyOrStartingPods < minAvailable {
+	// Current ready < minAvailable
+	// Only set to True if this is a TRANSITION from healthy to unhealthy
+	if int(oldReadyReplicas) >= minAvailable {
+		// Transition detected: was healthy, now unhealthy - this is a status change, use new timestamp
 		return metav1.Condition{
 			Type:               constants.ConditionTypeMinAvailableBreached,
 			Status:             metav1.ConditionTrue,
 			Reason:             constants.ConditionReasonInsufficientReadyPods,
-			Message:            fmt.Sprintf("Insufficient ready or starting pods. expected at least: %d, found: %d", minAvailable, readyOrStartingPods),
+			Message:            fmt.Sprintf("Insufficient ready pods. expected at least: %d, found: %d (was: %d)", minAvailable, currentReadyReplicas, oldReadyReplicas),
 			LastTransitionTime: now,
 		}
 	}
+
+	// Was already unhealthy - check existing condition
+	if existingCondition != nil && existingCondition.Status == metav1.ConditionTrue {
+		// Maintain existing True condition (preserve LastTransitionTime for termination delay calculation)
+		return *existingCondition
+	}
+
+	// Edge case: was unhealthy but condition wasn't True (e.g., was Unknown during update)
+	// Now that update is complete, set to False since no transition occurred
+	// Preserve LastTransitionTime if already False
 	return metav1.Condition{
 		Type:               constants.ConditionTypeMinAvailableBreached,
 		Status:             metav1.ConditionFalse,
-		Reason:             constants.ConditionReasonSufficientReadyPods,
-		Message:            fmt.Sprintf("Either sufficient ready or starting pods found. expected at least: %d, found: %d", minAvailable, readyOrStartingPods),
+		Reason:             constants.ConditionReasonNoTransitionDetected,
+		Message:            fmt.Sprintf("No transition from healthy to unhealthy detected. ready pods: %d, minAvailable: %d", currentReadyReplicas, minAvailable),
 		LastTransitionTime: now,
 	}
 }

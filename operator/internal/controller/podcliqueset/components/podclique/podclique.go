@@ -319,6 +319,12 @@ func (r _resource) buildResource(logger logr.Logger, pclq *grovecorev1alpha1.Pod
 		return err
 	}
 	pclq.Spec.StartsAfter = dependentPclqNames
+
+	// Propagate TerminationDelay from PodCliqueTemplateSpec to standalone PCLQ spec.
+	// If nil, PCLQ inherits from PCS at runtime.
+	// Note: PCLQs in PCSGs do NOT get TerminationDelay set here (they are managed by PCSG component).
+	pclq.Spec.TerminationDelay = pclqTemplateSpec.TerminationDelay
+
 	return nil
 }
 

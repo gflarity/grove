@@ -1,0 +1,113 @@
+# Workload with standalone PCLQ-level terminationDelay override
+# This workload demonstrates gang termination with standalone PCLQ-level terminationDelay overrides.
+# - PCS-level terminationDelay: 30s (default for workload)
+# - pc-fast is a standalone PCLQ with terminationDelay: 5s (faster termination)
+# - pc-slow is a standalone PCLQ with terminationDelay: 60s (slower termination)
+# - pc-default is a standalone PCLQ without terminationDelay (inherits PCS default of 30s)
+#
+# NOTE: Only standalone PCLQs (not part of any PCSG) can have terminationDelay set.
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: workload-pclq-td
+  labels:
+    app: workload-pclq-td
+spec:
+  replicas: 1
+  template:
+    terminationDelay: 30s  # Default termination delay for the workload
+    cliques:
+      - name: pc-fast
+        labels:
+          kai.scheduler/queue: test
+        terminationDelay: 5s  # Faster termination than PCS default (30s)
+        spec:
+          roleName: role-fast
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            schedulerName: kai-scheduler
+            terminationGracePeriodSeconds: 1
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: pc-fast
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 80Mi
+      - name: pc-slow
+        labels:
+          kai.scheduler/queue: test
+        terminationDelay: 60s  # Slower termination than PCS default (30s)
+        spec:
+          roleName: role-slow
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            schedulerName: kai-scheduler
+            terminationGracePeriodSeconds: 1
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: pc-slow
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 80Mi
+      - name: pc-default
+        labels:
+          kai.scheduler/queue: test
+        # NOTE: No terminationDelay set - inherits PCS default of 30s
+        spec:
+          roleName: role-default
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            schedulerName: kai-scheduler
+            terminationGracePeriodSeconds: 1
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: pc-default
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 80Mi

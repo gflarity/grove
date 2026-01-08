@@ -1,0 +1,90 @@
+# Workload with PCSG-level terminationDelay override
+# This workload demonstrates gang termination with PCSG-level terminationDelay overrides.
+# - PCS-level terminationDelay: 30s (default for workload)
+# - sg-fast has terminationDelay: 5s (faster termination)
+# - sg-slow has terminationDelay: 60s (slower termination)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: workload-pcsg-td
+  labels:
+    app: workload-pcsg-td
+spec:
+  replicas: 1
+  template:
+    terminationDelay: 30s  # Default termination delay for the workload
+    cliques:
+      - name: pc-fast
+        labels:
+          kai.scheduler/queue: test
+        spec:
+          roleName: role-fast
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            schedulerName: kai-scheduler
+            terminationGracePeriodSeconds: 1
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: pc-fast
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 80Mi
+      - name: pc-slow
+        labels:
+          kai.scheduler/queue: test
+        spec:
+          roleName: role-slow
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            schedulerName: kai-scheduler
+            terminationGracePeriodSeconds: 1
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: pc-slow
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 80Mi
+    podCliqueScalingGroups:
+      - name: sg-fast
+        replicas: 1
+        minAvailable: 1
+        terminationDelay: 5s  # Faster termination than PCS default (30s)
+        cliqueNames:
+          - pc-fast
+      - name: sg-slow
+        replicas: 1
+        minAvailable: 1
+        terminationDelay: 60s  # Slower termination than PCS default (30s)
+        cliqueNames:
+          - pc-slow

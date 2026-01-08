@@ -241,16 +241,94 @@ func (v *pcsValidator) validatePodCliqueScalingGroupConfigs(fldPath *field.Path)
 	return allErrs
 }
 
-// validateTerminationDelay validates that terminationDelay is set and greater than zero.
+// validateTerminationDelay validates terminationDelay at PCS, PCSG, and PCLQ levels.
+// Gang termination is disabled if PCS-level terminationDelay is nil.
+// If PCS-level terminationDelay is set, it must be > 0.
+// PCSG and standalone PCLQ terminationDelay overrides are only valid when PCS-level is set.
 func (v *pcsValidator) validateTerminationDelay(fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	// This should ideally not happen, the defaulting webhook will always set the default value for terminationDelay.
-	if v.pcs.Spec.Template.TerminationDelay == nil {
-		return append(allErrs, field.Required(fldPath, "terminationDelay is required"))
+	gangTerminationEnabled := v.pcs.Spec.Template.TerminationDelay != nil
+
+	// Validate PCS-level terminationDelay (if set, must be > 0)
+	if gangTerminationEnabled {
+		if v.pcs.Spec.Template.TerminationDelay.Duration <= 0 {
+			allErrs = append(allErrs, field.Invalid(fldPath, v.pcs.Spec.Template.TerminationDelay, "terminationDelay must be greater than 0"))
+		}
 	}
-	if v.pcs.Spec.Template.TerminationDelay.Duration <= 0 {
-		allErrs = append(allErrs, field.Invalid(fldPath, v.pcs.Spec.Template.TerminationDelay, "terminationDelay must be greater than 0"))
+
+	// Validate PCSG-level terminationDelay
+	allErrs = append(allErrs, v.validatePCSGTerminationDelay(gangTerminationEnabled)...)
+
+	// Validate PCLQ-level terminationDelay
+	allErrs = append(allErrs, v.validatePCLQTerminationDelay(gangTerminationEnabled)...)
+
+	return allErrs
+}
+
+// validatePCSGTerminationDelay validates terminationDelay for each PodCliqueScalingGroupConfig.
+// If gang termination is disabled (PCS-level terminationDelay is nil), PCSG terminationDelay MUST NOT be set.
+// If set, it must be > 0.
+func (v *pcsValidator) validatePCSGTerminationDelay(gangTerminationEnabled bool) field.ErrorList {
+	allErrs := field.ErrorList{}
+	fldPath := field.NewPath("spec", "template", "podCliqueScalingGroups")
+
+	for i, pcsgConfig := range v.pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		if pcsgConfig.TerminationDelay == nil {
+			continue
+		}
+
+		pcsgFldPath := fldPath.Index(i).Child("terminationDelay")
+
+		if !gangTerminationEnabled {
+			allErrs = append(allErrs, field.Forbidden(pcsgFldPath,
+				"terminationDelay cannot be set on PodCliqueScalingGroup when gang termination is disabled at PCS level (spec.template.terminationDelay is not set)"))
+			continue
+		}
+
+		if pcsgConfig.TerminationDelay.Duration <= 0 {
+			allErrs = append(allErrs, field.Invalid(pcsgFldPath, pcsgConfig.TerminationDelay, "terminationDelay must be greater than 0"))
+		}
+	}
+
+	return allErrs
+}
+
+// validatePCLQTerminationDelay validates terminationDelay for each PodCliqueTemplateSpec.
+// If gang termination is disabled (PCS-level terminationDelay is nil), PCLQ terminationDelay MUST NOT be set.
+// If a PCLQ is part of a PCSG, it MUST NOT have terminationDelay set (inherits from PCSG or PCS).
+// If a standalone PCLQ has terminationDelay set, it must be > 0.
+func (v *pcsValidator) validatePCLQTerminationDelay(gangTerminationEnabled bool) field.ErrorList {
+	allErrs := field.ErrorList{}
+	fldPath := field.NewPath("spec", "template", "cliques")
+
+	// Get all clique names that belong to scaling groups
+	scalingGroupCliqueNames := v.getScalingGroupCliqueNames()
+
+	for i, cliqueTemplate := range v.pcs.Spec.Template.Cliques {
+		if cliqueTemplate.TerminationDelay == nil {
+			continue
+		}
+
+		cliqueFldPath := fldPath.Index(i).Child("terminationDelay")
+
+		if !gangTerminationEnabled {
+			allErrs = append(allErrs, field.Forbidden(cliqueFldPath,
+				"terminationDelay cannot be set on PodClique when gang termination is disabled at PCS level (spec.template.terminationDelay is not set)"))
+			continue
+		}
+
+		// Check if this PCLQ is part of a PCSG
+		if scalingGroupCliqueNames.Has(cliqueTemplate.Name) {
+			allErrs = append(allErrs, field.Forbidden(cliqueFldPath,
+				"terminationDelay cannot be set on PodClique that is part of a PodCliqueScalingGroup; it inherits from PCSG or PCS level"))
+			continue
+		}
+
+		// Standalone PCLQ with terminationDelay set - must be > 0
+		if cliqueTemplate.TerminationDelay.Duration <= 0 {
+			allErrs = append(allErrs, field.Invalid(cliqueFldPath, cliqueTemplate.TerminationDelay, "terminationDelay must be greater than 0"))
+		}
 	}
 
 	return allErrs

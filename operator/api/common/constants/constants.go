@@ -98,6 +98,9 @@ const (
 	ConditionReasonSufficientAvailablePCSGReplicas = "SufficientAvailablePodCliqueScalingGroupReplicas"
 	// ConditionReasonUpdateInProgress indicates that the resource is undergoing rolling update.
 	ConditionReasonUpdateInProgress = "UpdateInProgress"
+	// ConditionReasonNoTransitionDetected indicates that no transition from healthy to unhealthy was detected.
+	// This is used when ready pods are below MinAvailable but were already below MinAvailable (no transition occurred).
+	ConditionReasonNoTransitionDetected = "NoTransitionDetected"
 )
 
 const (

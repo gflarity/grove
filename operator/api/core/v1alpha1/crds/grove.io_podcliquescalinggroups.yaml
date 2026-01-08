@@ -71,6 +71,11 @@ spec:
                   If not specified, it defaults to 1.
                 format: int32
                 type: integer
+              terminationDelay:
+                description: |-
+                  TerminationDelay is the delay after which gang termination will be triggered for this scaling group.
+                  Copied from PodCliqueScalingGroupConfig.TerminationDelay or inherited from PCS.
+                type: string
             required:
             - cliqueNames
             - replicas

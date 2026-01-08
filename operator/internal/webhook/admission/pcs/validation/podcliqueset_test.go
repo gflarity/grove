@@ -27,6 +27,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	admissionv1 "k8s.io/api/admission/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -531,6 +532,263 @@ func TestImmutableFieldsValidation(t *testing.T) {
 			} else {
 				assert.NoError(t, err, "Expected no validation error for test case: %s", tc.name)
 			}
+		})
+	}
+}
+
+func TestTerminationDelayValidation(t *testing.T) {
+	testCases := []struct {
+		name           string
+		setupPCS       func() *grovecorev1alpha1.PodCliqueSet
+		expectError    bool
+		expectedErrMsg string
+	}{
+		{
+			name: "PCS with terminationDelay nil (disabled) - passes",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				return testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					Build()
+			},
+			expectError: false,
+		},
+		{
+			name: "PCS with valid terminationDelay - passes",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				return testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithTerminationDelay(4 * time.Hour).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					Build()
+			},
+			expectError: false,
+		},
+		{
+			name: "PCS with terminationDelay <= 0 - fails",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				return testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithTerminationDelay(0).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					Build()
+			},
+			expectError:    true,
+			expectedErrMsg: "terminationDelay must be greater than 0",
+		},
+		{
+			name: "PCS terminationDelay nil + PCSG with terminationDelay - fails",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					WithPodCliqueScalingGroupConfig(grovecorev1alpha1.PodCliqueScalingGroupConfig{
+						Name:        "scaling-group",
+						CliqueNames: []string{"worker"},
+					}).
+					Build()
+				// Set PCSG terminationDelay when PCS terminationDelay is nil
+				pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].TerminationDelay = &metav1.Duration{Duration: 1 * time.Hour}
+				return pcs
+			},
+			expectError:    true,
+			expectedErrMsg: "gang termination is disabled at PCS level",
+		},
+		{
+			name: "PCS terminationDelay nil + standalone PCLQ with terminationDelay - fails",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					Build()
+				// Set PCLQ terminationDelay when PCS terminationDelay is nil
+				pcs.Spec.Template.Cliques[0].TerminationDelay = &metav1.Duration{Duration: 1 * time.Hour}
+				return pcs
+			},
+			expectError:    true,
+			expectedErrMsg: "gang termination is disabled at PCS level",
+		},
+		{
+			name: "PCSG with valid terminationDelay (PCS enabled) - passes",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithTerminationDelay(4 * time.Hour).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					WithPodCliqueScalingGroupConfig(grovecorev1alpha1.PodCliqueScalingGroupConfig{
+						Name:        "scaling-group",
+						CliqueNames: []string{"worker"},
+					}).
+					Build()
+				// Set PCSG terminationDelay when PCS has terminationDelay
+				pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].TerminationDelay = &metav1.Duration{Duration: 1 * time.Hour}
+				return pcs
+			},
+			expectError: false,
+		},
+		{
+			name: "PCSG with terminationDelay <= 0 - fails",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithTerminationDelay(4 * time.Hour).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					WithPodCliqueScalingGroupConfig(grovecorev1alpha1.PodCliqueScalingGroupConfig{
+						Name:        "scaling-group",
+						CliqueNames: []string{"worker"},
+					}).
+					Build()
+				pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].TerminationDelay = &metav1.Duration{Duration: 0}
+				return pcs
+			},
+			expectError:    true,
+			expectedErrMsg: "terminationDelay must be greater than 0",
+		},
+		{
+			name: "Standalone PCLQ with valid terminationDelay (PCS enabled) - passes",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithTerminationDelay(4 * time.Hour).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					Build()
+				// Set standalone PCLQ terminationDelay when PCS has terminationDelay
+				pcs.Spec.Template.Cliques[0].TerminationDelay = &metav1.Duration{Duration: 1 * time.Hour}
+				return pcs
+			},
+			expectError: false,
+		},
+		{
+			name: "Standalone PCLQ with terminationDelay <= 0 - fails",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithTerminationDelay(4 * time.Hour).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					Build()
+				pcs.Spec.Template.Cliques[0].TerminationDelay = &metav1.Duration{Duration: 0}
+				return pcs
+			},
+			expectError:    true,
+			expectedErrMsg: "terminationDelay must be greater than 0",
+		},
+		{
+			name: "PCSG-owned PCLQ with terminationDelay set - fails",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				pcs := testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithTerminationDelay(4 * time.Hour).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					WithPodCliqueScalingGroupConfig(grovecorev1alpha1.PodCliqueScalingGroupConfig{
+						Name:        "scaling-group",
+						CliqueNames: []string{"worker"},
+					}).
+					Build()
+				// Set PCSG-owned PCLQ terminationDelay - should fail
+				pcs.Spec.Template.Cliques[0].TerminationDelay = &metav1.Duration{Duration: 1 * time.Hour}
+				return pcs
+			},
+			expectError:    true,
+			expectedErrMsg: "terminationDelay cannot be set on PodClique that is part of a PodCliqueScalingGroup",
+		},
+		{
+			name: "PCSG-owned PCLQ without terminationDelay - passes",
+			setupPCS: func() *grovecorev1alpha1.PodCliqueSet {
+				return testutils.NewPodCliqueSetBuilder("test", "default", uuid.NewUUID()).
+					WithReplicas(1).
+					WithTerminationDelay(4 * time.Hour).
+					WithCliqueStartupType(ptr.To(grovecorev1alpha1.CliqueStartupTypeAnyOrder)).
+					WithPodCliqueTemplateSpec(
+						testutils.NewPodCliqueTemplateSpecBuilder("worker").
+							WithReplicas(1).
+							WithRoleName("worker-role").
+							WithMinAvailable(1).
+							Build()).
+					WithPodCliqueScalingGroupConfig(grovecorev1alpha1.PodCliqueScalingGroupConfig{
+						Name:        "scaling-group",
+						CliqueNames: []string{"worker"},
+					}).
+					Build()
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pcs := tc.setupPCS()
+
+			validator := newPCSValidator(pcs, admissionv1.Create)
+			warnings, err := validator.validate()
+
+			if tc.expectError {
+				assert.Error(t, err, "Expected validation error for test case: %s", tc.name)
+				assert.Contains(t, err.Error(), tc.expectedErrMsg, "Error message should contain expected text")
+			} else {
+				assert.NoError(t, err, "Expected no validation error for test case: %s", tc.name)
+			}
+
+			assert.Empty(t, warnings, "No warnings expected for these test cases")
 		})
 	}
 }

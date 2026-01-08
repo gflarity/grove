@@ -61,8 +61,12 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, logger logr.Logger, pc
 		logger.Error(err, "failed to list PodCliques for PodCliqueScalingGroup")
 		return ctrlcommon.ReconcileWithErrors(fmt.Sprintf("failed to list PodCliques for PodCliqueScalingGroup: %q", client.ObjectKeyFromObject(pcsg)), err)
 	}
+
+	// Capture old AvailableReplicas before mutation for transition-based breach detection
+	oldAvailableReplicas := pcsg.Status.AvailableReplicas
+
 	mutateReplicas(logger, pcs.Status.CurrentGenerationHash, pcsg, pclqsPerPCSGReplica)
-	mutateMinAvailableBreachedCondition(logger, pcsg, pclqsPerPCSGReplica)
+	mutateMinAvailableBreachedCondition(logger, pcsg, oldAvailableReplicas)
 
 	if err = mutateSelector(pcs, pcsg); err != nil {
 		logger.Error(err, "failed to update selector for PodCliqueScalingGroup")
@@ -133,9 +137,11 @@ func computeReplicaStatus(logger logr.Logger, currentPCSGenerationHash *string, 
 	return
 }
 
-// mutateMinAvailableBreachedCondition updates the MinAvailableBreached condition based on replica availability
-func mutateMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) {
-	newCondition := computeMinAvailableBreachedCondition(logger, pcsg, pclqsPerPCSGReplica)
+// mutateMinAvailableBreachedCondition updates the MinAvailableBreached condition based on replica availability.
+// It uses transition-based detection: the condition is set to True only when available replicas
+// transitions from >= MinAvailable to < MinAvailable.
+func mutateMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, oldAvailableReplicas int32) {
+	newCondition := computeMinAvailableBreachedCondition(logger, pcsg, oldAvailableReplicas)
 	if k8sutils.HasConditionChanged(pcsg.Status.Conditions, newCondition) {
 		logger.Info("Updating MinAvailableBreached condition for PodCliqueScalingGroup",
 			"pcsg", client.ObjectKeyFromObject(pcsg),
@@ -147,62 +153,76 @@ func mutateMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1al
 }
 
 // computeMinAvailableBreachedCondition computes the MinAvailableBreached condition for the PodCliqueScalingGroup.
-// If rolling update is under progress, then gang termination for this PCSG is disabled. This is achieved by marking the status to `Unknown`. This PCSG will not influence
-// the gang termination of PCS replica till its update has completed.
-// If the number of scheduled replicas is less than the MinAvailable, then it is too pre-mature to set the MinAvailableBreached condition to true.
-// If we set MinAvailableBreached condition to true, then it can result in pre-mature gang termination when the PodClique Pods are still starting.
-// If there are sufficient scheduled replicas (i.e. scheduledReplicas >= minAvailable), then we can compute the MinAvailableBreached condition based on the number of ready replicas.
-func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) metav1.Condition {
+// Uses transition-based detection: the condition is set to True only when AvailableReplicas
+// transitions from >= MinAvailable to < MinAvailable.
+// If rolling update is under progress, then gang termination for this PCSG is disabled. This is achieved by marking the status to `Unknown`.
+// LastTransitionTime is only updated when the condition status actually changes.
+func computeMinAvailableBreachedCondition(logger logr.Logger, pcsg *grovecorev1alpha1.PodCliqueScalingGroup, oldAvailableReplicas int32) metav1.Condition {
+	existingCondition := meta.FindStatusCondition(pcsg.Status.Conditions, constants.ConditionTypeMinAvailableBreached)
+	now := metav1.Now()
+
+	// Helper to get LastTransitionTime - preserve existing if status unchanged, otherwise use now
+	getLastTransitionTime := func(newStatus metav1.ConditionStatus) metav1.Time {
+		if existingCondition != nil && existingCondition.Status == newStatus {
+			return existingCondition.LastTransitionTime
+		}
+		return now
+	}
+
+	// During an update, the breach condition is Unknown - we cannot be in breach during an update.
 	if componentutils.IsPCSGUpdateInProgress(pcsg) {
 		return metav1.Condition{
-			Type:    constants.ConditionTypeMinAvailableBreached,
-			Status:  metav1.ConditionUnknown,
-			Reason:  constants.ConditionReasonUpdateInProgress,
-			Message: "Update is in progress",
+			Type:               constants.ConditionTypeMinAvailableBreached,
+			Status:             metav1.ConditionUnknown,
+			Reason:             constants.ConditionReasonUpdateInProgress,
+			Message:            "Update is in progress",
+			LastTransitionTime: now,
 		}
 	}
 
 	minAvailable := int(*pcsg.Spec.MinAvailable)
-	scheduledReplicas := int(pcsg.Status.ScheduledReplicas)
-	if scheduledReplicas < minAvailable {
-		return metav1.Condition{
-			Type:    constants.ConditionTypeMinAvailableBreached,
-			Status:  metav1.ConditionFalse,
-			Reason:  constants.ConditionReasonInsufficientScheduledPCSGReplicas,
-			Message: fmt.Sprintf("Insufficient scheduled replicas. expected at least: %d, found: %d", minAvailable, scheduledReplicas),
-		}
-	}
-	minAvailableBreachedReplicas := computeMinAvailableBreachedReplicas(logger, pclqsPerPCSGReplica)
-	availableReplicas := scheduledReplicas - minAvailableBreachedReplicas
-	if availableReplicas < minAvailable {
-		return metav1.Condition{
-			Type:    constants.ConditionTypeMinAvailableBreached,
-			Status:  metav1.ConditionTrue,
-			Reason:  constants.ConditionReasonInsufficientAvailablePCSGReplicas,
-			Message: fmt.Sprintf("Insufficient PodCliqueScalingGroup ready replicas, expected at least: %d, found: %d", minAvailable, availableReplicas),
-		}
-	}
-	return metav1.Condition{
-		Type:    constants.ConditionTypeMinAvailableBreached,
-		Status:  metav1.ConditionFalse,
-		Reason:  constants.ConditionReasonSufficientAvailablePCSGReplicas,
-		Message: fmt.Sprintf("Sufficient PodCliqueScalingGroup ready replicas, expected at least: %d, found: %d", minAvailable, availableReplicas),
-	}
-}
+	currentAvailableReplicas := int(pcsg.Status.AvailableReplicas)
 
-// computeMinAvailableBreachedReplicas counts PCSG replicas that have at least one PodClique with MinAvailable breached
-func computeMinAvailableBreachedReplicas(logger logr.Logger, pclqsPerPCSGReplica map[string][]grovecorev1alpha1.PodClique) int {
-	var breachedReplicas int
-	for pcsgReplicaIndex, pclqs := range pclqsPerPCSGReplica {
-		isMinAvailableBreached := lo.Reduce(pclqs, func(agg bool, pclq grovecorev1alpha1.PodClique, _ int) bool {
-			return agg || k8sutils.IsConditionTrue(pclq.Status.Conditions, constants.ConditionTypeMinAvailableBreached)
-		}, false)
-		if isMinAvailableBreached {
-			breachedReplicas++
+	// Check current state - if healthy, set/maintain False condition
+	if currentAvailableReplicas >= minAvailable {
+		return metav1.Condition{
+			Type:               constants.ConditionTypeMinAvailableBreached,
+			Status:             metav1.ConditionFalse,
+			Reason:             constants.ConditionReasonSufficientAvailablePCSGReplicas,
+			Message:            fmt.Sprintf("Sufficient PodCliqueScalingGroup available replicas. expected at least: %d, found: %d", minAvailable, currentAvailableReplicas),
+			LastTransitionTime: getLastTransitionTime(metav1.ConditionFalse),
 		}
-		logger.Info("PodCliqueScalingGroup replica has MinAvailableBreached condition set to true", "pcsgReplicaIndex", pcsgReplicaIndex, "isMinAvailableBreached", isMinAvailableBreached)
 	}
-	return breachedReplicas
+
+	// Current available < minAvailable
+	// Only set to True if this is a TRANSITION from healthy to unhealthy
+	if int(oldAvailableReplicas) >= minAvailable {
+		// Transition detected: was healthy, now unhealthy - this is a status change, use new timestamp
+		return metav1.Condition{
+			Type:               constants.ConditionTypeMinAvailableBreached,
+			Status:             metav1.ConditionTrue,
+			Reason:             constants.ConditionReasonInsufficientAvailablePCSGReplicas,
+			Message:            fmt.Sprintf("Insufficient PodCliqueScalingGroup available replicas. expected at least: %d, found: %d (was: %d)", minAvailable, currentAvailableReplicas, oldAvailableReplicas),
+			LastTransitionTime: now,
+		}
+	}
+
+	// Was already unhealthy - check existing condition
+	if existingCondition != nil && existingCondition.Status == metav1.ConditionTrue {
+		// Maintain existing True condition (preserve LastTransitionTime for termination delay calculation)
+		return *existingCondition
+	}
+
+	// Edge case: was unhealthy but condition wasn't True (e.g., was Unknown during update)
+	// Now that update is complete, set to False since no transition occurred
+	// Preserve LastTransitionTime if already False
+	return metav1.Condition{
+		Type:               constants.ConditionTypeMinAvailableBreached,
+		Status:             metav1.ConditionFalse,
+		Reason:             constants.ConditionReasonNoTransitionDetected,
+		Message:            fmt.Sprintf("No transition from healthy to unhealthy detected. available replicas: %d, minAvailable: %d", currentAvailableReplicas, minAvailable),
+		LastTransitionTime: getLastTransitionTime(metav1.ConditionFalse),
+	}
 }
 
 // getPodCliquesPerPCSGReplica retrieves and groups PodCliques by their PCSG replica index
@@ -223,8 +243,7 @@ func (r *Reconciler) getPodCliquesPerPCSGReplica(ctx context.Context, pcsName st
 	if err != nil {
 		return nil, err
 	}
-	pclqsPerPCSGReplica := componentutils.GroupPCLQsByPCSGReplicaIndex(pclqs)
-	return pclqsPerPCSGReplica, nil
+	return componentutils.GroupPCLQsByPCSGReplicaIndex(pclqs), nil
 }
 
 // mutateSelector creates and sets the label selector for autoscaler use when scaling is configured

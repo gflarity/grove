@@ -180,6 +180,11 @@ type PodCliqueTemplateSpec struct {
 	// Specification of the desired behavior of a PodClique.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
 	Spec PodCliqueSpec `json:"spec"`
+	// TerminationDelay overrides the PCS-level terminationDelay for this standalone PodClique.
+	// Only valid for PodCliques that are NOT part of a PodCliqueScalingGroup.
+	// If this PodClique is part of a PCSG, this field must not be set.
+	// +optional
+	TerminationDelay *metav1.Duration `json:"terminationDelay,omitempty"`
 }
 
 // TopologyConstraint defines topology placement requirements.
@@ -230,6 +235,10 @@ type PodCliqueScalingGroupConfig struct {
 	// Must be equal to or stricter than parent PodCliqueSet constraints.
 	// +optional
 	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+	// TerminationDelay overrides the PCS-level terminationDelay for this scaling group.
+	// If not specified, inherits from PodCliqueSetTemplateSpec.TerminationDelay.
+	// +optional
+	TerminationDelay *metav1.Duration `json:"terminationDelay,omitempty"`
 }
 
 // HeadlessServiceConfig defines the config options for the headless service.

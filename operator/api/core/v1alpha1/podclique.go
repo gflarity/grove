@@ -76,6 +76,10 @@ type PodCliqueSpec struct {
 	// ScaleConfig is the horizontal pod autoscaler configuration for a PodClique.
 	// +optional
 	ScaleConfig *AutoScalingConfig `json:"autoScalingConfig,omitempty"`
+	// TerminationDelay is the delay after which gang termination will be triggered.
+	// Only set for standalone PodCliques (not part of a PCSG).
+	// +optional
+	TerminationDelay *metav1.Duration `json:"terminationDelay,omitempty"`
 }
 
 // AutoScalingConfig defines the configuration for the horizontal pod autoscaler.

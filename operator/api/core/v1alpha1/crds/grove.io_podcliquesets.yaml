@@ -9237,11 +9237,22 @@ spec:
                               items:
                                 type: string
                               type: array
+                            terminationDelay:
+                              description: |-
+                                TerminationDelay is the delay after which gang termination will be triggered.
+                                Only set for standalone PodCliques (not part of a PCSG).
+                              type: string
                           required:
                           - podSpec
                           - replicas
                           - roleName
                           type: object
+                        terminationDelay:
+                          description: |-
+                            TerminationDelay overrides the PCS-level terminationDelay for this standalone PodClique.
+                            Only valid for PodCliques that are NOT part of a PodCliqueScalingGroup.
+                            If this PodClique is part of a PCSG, this field must not be set.
+                          type: string
                         topologyConstraint:
                           description: |-
                             TopologyConstraint defines topology placement requirements for PodClique.
@@ -9832,6 +9843,11 @@ spec:
                           required:
                           - maxReplicas
                           type: object
+                        terminationDelay:
+                          description: |-
+                            TerminationDelay overrides the PCS-level terminationDelay for this scaling group.
+                            If not specified, inherits from PodCliqueSetTemplateSpec.TerminationDelay.
+                          type: string
                         topologyConstraint:
                           description: |-
                             TopologyConstraint defines topology placement requirements for PodCliqueScalingGroup.

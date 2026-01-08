@@ -21,6 +21,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -724,4 +725,94 @@ func verifyGangTermination(tc TestContext, expectedPods int, originalPodUIDs map
 		}
 		tc.T.Fatalf("Failed to verify gang-termination and recreation: %v", err)
 	}
+}
+
+// Test_GT5_GangTerminationDisabled tests that gang termination does NOT occur when terminationDelay is not set
+// Scenario GT-5:
+// 1. Initialize a 4-node Grove cluster
+// 2. Deploy workload without terminationDelay (gang termination disabled), and verify pods created
+// 3. Wait for pods to get scheduled and become ready
+// 4. Cordon node and then delete 1 ready pod to breach MinAvailable
+// 5. Wait for 2x a reasonable delay
+// 6. Verify that pods are NOT gang-terminated (original pods remain)
+func Test_GT5_GangTerminationDisabled(t *testing.T) {
+	ctx := context.Background()
+
+	logger.Info("1. Initialize a 4-node Grove cluster")
+	totalPods := 3 // pc-a: 2 replicas, pc-b: 1 replica = 3 total
+	clientset, restConfig, dynamicClient, cleanup := prepareTestCluster(ctx, t, totalPods)
+	defer cleanup()
+
+	logger.Info("2. Deploy workload without terminationDelay (gang termination disabled)")
+	tc := TestContext{
+		T:             t,
+		Ctx:           ctx,
+		Clientset:     clientset,
+		RestConfig:    restConfig,
+		DynamicClient: dynamicClient,
+		Namespace:     "default",
+		Timeout:       defaultPollTimeout,
+		Interval:      defaultPollInterval,
+		Workload: &WorkloadConfig{
+			Name:         "workload-no-gt",
+			YAMLPath:     "../yaml/workload-no-gang-termination.yaml",
+			Namespace:    "default",
+			ExpectedPods: totalPods,
+		},
+	}
+
+	pods, err := deployAndVerifyWorkload(tc)
+	if err != nil {
+		t.Fatalf("Failed to deploy workload: %v", err)
+	}
+
+	logger.Info("3. Wait for pods to get scheduled and become ready")
+	if err := waitForReadyPods(tc, totalPods); err != nil {
+		t.Fatalf("Failed to wait for pods to be ready: %v", err)
+	}
+
+	logger.Info("4. Cordon node and delete 1 ready pod to breach MinAvailable")
+	// Refresh pods list to get current ready status
+	pods, err = listPods(tc)
+	if err != nil {
+		t.Fatalf("Failed to refresh pod list: %v", err)
+	}
+
+	// Find a pod from workload-no-gt-0-pc-a podclique
+	targetPod := findReadyPodFromPodClique(pods, "workload-no-gt-0-pc-a")
+	if targetPod == nil {
+		// Debug: List all pods and their cliques
+		logger.Errorf("Failed to find ready pod from workload-no-gt-0-pc-a. Available pods:")
+		for _, pod := range pods.Items {
+			clique := pod.Labels["grove.io/podclique"]
+			logger.Errorf("  Pod %s: clique=%s, phase=%s, ready=%v", pod.Name, clique, pod.Status.Phase, utils.IsPodReady(&pod))
+		}
+		t.Fatalf("Failed to find a ready pod from podclique workload-no-gt-0-pc-a")
+	}
+
+	// Cordon the node where the target pod is running
+	if err := cordonNode(tc, targetPod.Spec.NodeName); err != nil {
+		t.Fatalf("Failed to cordon node %s: %v", targetPod.Spec.NodeName, err)
+	}
+
+	// Capture pod UIDs before deletion
+	originalPodUIDs := capturePodUIDs(pods)
+
+	// Delete the target pod - this will breach MinAvailable (2 required, only 1 remaining)
+	logger.Debugf("Deleting pod %s from node %s", targetPod.Name, targetPod.Spec.NodeName)
+	if err := tc.Clientset.CoreV1().Pods(tc.Namespace).Delete(tc.Ctx, targetPod.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Failed to delete pod %s: %v", targetPod.Name, err)
+	}
+
+	// Wait for 2x gang termination delay -  gang termination would have happened by now if enabled
+	waitTime := 2 * TerminationDelay
+	logger.Infof("5. Wait for %v to verify gang termination does NOT occur", waitTime)
+	time.Sleep(waitTime)
+
+	logger.Info("6. Verify that pods are NOT gang-terminated (original pods remain)")
+	// With gang termination disabled, at least 2 original pods should remain
+	// (we only deleted 1 pod, so 2 out of 3 original pods should still exist)
+	verifyNoGangTermination(tc, 2, originalPodUIDs)
+
+	logger.Info("🎉 Gang-termination disabled test (GT-5) completed successfully!")
 }

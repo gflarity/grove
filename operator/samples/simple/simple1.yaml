@@ -4,6 +4,11 @@
 #    These PodCliques will not be auto-scaled individually, but rather as a group. An HPA resource will be created for
 #    the `PodCliqueScalingGroup` that represents this grouping of PodCliques.
 # 3. PodCliques that are neither auto-scaled individually nor do they belong to a PodCliqueScalingGroup. `pcd` is configured without auto-scaling.
+#
+# Note: Gang termination is DISABLED by default in this example because terminationDelay is not set.
+# To enable gang termination, add `terminationDelay` to spec.template (e.g., terminationDelay: 4h).
+# Gang termination will delete and recreate the entire PodGang when MinAvailable is breached for
+# longer than the terminationDelay period.
 ---
 apiVersion: grove.io/v1alpha1
 kind: PodCliqueSet

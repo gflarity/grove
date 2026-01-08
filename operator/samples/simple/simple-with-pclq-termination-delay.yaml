@@ -1,0 +1,63 @@
+# This PodCliqueSet demonstrates standalone PCLQ-level terminationDelay overrides.
+#
+# Gang Termination Behavior:
+# - Gang termination is ENABLED because spec.template.terminationDelay is set (20m default)
+# - Standalone PCLQ pc-fast overrides with a shorter terminationDelay of 5m
+# - Standalone PCLQ pc-slow overrides with a longer terminationDelay of 1h
+# - Standalone PCLQ pc-default inherits the PCS default of 20m
+#
+# IMPORTANT: Only standalone PCLQs (not part of any PCSG) can have terminationDelay set.
+# PCLQs that are part of a PCSG inherit from the PCSG or PCS level.
+#
+# When MinAvailable is breached for a PCLQ:
+# - pc-fast pods will be gang-terminated after 5 minutes
+# - pc-slow pods will be gang-terminated after 1 hour
+# - pc-default pods will be gang-terminated after 20 minutes (PCS default)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: simple-pclq-td
+  labels:
+    app: simple-pclq-td
+spec:
+  replicas: 1
+  template:
+    terminationDelay: 20m  # Default termination delay for the workload
+    cliques:
+      - name: pc-fast
+        terminationDelay: 5m  # Override: faster termination (5 min vs 20 min default)
+        spec:
+          roleName: role-fast
+          replicas: 2
+          podSpec:
+            containers:
+              - name: pc-fast
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+      - name: pc-slow
+        terminationDelay: 1h  # Override: slower termination (1 hour vs 20 min default)
+        spec:
+          roleName: role-slow
+          replicas: 2
+          podSpec:
+            containers:
+              - name: pc-slow
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+      - name: pc-default
+        # No terminationDelay set - inherits PCS default of 20m
+        spec:
+          roleName: role-default
+          replicas: 2
+          podSpec:
+            containers:
+              - name: pc-default
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m

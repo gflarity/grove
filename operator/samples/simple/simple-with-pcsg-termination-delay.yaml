@@ -1,0 +1,67 @@
+# This PodCliqueSet demonstrates PCSG-level terminationDelay overrides.
+#
+# Gang Termination Behavior:
+# - Gang termination is ENABLED because spec.template.terminationDelay is set (20m default)
+# - PCSG sg-fast overrides with a shorter terminationDelay of 5m
+# - PCSG sg-slow overrides with a longer terminationDelay of 1h
+#
+# When MinAvailable is breached for a PCSG:
+# - sg-fast pods will be gang-terminated after 5 minutes
+# - sg-slow pods will be gang-terminated after 1 hour
+# - Standalone PCLQs (pca) will use the PCS default of 20 minutes
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: simple-pcsg-td
+  labels:
+    app: simple-pcsg-td
+spec:
+  replicas: 1
+  template:
+    terminationDelay: 20m  # Default termination delay for the workload
+    cliques:
+      - name: pca
+        # pca is a standalone PCLQ (not in any PCSG)
+        # It inherits the PCS-level terminationDelay of 20m
+        spec:
+          roleName: rolea
+          replicas: 2
+          podSpec:
+            containers:
+              - name: pca
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+      - name: pcb-fast
+        spec:
+          roleName: roleb
+          replicas: 2
+          podSpec:
+            containers:
+              - name: pcb
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+      - name: pcc-slow
+        spec:
+          roleName: rolec
+          replicas: 2
+          podSpec:
+            containers:
+              - name: pcc
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+    podCliqueScalingGroups:
+      - name: sg-fast
+        cliqueNames:
+          - pcb-fast
+        terminationDelay: 5m  # Override: faster termination (5 min vs 20 min default)
+      - name: sg-slow
+        cliqueNames:
+          - pcc-slow
+        terminationDelay: 1h  # Override: slower termination (1 hour vs 20 min default)

@@ -88,16 +88,20 @@ func GroupPCLQsByPCSReplicaIndex(pclqs []grovecorev1alpha1.PodClique) map[string
 
 // GetMinAvailableBreachedPCLQInfo filters PodCliques that have grovecorev1alpha1.ConditionTypeMinAvailableBreached set to true.
 // For each such PodClique it returns the name of the PodClique a duration to wait for before terminationDelay is breached.
-func GetMinAvailableBreachedPCLQInfo(pclqs []grovecorev1alpha1.PodClique, terminationDelay time.Duration, since time.Time) ([]string, time.Duration) {
+// Uses per-PCLQ termination delay (PCLQ-level or inherited from PCS).
+func GetMinAvailableBreachedPCLQInfo(pcs *grovecorev1alpha1.PodCliqueSet, pclqs []grovecorev1alpha1.PodClique, since time.Time) ([]string, time.Duration) {
 	pclqCandidateNames := make([]string, 0, len(pclqs))
 	waitForDurations := make([]time.Duration, 0, len(pclqs))
-	for _, pclq := range pclqs {
+	for i := range pclqs {
+		pclq := &pclqs[i]
 		cond := meta.FindStatusCondition(pclq.Status.Conditions, constants.ConditionTypeMinAvailableBreached)
 		if cond == nil {
 			continue
 		}
 		if cond.Status == metav1.ConditionTrue {
 			pclqCandidateNames = append(pclqCandidateNames, pclq.Name)
+			// Get effective termination delay for this PCLQ
+			terminationDelay, _ := GetEffectiveTerminationDelayForPCLQ(pcs, pclq)
 			waitFor := terminationDelay - since.Sub(cond.LastTransitionTime.Time)
 			waitForDurations = append(waitForDurations, waitFor)
 		}

@@ -8927,6 +8927,11 @@ spec:
                 items:
                   type: string
                 type: array
+              terminationDelay:
+                description: |-
+                  TerminationDelay is the delay after which gang termination will be triggered.
+                  Only set for standalone PodCliques (not part of a PCSG).
+                type: string
             required:
             - podSpec
             - replicas

@@ -68,6 +68,10 @@ type PodCliqueScalingGroupSpec struct {
 	// CliqueNames is the list of PodClique names that are configured in the
 	// matching PodCliqueScalingGroup in PodCliqueSet.Spec.Template.PodCliqueScalingGroupConfigs.
 	CliqueNames []string `json:"cliqueNames"`
+	// TerminationDelay is the delay after which gang termination will be triggered for this scaling group.
+	// Copied from PodCliqueScalingGroupConfig.TerminationDelay or inherited from PCS.
+	// +optional
+	TerminationDelay *metav1.Duration `json:"terminationDelay,omitempty"`
 }
 
 // PodCliqueScalingGroupStatus is the status of the PodCliqueScalingGroup.

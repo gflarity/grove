@@ -212,6 +212,9 @@ func (r _resource) buildResource(pcsg *grovecorev1alpha1.PodCliqueScalingGroup, 
 	}
 	pcsg.Spec.MinAvailable = pcsgConfig.MinAvailable
 	pcsg.Spec.CliqueNames = pcsgConfig.CliqueNames
+	// Propagate TerminationDelay from PodCliqueScalingGroupConfig to PCSG spec.
+	// If nil, PCSG inherits from PCS at runtime.
+	pcsg.Spec.TerminationDelay = pcsgConfig.TerminationDelay
 	pcsg.Labels = getLabels(pcs, pcsReplica, client.ObjectKeyFromObject(pcsg))
 	return nil
 }

@@ -103,66 +103,72 @@ func TestComputeReplicaStatus(t *testing.T) {
 
 func TestComputeMinAvailableBreachedCondition(t *testing.T) {
 	tests := []struct {
-		name         string
-		replicas     int32
-		minAvailable *int32
-		scheduled    int32
-		available    int32
-		pclqsMap     map[string][]grovecorev1alpha1.PodClique
-		wantStatus   metav1.ConditionStatus
-		wantReason   string
+		name              string
+		replicas          int32
+		minAvailable      *int32
+		available         int32
+		oldAvailable      int32
+		existingCondition *metav1.Condition
+		wantStatus        metav1.ConditionStatus
+		wantReason        string
 	}{
 		{
-			name:       "sufficient replicas",
-			replicas:   3,
-			scheduled:  3,
-			available:  3,
-			pclqsMap:   make(map[string][]grovecorev1alpha1.PodClique),
-			wantStatus: metav1.ConditionFalse,
-			wantReason: "SufficientAvailablePodCliqueScalingGroupReplicas",
+			name:         "sufficient replicas - healthy",
+			replicas:     3,
+			available:    3,
+			oldAvailable: 3,
+			wantStatus:   metav1.ConditionFalse,
+			wantReason:   "SufficientAvailablePodCliqueScalingGroupReplicas",
 		},
 		{
 			name:         "custom minAvailable met",
 			replicas:     5,
 			minAvailable: ptr.To(int32(2)),
-			scheduled:    3,
 			available:    3,
-			pclqsMap:     make(map[string][]grovecorev1alpha1.PodClique),
+			oldAvailable: 3,
 			wantStatus:   metav1.ConditionFalse,
 			wantReason:   "SufficientAvailablePodCliqueScalingGroupReplicas",
 		},
 		{
-			name:         "insufficient scheduled",
+			name:         "transition from healthy to unhealthy - sets True",
 			replicas:     3,
 			minAvailable: ptr.To(int32(2)),
-			scheduled:    1,
 			available:    1,
-			pclqsMap:     make(map[string][]grovecorev1alpha1.PodClique),
-			wantStatus:   metav1.ConditionFalse,
-			wantReason:   "InsufficientScheduledPodCliqueScalingGroupReplicas",
+			oldAvailable: 3, // was healthy
+			wantStatus:   metav1.ConditionTrue,
+			wantReason:   "InsufficientAvailablePodCliqueScalingGroupReplicas",
 		},
 		{
-			name:         "insufficient available",
+			name:         "already unhealthy - preserves existing True condition",
 			replicas:     3,
 			minAvailable: ptr.To(int32(2)),
-			scheduled:    2,
 			available:    1,
-			pclqsMap: map[string][]grovecorev1alpha1.PodClique{
-				"0": {
-					{
-						Status: grovecorev1alpha1.PodCliqueStatus{
-							Conditions: []metav1.Condition{
-								{
-									Type:   constants.ConditionTypeMinAvailableBreached,
-									Status: metav1.ConditionTrue,
-								},
-							},
-						},
-					},
-				},
+			oldAvailable: 1, // was already unhealthy
+			existingCondition: &metav1.Condition{
+				Type:   constants.ConditionTypeMinAvailableBreached,
+				Status: metav1.ConditionTrue,
+				Reason: constants.ConditionReasonInsufficientAvailablePCSGReplicas,
 			},
 			wantStatus: metav1.ConditionTrue,
 			wantReason: "InsufficientAvailablePodCliqueScalingGroupReplicas",
+		},
+		{
+			name:         "already unhealthy with no existing condition - sets False (no transition)",
+			replicas:     3,
+			minAvailable: ptr.To(int32(2)),
+			available:    1,
+			oldAvailable: 1, // was already unhealthy
+			wantStatus:   metav1.ConditionFalse,
+			wantReason:   "NoTransitionDetected",
+		},
+		{
+			name:         "recovery from unhealthy to healthy",
+			replicas:     3,
+			minAvailable: ptr.To(int32(2)),
+			available:    3,
+			oldAvailable: 1, // was unhealthy
+			wantStatus:   metav1.ConditionFalse,
+			wantReason:   "SufficientAvailablePodCliqueScalingGroupReplicas",
 		},
 	}
 
@@ -178,12 +184,16 @@ func TestComputeMinAvailableBreachedCondition(t *testing.T) {
 					MinAvailable: minAvailable,
 				},
 				Status: grovecorev1alpha1.PodCliqueScalingGroupStatus{
-					ScheduledReplicas: tt.scheduled,
 					AvailableReplicas: tt.available,
 				},
 			}
 
-			condition := computeMinAvailableBreachedCondition(logr.Discard(), pcsg, tt.pclqsMap)
+			// Set existing condition if provided
+			if tt.existingCondition != nil {
+				pcsg.Status.Conditions = []metav1.Condition{*tt.existingCondition}
+			}
+
+			condition := computeMinAvailableBreachedCondition(logr.Discard(), pcsg, tt.oldAvailable)
 
 			assert.Equal(t, "MinAvailableBreached", condition.Type)
 			assert.Equal(t, tt.wantStatus, condition.Status)
@@ -279,13 +289,15 @@ func TestReconcileStatus(t *testing.T) {
 			wantBreached:  false,
 		},
 		{
-			name: "mixed replica states",
+			name: "mixed replica states - transition from healthy to unhealthy",
 			setup: func() (*grovecorev1alpha1.PodCliqueScalingGroup, *grovecorev1alpha1.PodCliqueSet, []client.Object) {
 				pcsg := testutils.NewPodCliqueScalingGroupBuilder("test-pcsg", "test-ns", "test-pcs", 0).
 					WithReplicas(3).
 					WithCliqueNames([]string{"worker"}).
 					WithMinAvailable(2).
 					WithOptions(testutils.WithPCSGObservedGeneration(1)).Build()
+				// Set oldAvailableReplicas to 2 to simulate transition from healthy to unhealthy
+				pcsg.Status.AvailableReplicas = 2
 				pcs := testutils.NewPodCliqueSetBuilder("test-pcs", "test-ns", uuid.NewUUID()).WithPodCliqueSetGenerationHash(&pcsGenerationHash).Build()
 				cliques := []client.Object{
 					testutils.NewPCSGPodCliqueBuilder("test-pcs-0-worker-0", "test-ns", "test-pcs", "test-pcsg", 0, 0).

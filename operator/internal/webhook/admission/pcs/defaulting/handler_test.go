@@ -101,7 +101,7 @@ func TestDefault(t *testing.T) {
 			},
 		},
 		{
-			name: "PodCliqueSet without startup type gets default",
+			name: "PodCliqueSet without startup type gets defaults applied",
 			obj: &grovecorev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-pcs",
@@ -147,8 +147,10 @@ func TestDefault(t *testing.T) {
 			verify: func(t *testing.T, obj runtime.Object) {
 				pcs, ok := obj.(*grovecorev1alpha1.PodCliqueSet)
 				require.True(t, ok)
-				// Verify that the termination delay is set (this is one of the defaults applied)
-				assert.NotNil(t, pcs.Spec.Template.TerminationDelay)
+				// Verify that minAvailable is set (this is one of the defaults applied)
+				assert.NotNil(t, pcs.Spec.Template.Cliques[0].Spec.MinAvailable)
+				// TerminationDelay is NOT defaulted - if nil, gang termination is disabled
+				assert.Nil(t, pcs.Spec.Template.TerminationDelay)
 			},
 		},
 		{
