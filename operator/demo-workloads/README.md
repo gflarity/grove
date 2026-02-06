@@ -23,10 +23,12 @@ kubectl get pcs image-error-typo-registry -o yaml | grep -A 10 lastErrors
 
 ```
 demo-workloads/
-├── base/                    # ✅ Working examples to start with
-│   ├── simple-pcs.yaml     # Basic 3-pod gang
-│   ├── multi-gang-pcs.yaml # Multiple roles (web, worker, db)
-│   └── pcs-with-pcsg.yaml  # Full hierarchy demo
+├── base/                              # ✅ Working examples to start with
+│   ├── simple-pcs.yaml               # Basic 3-pod gang
+│   ├── multi-gang-pcs.yaml           # Multiple roles (web, worker, db)
+│   ├── pcs-with-pcsg.yaml            # Full hierarchy demo
+│   ├── topology-pcs.yaml             # Topology-aware (rack packing)
+│   └── topology-multi-level-pcs.yaml # Per-clique topology constraints
 │
 ├── errors/                  # ❌ Error scenarios organized by type
 │   ├── group1-image/       # Image pull errors (wrong registry, bad tag, etc.)
@@ -71,6 +73,23 @@ grovectl describe pcs <resource-name>
 # Analyze errors
 grovectl analyze <resource-name>
 ```
+
+## 🌐 Topology Demos
+
+The `base/` directory includes two topology-aware demos that require a cluster set up via `setup-cluster` (which provides topology labels on nodes, the kai-scheduler, and a topology-enabled Grove operator).
+
+### Single-Level Topology (`base/topology-pcs.yaml`)
+- **PCS-level** rack constraint — all pods pack into the same rack
+- 4 pods total (2 worker + 2 router), with a PCSG managing workers
+- **Minimum 7 worker nodes** with rack/block topology labels
+
+### Multi-Level Topology (`base/topology-multi-level-pcs.yaml`)
+- **Per-clique** topology constraints — each clique can target a different topology level
+- `worker-rack` (3 pods) packs by rack, `worker-block` (4 pods) packs by block
+- Demonstrates independent topology constraints within a single PodCliqueSet
+- **Minimum 28 worker nodes** with rack/block topology labels
+
+> **Note:** These demos use `kai-scheduler`, the `registry:5001/nginx:alpine-slim` image (pre-loaded by setup-cluster), and require node affinity/tolerations for the tainted worker nodes. See each YAML file for full quick-start instructions.
 
 ## 🔧 Special Setup Required
 

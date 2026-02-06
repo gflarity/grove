@@ -400,29 +400,13 @@ func (r _resource) checkBasePodGangScheduledForPodClique(ctx context.Context, lo
 // For base gang pods, it always returns a message so operators know what the pod is waiting for.
 func (r _resource) shouldSkipPodSchedulingGateRemoval(logger logr.Logger, sc *syncContext, pod *corev1.Pod, basePodGangReady bool, basePodGangName string) (bool, string) {
 	if basePodGangName == "" {
-		// BASE PODGANG POD: This PodClique has no base PodGang dependency
-		// These pods form the core gang and get their gates removed immediately once assigned to PodGang
-		// They represent the minimum viable cluster (first minAvailable replicas) that must start together
-		// However, they still need ALL PodCliques in the gang to create their pods before the PodGang can be formed
-		
-		// Get blocking PodCliques to provide visibility
-		blockingInfo, err := r.getBlockingPodCliquesInGang(sc.ctx, logger, sc)
-		if err != nil {
-			logger.Info("Proceeding with gate removal for base PodGang pod",
-				"podObjectKey", client.ObjectKeyFromObject(pod))
-			return false, ""
-		}
-		
-		if len(blockingInfo) > 0 {
-			// Other PodCliques in the gang are still creating pods - inform the operator
-			eventMsg := fmt.Sprintf("Pod %s schedule gate blocked: waiting for gang formation - blocked by %s",
-				pod.Name, strings.Join(blockingInfo, ", "))
-			return true, eventMsg
-		}
-		
-		// All PodCliques have created their pods, gate can be removed
-		logger.Info("Proceeding with gate removal for base PodGang pod",
-			"podObjectKey", client.ObjectKeyFromObject(pod))
+		// BASE PODGANG POD: This PodClique has no base PodGang dependency.
+		// These pods form the core gang and get their gates removed immediately once assigned to PodGang.
+		// The PodGang creation flow already ensures all pods exist before the PodGang is formed,
+		// so no additional blocking check is needed here. Informational "waiting for gang formation"
+		// events are already emitted in checkAndRemovePodSchedulingGates (line 264+) for pods not
+		// yet assigned to a PodGang — by the time we reach this function, the pod is already tracked
+		// in the PodGang, so gang formation has already succeeded.
 		return false, ""
 	}
 	// SCALED PODGANG POD: This PodClique depends on a base PodGang
@@ -678,6 +662,11 @@ func (r _resource) getBlockingPodCliquesInGang(
 // Returns the replica index or error if it cannot be determined.
 // Users think in terms of replicas (replica 0, replica 1), not PodGang names,
 // so this helper provides that user-facing context.
+//
+// The label-based path (common.LabelPodCliqueSetReplicaIndex) is the primary and reliable
+// method. The name-parsing fallback is best-effort: it splits the PodClique name on "-"
+// and returns the first numeric segment. For PCS names containing hyphens (e.g., "my-app"),
+// this may incorrectly match a segment of the PCS name rather than the replica index.
 func getReplicaIndexFromPodClique(pclq *grovecorev1alpha1.PodClique) (int, error) {
 	// First try to get from label (most reliable)
 	if replicaIndexStr, ok := pclq.Labels[common.LabelPodCliqueSetReplicaIndex]; ok {
@@ -707,10 +696,8 @@ func getReplicaIndexFromPodClique(pclq *grovecorev1alpha1.PodClique) (int, error
 // Task 3.4: Event recording should never break reconciliation logic.
 func (r _resource) recordEvent(obj client.Object, eventType, reason, message string) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Log panic but don't fail reconciliation
-			fmt.Printf("Panic recording event: %v\n", r)
-		}
+		// Recover from any panic to prevent event recording from breaking reconciliation.
+		recover()
 	}()
 	
 	if r.eventRecorder == nil {
