@@ -29,6 +29,7 @@ type Resource struct {
 	ParentType string
 	ParentName string
 	YAML       string // For Pod detail view
+	Topology   string // Topology display: "rack" (explicit), "(rack)" (inherited), or "N/A"
 }
 
 // Event represents a Kubernetes event
@@ -111,6 +112,12 @@ func (k *K8sClient) GetAllPodCliqueSets(ctx context.Context) ([]Resource, error)
 		ready := fmt.Sprintf("%d/%d", availableReplicas, replicas)
 		scheduled := fmt.Sprintf("%d/%d", scheduledReplicas, replicas)
 
+		// Topology: PCS is top-level, so it's always explicit or N/A
+		topology := "N/A"
+		if pcs.Spec.Template.TopologyConstraint != nil {
+			topology = string(pcs.Spec.Template.TopologyConstraint.PackDomain)
+		}
+
 		resources = append(resources, Resource{
 			Name:      pcs.Name,
 			Type:      "PodCliqueSet",
@@ -118,10 +125,110 @@ func (k *K8sClient) GetAllPodCliqueSets(ctx context.Context) ([]Resource, error)
 			Scheduled: scheduled,
 			Status:    "",
 			Namespace: pcs.Namespace,
+			Topology:  topology,
 		})
 	}
 
 	return resources, nil
+}
+
+// GetClusterTopology fetches the grove-topology ClusterTopology CR.
+// Returns (nil, nil) if the CRD or CR doesn't exist (TAS not configured).
+func (k *K8sClient) GetClusterTopology(ctx context.Context) (*corev1alpha1.ClusterTopology, error) {
+	gvr := schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "clustertopologies",
+	}
+
+	result, err := k.dynamicClient.Resource(gvr).Get(ctx, corev1alpha1.DefaultClusterTopologyName, metav1.GetOptions{})
+	if err != nil {
+		// ClusterTopology CRD or CR may not exist if TAS is not configured — not an error
+		return nil, nil //nolint:nilerr
+	}
+
+	var ct corev1alpha1.ClusterTopology
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(result.Object, &ct); err != nil {
+		return nil, nil //nolint:nilerr
+	}
+
+	return &ct, nil
+}
+
+// GetAllNodeLabels fetches all nodes and returns a map of nodeName -> labels.
+// Only topology-relevant labels (matching the provided keys) are included.
+func (k *K8sClient) GetAllNodeLabels(ctx context.Context, topologyKeys []string) (map[string]map[string]string, error) {
+	nodes, err := k.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	keySet := make(map[string]bool, len(topologyKeys))
+	for _, key := range topologyKeys {
+		keySet[key] = true
+	}
+
+	result := make(map[string]map[string]string, len(nodes.Items))
+	for _, node := range nodes.Items {
+		nodeLabels := make(map[string]string)
+		for k, v := range node.Labels {
+			if keySet[k] {
+				nodeLabels[k] = v
+			}
+		}
+		result[node.Name] = nodeLabels
+	}
+
+	return result, nil
+}
+
+// CachedPodInfo holds cached pod information for topology value resolution.
+type CachedPodInfo struct {
+	NodeName string
+	Labels   map[string]string
+}
+
+// GetPodInfoForPCS fetches all pods belonging to a PCS and returns cached info.
+func (k *K8sClient) GetPodInfoForPCS(ctx context.Context, pcsName, namespace string) (map[string]CachedPodInfo, error) {
+	labelSelector := fmt.Sprintf("app.kubernetes.io/part-of=%s", pcsName)
+
+	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods for PCS %s: %w", pcsName, err)
+	}
+
+	result := make(map[string]CachedPodInfo, len(pods.Items))
+	for _, pod := range pods.Items {
+		result[pod.Name] = CachedPodInfo{
+			NodeName: pod.Spec.NodeName,
+			Labels:   pod.Labels,
+		}
+	}
+
+	return result, nil
+}
+
+// GetPodCliqueSet fetches a single PodCliqueSet by name and namespace
+func (k *K8sClient) GetPodCliqueSet(ctx context.Context, name, namespace string) (*corev1alpha1.PodCliqueSet, error) {
+	gvr := schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "podcliquesets",
+	}
+
+	unstructured, err := k.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PodCliqueSet %s/%s: %w", namespace, name, err)
+	}
+
+	var pcs corev1alpha1.PodCliqueSet
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructured.Object, &pcs); err != nil {
+		return nil, fmt.Errorf("failed to convert PodCliqueSet: %w", err)
+	}
+
+	return &pcs, nil
 }
 
 // GetEventsForPodCliqueSetReplica fetches events for resources related to a specific replica of a PodCliqueSet
