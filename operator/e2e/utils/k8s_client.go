@@ -77,7 +77,11 @@ func ApplyYAMLFile(ctx context.Context, yamlFilePath string, namespace string, r
 // namespace parameter is optional - pass empty string to use namespace from YAML
 func ApplyYAMLString(ctx context.Context, yamlContent string, namespace string, restConfig *rest.Config, logger *Logger) ([]AppliedResource, error) {
 	logger.Debug("📄 Applying resources from YAML string...")
-	return applyYAMLData(ctx, []byte(yamlContent), namespace, restConfig, logger)
+	dynamicClient, restMapper, err := CreateKubernetesClients(restConfig)
+	if err != nil {
+		return nil, err
+	}
+	return ApplyYAMLData(ctx, []byte(yamlContent), namespace, dynamicClient, restMapper, logger)
 }
 
 // WaitForPods waits for pods to be ready in the specified namespaces

@@ -91,9 +91,13 @@ func managedPodCliquePredicate() predicate.Predicate {
 			if !grovectrlutils.IsManagedPodClique(e.ObjectOld, expectedOwnerKinds...) {
 				return false
 			}
-			// Allow reconciliation for status-only updates that indicate operational state changes
-			// (e.g., schedule-gated pods that need periodic reconciliation)
-			return true
+			// Trigger reconciliation on generation changes (spec updates)
+			if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+				return true
+			}
+			// Trigger reconciliation on ScheduleGatedReplicas changes so that
+			// schedule gate removal is retried without reconciling on every status update.
+			return scheduleGatedReplicasChanged(e)
 		},
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 	}
@@ -323,4 +327,14 @@ func isMarkedForDeletion(updateEvent event.UpdateEvent) bool {
 	}
 
 	return oldPod.DeletionTimestamp == nil && newPod.DeletionTimestamp != nil
+}
+
+// scheduleGatedReplicasChanged checks if the PodClique's ScheduleGatedReplicas status field has changed
+func scheduleGatedReplicasChanged(e event.UpdateEvent) bool {
+	oldPCLQ, okOld := e.ObjectOld.(*grovecorev1alpha1.PodClique)
+	newPCLQ, okNew := e.ObjectNew.(*grovecorev1alpha1.PodClique)
+	if !okOld || !okNew {
+		return false
+	}
+	return oldPCLQ.Status.ScheduleGatedReplicas != newPCLQ.Status.ScheduleGatedReplicas
 }

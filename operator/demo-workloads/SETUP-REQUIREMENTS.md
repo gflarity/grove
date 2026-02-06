@@ -31,6 +31,34 @@ This document summarizes which demo scenarios require special setup.
 - **Quick Start Instructions**: ✅ Noted that custom scheduler may be required
 - **Note**: This is more of a limitation than a setup step
 
+### 4. Topology Demo - Single-Level (`base/topology-pcs.yaml`)
+- **Setup Required**: Cluster created via `setup-cluster` with topology enabled
+- **Quick Start Instructions**: ✅ Clearly documented in YAML header
+- **Requirements**:
+  - `setup-cluster` provides topology labels on nodes, kai-scheduler, and topology-enabled Grove operator
+  - At least 7 worker nodes with rack/block topology labels
+  - Nodes are tainted; workloads use affinity/tolerations to target them
+- **Commands**:
+  ```bash
+  kubectl apply -f base/topology-pcs.yaml
+  # Verify all 4 pods land in the same rack
+  kubectl get pods -l app.kubernetes.io/part-of=topology-pcs -o wide
+  ```
+
+### 5. Topology Demo - Multi-Level (`base/topology-multi-level-pcs.yaml`)
+- **Setup Required**: Cluster created via `setup-cluster` with topology enabled
+- **Quick Start Instructions**: ✅ Clearly documented in YAML header
+- **Requirements**:
+  - `setup-cluster` provides topology labels on nodes, kai-scheduler, and topology-enabled Grove operator
+  - At least 28 worker nodes with rack/block topology labels
+  - Nodes are tainted; workloads use affinity/tolerations to target them
+- **Commands**:
+  ```bash
+  kubectl apply -f base/topology-multi-level-pcs.yaml
+  # Verify worker-rack pods share a rack, worker-block pods share a block
+  kubectl get pods -l app.kubernetes.io/part-of=topology-multi-level-pcs -o wide
+  ```
+
 ## ✅ All Other Scenarios
 
 All other demo scenarios are self-contained and require no special setup:

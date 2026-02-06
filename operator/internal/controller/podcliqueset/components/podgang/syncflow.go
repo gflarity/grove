@@ -795,10 +795,15 @@ func getPendingPodsSummary(sc *syncContext, podGang *podGangInfo) map[string]int
 }
 
 // extractReplicaIndexFromPodGangName extracts the replica index from a PodGang name.
-// Task 4.3: Helper to extract replica index from PodGang name.
 // PodGang names follow patterns:
 // - Base gang: "<pcs-name>-<replica-index>" (e.g., "my-app-0")
 // - Scaled gang: "<pcs-name>-<replica-index>-<pcsg-name>-<gang-index>" (e.g., "my-app-0-sga-0")
+//
+// Known limitation: This function assumes the PCS name does not contain hyphens.
+// For hyphenated PCS names (e.g., "my-app"), the second part after splitting on "-"
+// will not be the replica index, and this function will silently return -1.
+// The label-based path (via getReplicaIndexFromPodClique) is the reliable alternative
+// and should always be preferred when a PodClique object is available.
 func extractReplicaIndexFromPodGangName(podGangName string) int {
 	parts := strings.Split(podGangName, "-")
 	if len(parts) < 2 {
