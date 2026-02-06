@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"os"
+	rtdebug "runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -51,28 +55,34 @@ type ViewState struct {
 // App encapsulates the split-pane application
 type App struct {
 	*tview.Application
-	activePane     Pane
-	resourcesTable *tview.Table
-	resourcesView  *tview.TextView // For Pod YAML view
-	eventsTable    *tview.Table
-	statusBar      *tview.TextView
-	mainFlex       *tview.Flex // Main layout container
-	viewState      ViewState
-	allResources   map[string][]Resource // Key is parent identifier
-	allEvents      []Event
-	podYAMLData    map[string]string // Pod name -> YAML content
-	k8sClient      *K8sClient        // Kubernetes client
-	ctx            context.Context   // Context for K8s operations
+	activePane         Pane
+	resourcesTable     *tview.Table
+	resourcesView      *tview.TextView // For Pod YAML view
+	eventsTable        *tview.Table
+	statusBar          *tview.TextView
+	mainFlex           *tview.Flex // Main layout container
+	viewState          ViewState
+	allResources       map[string][]Resource // Key is parent identifier
+	allEvents          []Event
+	podYAMLData        map[string]string // Pod name -> YAML content
+	k8sClient          *K8sClient                  // Kubernetes client
+	ctx                context.Context             // Context for K8s operations
+	cachedTopologyInfo *TopologyInfo               // Cached topology info from current PCS
+	cachedPods         map[string]CachedPodInfo    // Pod name -> info (for current PCS)
+	cachedNodeLabels   map[string]map[string]string // Node name -> topology labels
 }
 
 func NewApp() *App {
 	// Initialize Kubernetes client
+	debugLog("initializing Kubernetes client")
 	k8sClient, err := NewK8sClient()
 	if err != nil {
 		// If we can't connect to Kubernetes, show an error but don't crash
 		// The app will show empty data
-		fmt.Printf("Warning: Failed to initialize Kubernetes client: %v\n", err)
+		debugLog("WARNING: failed to initialize Kubernetes client: %v", err)
 		k8sClient = nil
+	} else {
+		debugLog("Kubernetes client initialized successfully")
 	}
 
 	app := &App{
@@ -88,8 +98,10 @@ func NewApp() *App {
 	}
 
 	// Load initial data
+	debugLog("loading initial forest data")
 	app.loadForestData()
 
+	debugLog("NewApp complete, viewState=%+v", app.viewState)
 	return app
 }
 
@@ -97,17 +109,21 @@ func NewApp() *App {
 func (a *App) loadForestData() {
 	if a.k8sClient == nil {
 		// No K8s client, show empty data
+		debugLog("loadForestData: no K8s client, showing empty data")
 		a.allResources["forest"] = []Resource{}
 		return
 	}
+
+	debugLog("loadForestData: fetching all PodCliqueSets")
 
 	resources, err := a.k8sClient.GetAllPodCliqueSets(a.ctx)
 	if err != nil {
-		fmt.Printf("Error loading PodCliqueSets: %v\n", err)
+		debugLog("ERROR loading PodCliqueSets: %v", err)
 		a.allResources["forest"] = []Resource{}
 		return
 	}
 
+	debugLog("loaded %d PodCliqueSets", len(resources))
 	a.allResources["forest"] = resources
 }
 
@@ -122,8 +138,10 @@ func (a *App) loadPodCliqueSetReplicas(pcsName, namespace string) {
 	// Get all replica indexes
 	replicaIndexes, err := a.k8sClient.GetReplicaIndexesForPodCliqueSet(a.ctx, pcsName, namespace)
 	if err != nil {
-		fmt.Printf("Error loading replica indexes: %v\n", err)
+		debugLog("ERROR loading replica indexes for %s/%s: %v", namespace, pcsName, err)
 		replicaIndexes = []string{}
+	} else {
+		debugLog("loaded %d replica indexes for %s/%s: %v", len(replicaIndexes), namespace, pcsName, replicaIndexes)
 	}
 
 	// Create virtual PodCliqueSetReplica resources
@@ -157,6 +175,16 @@ func (a *App) loadPodCliqueSetReplicas(pcsName, namespace string) {
 			totalScheduled += scheduled
 		}
 
+		// Topology: replicas inherit the PCS-level topology
+		replicaTopology := "N/A"
+		if a.cachedTopologyInfo != nil && a.cachedTopologyInfo.PCSPackDomain != "" {
+			replicaTopology = ResolveTopologyDisplay("", a.cachedTopologyInfo.PCSPackDomain)
+			// Enhance with actual value from pod nodes
+			domain := extractDomain(replicaTopology)
+			value := resolveTopologyValueByReplicaIndex(domain, pcsName, replicaIndex, a.cachedTopologyInfo, a.cachedPods, a.cachedNodeLabels)
+			replicaTopology = enhanceTopologyDisplay(replicaTopology, value)
+		}
+
 		resources = append(resources, Resource{
 			Name:       fmt.Sprintf("%s-replica-%s", pcsName, replicaIndex),
 			Type:       "PodCliqueSetReplica",
@@ -166,6 +194,7 @@ func (a *App) loadPodCliqueSetReplicas(pcsName, namespace string) {
 			Namespace:  namespace,
 			ParentType: "PodCliqueSet",
 			ParentName: pcsName,
+			Topology:   replicaTopology,
 		})
 	}
 
@@ -183,15 +212,47 @@ func (a *App) loadPodCliqueSetReplicaChildren(pcsName, namespace, replicaIndex s
 	// Get PodCliqueScalingGroups for this replica
 	scalingGroups, err := a.k8sClient.GetPodCliqueScalingGroupsForPodCliqueSetReplica(a.ctx, pcsName, namespace, replicaIndex)
 	if err != nil {
-		fmt.Printf("Error loading PodCliqueScalingGroups: %v\n", err)
+		debugLog("ERROR loading PodCliqueScalingGroups for %s/%s replica %s: %v", namespace, pcsName, replicaIndex, err)
 		scalingGroups = []Resource{}
+	} else {
+		debugLog("loaded %d PodCliqueScalingGroups for %s/%s replica %s", len(scalingGroups), namespace, pcsName, replicaIndex)
 	}
 
 	// Get standalone PodCliques for this replica
 	podCliques, err := a.k8sClient.GetPodCliquesForPodCliqueSetReplica(a.ctx, pcsName, namespace, replicaIndex)
 	if err != nil {
-		fmt.Printf("Error loading PodCliques: %v\n", err)
+		debugLog("ERROR loading standalone PodCliques for %s/%s replica %s: %v", namespace, pcsName, replicaIndex, err)
 		podCliques = []Resource{}
+	} else {
+		debugLog("loaded %d standalone PodCliques for %s/%s replica %s", len(podCliques), namespace, pcsName, replicaIndex)
+	}
+
+	// Set topology on PCSGs
+	for i := range scalingGroups {
+		pcsgConfigName := ExtractConfigName(scalingGroups[i].Name, pcsName, replicaIndex)
+		if a.cachedTopologyInfo != nil {
+			scalingGroups[i].Topology = a.cachedTopologyInfo.ResolvePCSGTopology(pcsgConfigName)
+			// Enhance with actual value
+			domain := extractDomain(scalingGroups[i].Topology)
+			value := resolveTopologyValue(domain, "grove.io/podcliquescalinggroup", scalingGroups[i].Name, a.cachedTopologyInfo, a.cachedPods, a.cachedNodeLabels)
+			scalingGroups[i].Topology = enhanceTopologyDisplay(scalingGroups[i].Topology, value)
+		} else {
+			scalingGroups[i].Topology = "N/A"
+		}
+	}
+
+	// Set topology on standalone PodCliques
+	for i := range podCliques {
+		cliqueTemplateName := ExtractConfigName(podCliques[i].Name, pcsName, replicaIndex)
+		if a.cachedTopologyInfo != nil {
+			podCliques[i].Topology = a.cachedTopologyInfo.ResolveStandaloneCliqueTopology(cliqueTemplateName)
+			// Enhance with actual value
+			domain := extractDomain(podCliques[i].Topology)
+			value := resolveTopologyValue(domain, "grove.io/podclique", podCliques[i].Name, a.cachedTopologyInfo, a.cachedPods, a.cachedNodeLabels)
+			podCliques[i].Topology = enhanceTopologyDisplay(podCliques[i].Topology, value)
+		} else {
+			podCliques[i].Topology = "N/A"
+		}
 	}
 
 	// Combine them
@@ -208,11 +269,12 @@ func (a *App) loadEventsForPodCliqueSet(pcsName, namespace string) {
 
 	events, err := a.k8sClient.GetEventsForPodCliqueSet(a.ctx, pcsName, namespace)
 	if err != nil {
-		fmt.Printf("Error loading events: %v\n", err)
+		debugLog("ERROR loading events for PCS %s/%s: %v", namespace, pcsName, err)
 		a.allEvents = []Event{}
 		return
 	}
 
+	debugLog("loaded %d events for PCS %s/%s", len(events), namespace, pcsName)
 	a.allEvents = events
 }
 
@@ -225,11 +287,12 @@ func (a *App) loadEventsForPodCliqueSetReplica(pcsName, namespace, replicaIndex 
 
 	events, err := a.k8sClient.GetEventsForPodCliqueSetReplica(a.ctx, pcsName, namespace, replicaIndex)
 	if err != nil {
-		fmt.Printf("Error loading events: %v\n", err)
+		debugLog("ERROR loading events for PCS %s/%s replica %s: %v", namespace, pcsName, replicaIndex, err)
 		a.allEvents = []Event{}
 		return
 	}
 
+	debugLog("loaded %d events for PCS %s/%s replica %s", len(events), namespace, pcsName, replicaIndex)
 	a.allEvents = events
 }
 
@@ -244,8 +307,25 @@ func (a *App) loadPodCliqueScalingGroupChildren(pcsgName, namespace string) {
 	// Get PodCliques that belong to this scaling group
 	podCliques, err := a.k8sClient.GetPodCliquesForPodCliqueScalingGroup(a.ctx, pcsgName, namespace)
 	if err != nil {
-		fmt.Printf("Error loading PodCliques for PodCliqueScalingGroup: %v\n", err)
+		debugLog("ERROR loading PodCliques for PCSG %s/%s: %v", namespace, pcsgName, err)
 		podCliques = []Resource{}
+	} else {
+		debugLog("loaded %d PodCliques for PCSG %s/%s", len(podCliques), namespace, pcsgName)
+	}
+
+	// Set topology on PodCliques within this PCSG
+	pcsgConfigName := ExtractConfigName(pcsgName, a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex)
+	for i := range podCliques {
+		cliqueTemplateName := ExtractCliqueTemplateNameFromPCSGChild(podCliques[i].Name, pcsgName)
+		if a.cachedTopologyInfo != nil {
+			podCliques[i].Topology = a.cachedTopologyInfo.ResolveCliqueInPCSGTopology(cliqueTemplateName, pcsgConfigName)
+			// Enhance with actual value
+			domain := extractDomain(podCliques[i].Topology)
+			value := resolveTopologyValue(domain, "grove.io/podclique", podCliques[i].Name, a.cachedTopologyInfo, a.cachedPods, a.cachedNodeLabels)
+			podCliques[i].Topology = enhanceTopologyDisplay(podCliques[i].Topology, value)
+		} else {
+			podCliques[i].Topology = "N/A"
+		}
 	}
 
 	a.allResources[key] = podCliques
@@ -260,11 +340,12 @@ func (a *App) loadEventsForPodCliqueScalingGroup(pcsgName, namespace string) {
 
 	events, err := a.k8sClient.GetEventsForPodCliqueScalingGroup(a.ctx, pcsgName, namespace)
 	if err != nil {
-		fmt.Printf("Error loading events for PodCliqueScalingGroup: %v\n", err)
+		debugLog("ERROR loading events for PCSG %s/%s: %v", namespace, pcsgName, err)
 		a.allEvents = []Event{}
 		return
 	}
 
+	debugLog("loaded %d events for PCSG %s/%s", len(events), namespace, pcsgName)
 	a.allEvents = events
 }
 
@@ -279,8 +360,40 @@ func (a *App) loadPodCliqueChildren(podCliqueName, namespace string) {
 	// Get Pods that belong to this PodClique
 	pods, err := a.k8sClient.GetPodsForPodClique(a.ctx, podCliqueName, namespace)
 	if err != nil {
-		fmt.Printf("Error loading Pods for PodClique: %v\n", err)
+		debugLog("ERROR loading Pods for PodClique %s/%s: %v", namespace, podCliqueName, err)
 		pods = []Resource{}
+	} else {
+		debugLog("loaded %d Pods for PodClique %s/%s", len(pods), namespace, podCliqueName)
+	}
+
+	// Pods inherit topology from their parent PodClique
+	// First resolve the domain, then enhance each pod with its actual node value
+	basePodTopology := "N/A"
+	if a.cachedTopologyInfo != nil {
+		if a.viewState.selectedScalingGroup != "" {
+			pcsgConfigName := ExtractConfigName(a.viewState.selectedScalingGroup, a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex)
+			cliqueTemplateName := ExtractCliqueTemplateNameFromPCSGChild(podCliqueName, a.viewState.selectedScalingGroup)
+			effectiveClique := a.cachedTopologyInfo.ResolveCliqueInPCSGTopology(cliqueTemplateName, pcsgConfigName)
+			basePodTopology = wrapInherited(effectiveClique)
+		} else {
+			cliqueTemplateName := ExtractConfigName(podCliqueName, a.viewState.selectedPodCliqueSet, a.viewState.selectedReplicaIndex)
+			effectiveClique := a.cachedTopologyInfo.ResolveStandaloneCliqueTopology(cliqueTemplateName)
+			basePodTopology = wrapInherited(effectiveClique)
+		}
+	}
+	domain := extractDomain(basePodTopology)
+	for i := range pods {
+		if domain != "" {
+			// Resolve value from this pod's actual node
+			nodeName := ""
+			if cached, ok := a.cachedPods[pods[i].Name]; ok {
+				nodeName = cached.NodeName
+			}
+			value := resolveTopologyValueForNode(domain, nodeName, a.cachedTopologyInfo, a.cachedNodeLabels)
+			pods[i].Topology = enhanceTopologyDisplay(basePodTopology, value)
+		} else {
+			pods[i].Topology = basePodTopology
+		}
 	}
 
 	a.allResources[key] = pods
@@ -295,11 +408,12 @@ func (a *App) loadEventsForPodClique(podCliqueName, namespace string) {
 
 	events, err := a.k8sClient.GetEventsForPodClique(a.ctx, podCliqueName, namespace)
 	if err != nil {
-		fmt.Printf("Error loading events for PodClique: %v\n", err)
+		debugLog("ERROR loading events for PodClique %s/%s: %v", namespace, podCliqueName, err)
 		a.allEvents = []Event{}
 		return
 	}
 
+	debugLog("loaded %d events for PodClique %s/%s", len(events), namespace, podCliqueName)
 	a.allEvents = events
 }
 
@@ -367,6 +481,7 @@ func (a *App) createResourcesTable() *tview.Table {
 
 // refreshResourcesView updates the top pane based on current view state
 func (a *App) refreshResourcesView() {
+	debugLog("refreshResourcesView: viewType=%d", a.viewState.viewType)
 	// For Pod view, show YAML instead of table
 	if a.viewState.viewType == PodView {
 		a.refreshPodYAMLView()
@@ -431,6 +546,7 @@ func (a *App) refreshResourcesTable() {
 		{"NAMESPACE", 2, tview.AlignLeft},
 		{"TYPE", 2, tview.AlignLeft},
 		{"NAME", 3, tview.AlignLeft},
+		{"TOPOLOGY", 1, tview.AlignCenter},
 		{"READY", 1, tview.AlignCenter},
 		{lastColumnHeader, 2, tview.AlignLeft},
 	}
@@ -466,7 +582,10 @@ func (a *App) refreshResourcesTable() {
 	viewKey := a.getCurrentViewKey()
 	resources, exists := a.allResources[viewKey]
 	if !exists {
+		debugLog("refreshResourcesTable: no resources found for key=%q", viewKey)
 		resources = []Resource{}
+	} else {
+		debugLog("refreshResourcesTable: displaying %d resources for key=%q", len(resources), viewKey)
 	}
 
 	// Add data rows
@@ -475,6 +594,7 @@ func (a *App) refreshResourcesTable() {
 			resource.Namespace,
 			resource.Type,
 			resource.Name,
+			resource.Topology,
 			resource.Ready,
 			resource.Scheduled,
 		}
@@ -494,7 +614,16 @@ func (a *App) refreshResourcesTable() {
 				if color, ok := typeColors[cellText]; ok {
 					cell.SetTextColor(color)
 				}
-			case 3: // STATUS column
+			case 3: // TOPOLOGY column
+				if cellText == "N/A" {
+					cell.SetTextColor(tcell.ColorDimGray)
+				} else if len(cellText) > 0 && cellText[0] == '(' {
+					// Inherited topology shown in dimmer color
+					cell.SetTextColor(tcell.ColorDarkCyan)
+				} else {
+					cell.SetTextColor(tcell.ColorWhite)
+				}
+			case 4: // READY column
 				if color, ok := statusColors[cellText]; ok {
 					cell.SetTextColor(color)
 				}
@@ -524,7 +653,7 @@ func (a *App) refreshResourcesTable() {
 			}
 		}
 
-		if a.activePane == ResourcesPane && row > 0 {
+		if a.activePane == ResourcesPane && row > 0 && row < table.GetRowCount() {
 			// If in Forest view and a PodCliqueSet is selected, load its events
 			if a.viewState.viewType == ForestView {
 				selectedName := strings.TrimSpace(table.GetCell(row, 2).Text)
@@ -806,17 +935,21 @@ func (a *App) refreshEventsTable() {
 func (a *App) navigateInto() {
 	// Can't navigate if in Pod view
 	if a.viewState.viewType == PodView {
+		debugLog("navigateInto: already in PodView, ignoring")
 		return
 	}
 
 	row, _ := a.resourcesTable.GetSelection()
-	if row < 1 {
+	if row < 1 || row >= a.resourcesTable.GetRowCount() {
+		debugLog("navigateInto: no valid row selected (row=%d, rowCount=%d)", row, a.resourcesTable.GetRowCount())
 		return
 	}
 
 	selectedType := strings.TrimSpace(a.resourcesTable.GetCell(row, 1).Text)
 	selectedName := strings.TrimSpace(a.resourcesTable.GetCell(row, 2).Text)
 	selectedNamespace := strings.TrimSpace(a.resourcesTable.GetCell(row, 0).Text)
+
+	debugLog("navigateInto: type=%s name=%s namespace=%s", selectedType, selectedName, selectedNamespace)
 
 	// Determine the next view based on current view and selected type
 	switch selectedType {
@@ -827,12 +960,70 @@ func (a *App) navigateInto() {
 		a.viewState.selectedPodClique = ""
 		a.viewState.selectedPod = ""
 
+		// Build and cache topology info from the PCS spec.
+		// Use a short timeout to avoid blocking the UI if the cluster is slow
+		// or CRDs are missing.
+		if a.k8sClient != nil {
+			debugLog("fetching PCS %s/%s for topology info", selectedNamespace, selectedName)
+			topoCtx, topoCancel := context.WithTimeout(a.ctx, 5*time.Second)
+
+			pcs, err := a.k8sClient.GetPodCliqueSet(topoCtx, selectedName, selectedNamespace)
+			if err != nil {
+				debugLog("ERROR fetching PCS for topology: %v", err)
+				a.cachedTopologyInfo = nil
+			} else {
+				a.cachedTopologyInfo = BuildTopologyInfo(pcs)
+				debugLog("built topology info: PCSPackDomain=%q, %d PCSGs, %d cliques",
+					a.cachedTopologyInfo.PCSPackDomain, len(a.cachedTopologyInfo.PCSGPackDomains), len(a.cachedTopologyInfo.CliquePackDomains))
+			}
+
+			// Fetch ClusterTopology for domain->key mapping
+			ct, err := a.k8sClient.GetClusterTopology(topoCtx)
+			if err == nil && ct != nil && a.cachedTopologyInfo != nil {
+				for _, level := range ct.Spec.Levels {
+					a.cachedTopologyInfo.DomainToKey[string(level.Domain)] = level.Key
+				}
+				debugLog("loaded ClusterTopology domain->key mappings: %v", a.cachedTopologyInfo.DomainToKey)
+			} else {
+				debugLog("no ClusterTopology available (err=%v, ct=%v)", err, ct)
+			}
+
+			// Cache pod info and node labels for topology value resolution
+			podInfo, err := a.k8sClient.GetPodInfoForPCS(topoCtx, selectedName, selectedNamespace)
+			if err != nil {
+				debugLog("ERROR fetching pod info for PCS: %v", err)
+				a.cachedPods = nil
+			} else {
+				debugLog("cached %d pods for PCS %s/%s", len(podInfo), selectedNamespace, selectedName)
+				a.cachedPods = podInfo
+			}
+
+			if a.cachedTopologyInfo != nil && len(a.cachedTopologyInfo.DomainToKey) > 0 {
+				topologyKeys := make([]string, 0, len(a.cachedTopologyInfo.DomainToKey))
+				for _, key := range a.cachedTopologyInfo.DomainToKey {
+					topologyKeys = append(topologyKeys, key)
+				}
+				nodeLabels, err := a.k8sClient.GetAllNodeLabels(topoCtx, topologyKeys)
+				if err != nil {
+					debugLog("ERROR fetching node labels: %v", err)
+					a.cachedNodeLabels = nil
+				} else {
+					debugLog("cached labels for %d nodes", len(nodeLabels))
+					a.cachedNodeLabels = nodeLabels
+				}
+			}
+
+			topoCancel()
+		}
+
 		// Get replica indexes for this PodCliqueSet
 		if a.k8sClient != nil {
 			replicaIndexes, err := a.k8sClient.GetReplicaIndexesForPodCliqueSet(a.ctx, selectedName, selectedNamespace)
 			if err != nil {
-				fmt.Printf("Error loading replica indexes: %v\n", err)
+				debugLog("ERROR loading replica indexes for navigation: %v", err)
 				replicaIndexes = []string{}
+			} else {
+				debugLog("found %d replica indexes for PCS %s: %v", len(replicaIndexes), selectedName, replicaIndexes)
 			}
 
 			// If there's only 1 replica, skip directly to PodCliqueSetReplicaView
@@ -896,11 +1087,13 @@ func (a *App) navigateInto() {
 
 		// Load Pod YAML
 		if a.k8sClient != nil {
+			debugLog("fetching YAML for Pod %s/%s", selectedNamespace, selectedName)
 			yaml, err := a.k8sClient.GetPodYAML(a.ctx, selectedName, selectedNamespace)
 			if err != nil {
-				fmt.Printf("Error loading Pod YAML: %v\n", err)
+				debugLog("ERROR loading Pod YAML: %v", err)
 				a.podYAMLData[selectedName] = fmt.Sprintf("# Error loading Pod YAML: %v", err)
 			} else {
+				debugLog("loaded %d bytes of YAML for Pod %s", len(yaml), selectedName)
 				a.podYAMLData[selectedName] = yaml
 			}
 		}
@@ -915,9 +1108,11 @@ func (a *App) navigateInto() {
 
 // navigateBack goes up one level in the hierarchy
 func (a *App) navigateBack() {
+	debugLog("navigateBack: current viewType=%d", a.viewState.viewType)
 	switch a.viewState.viewType {
 	case ForestView:
 		// Already at root, nothing to do
+		debugLog("navigateBack: already at ForestView, ignoring")
 		return
 	case PodCliqueSetView:
 		// Go back to Forest
@@ -927,6 +1122,9 @@ func (a *App) navigateBack() {
 		a.viewState.selectedScalingGroup = ""
 		a.viewState.selectedPodClique = ""
 		a.viewState.selectedPod = ""
+		a.cachedTopologyInfo = nil
+		a.cachedPods = nil
+		a.cachedNodeLabels = nil
 
 		// Reload forest data when going back to root
 		a.loadForestData()
@@ -950,6 +1148,9 @@ func (a *App) navigateBack() {
 				a.viewState.viewType = ForestView
 				a.viewState.selectedPodCliqueSet = ""
 				a.viewState.selectedReplicaIndex = ""
+				a.cachedTopologyInfo = nil
+				a.cachedPods = nil
+				a.cachedNodeLabels = nil
 				a.loadForestData()
 				a.allEvents = []Event{}
 			} else {
@@ -1222,12 +1423,16 @@ func (a *App) Run() error {
 		AddItem(a.statusBar, 1, 0, false)
 
 	// Populate tables with initial data
+	debugLog("populating initial UI tables")
 	a.refreshResourcesView()
 
 	// If we're in Forest view and there are PodCliqueSets, load events for the first one
 	if a.viewState.viewType == ForestView && len(a.allResources["forest"]) > 0 {
 		firstPCS := a.allResources["forest"][0]
+		debugLog("loading events for first PCS: %s/%s", firstPCS.Namespace, firstPCS.Name)
 		a.loadEventsForPodCliqueSet(firstPCS.Name, firstPCS.Namespace)
+	} else {
+		debugLog("no PodCliqueSets found in forest view, skipping initial event load")
 	}
 
 	a.refreshEventsTable()
@@ -1236,12 +1441,48 @@ func (a *App) Run() error {
 	a.updateStatusBar()
 
 	// Set root and run
+	debugLog("starting tview application event loop")
 	return a.SetRoot(rootFlex, true).SetFocus(a.resourcesTable).Run()
 }
 
 func main() {
+	debugFile := flag.String("debug", "", "Path to debug log file (e.g. ~/tmp/arborist.log)")
+	flag.Parse()
+
+	if *debugFile != "" {
+		// Expand ~ to home directory
+		path := *debugFile
+		if len(path) > 0 && path[0] == '~' {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				path = home + path[1:]
+			}
+		}
+		if err := InitDebugLog(path); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to open debug log: %v\n", err)
+			os.Exit(1)
+		}
+		defer CloseDebugLog()
+	}
+
+	debugLog("starting arborist")
+
+	// Recover from panics (e.g. nil pointer in a tview callback) so we can
+	// log the stack trace and restore the terminal before exiting.
+	defer func() {
+		if r := recover(); r != nil {
+			stack := rtdebug.Stack()
+			debugLog("PANIC: %v\n%s", r, stack)
+			CloseDebugLog()
+			fmt.Fprintf(os.Stderr, "arborist panic: %v\n%s", r, stack)
+			os.Exit(1)
+		}
+	}()
+
 	app := NewApp()
 	if err := app.Run(); err != nil {
+		debugLog("app exited with error: %v", err)
 		panic(err)
 	}
+	debugLog("arborist exiting cleanly")
 }
