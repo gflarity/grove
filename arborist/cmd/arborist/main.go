@@ -60,7 +60,11 @@ type App struct {
 	resourcesView      *tview.TextView // For Pod YAML view
 	eventsTable        *tview.Table
 	statusBar          *tview.TextView
-	mainFlex           *tview.Flex // Main layout container
+	filterInput        *tview.InputField // Search/filter input bar
+	rootFlex           *tview.Flex       // Root layout container
+	mainFlex           *tview.Flex       // Main layout container
+	filterActive       bool              // Whether search/filter mode is active
+	filterText         string            // Current filter text
 	viewState          ViewState
 	allResources       map[string][]Resource // Key is parent identifier
 	allEvents          []Event
@@ -522,11 +526,15 @@ func (a *App) refreshResourcesTable() {
 	// Clear table
 	table.Clear()
 
-	// Update title with breadcrumb
+	// Update title with breadcrumb and optional filter indicator
+	filterTag := ""
+	if a.filterText != "" {
+		filterTag = fmt.Sprintf(" [dimgray]| filter:[-] [white]%s[-]", a.filterText)
+	}
 	if a.activePane == ResourcesPane {
-		table.SetTitle(fmt.Sprintf(" [yellow::b]Resources[-] [dimgray]|[-] %s ", a.getViewTitle()))
+		table.SetTitle(fmt.Sprintf(" [yellow::b]Resources[-] [dimgray]|[-] %s%s ", a.getViewTitle(), filterTag))
 	} else {
-		table.SetTitle(fmt.Sprintf(" [dimgray]Resources |[-] %s ", a.getViewTitle()))
+		table.SetTitle(fmt.Sprintf(" [dimgray]Resources |[-] %s%s ", a.getViewTitle(), filterTag))
 	}
 
 	// Headers with expansion settings
@@ -586,6 +594,21 @@ func (a *App) refreshResourcesTable() {
 		resources = []Resource{}
 	} else {
 		debugLog("refreshResourcesTable: displaying %d resources for key=%q", len(resources), viewKey)
+	}
+
+	// Apply filter if active
+	if a.filterText != "" {
+		filter := strings.ToLower(a.filterText)
+		var filtered []Resource
+		for _, r := range resources {
+			if strings.Contains(strings.ToLower(r.Name), filter) ||
+				strings.Contains(strings.ToLower(r.Type), filter) ||
+				strings.Contains(strings.ToLower(r.Namespace), filter) {
+				filtered = append(filtered, r)
+			}
+		}
+		debugLog("filter %q: %d -> %d resources", a.filterText, len(resources), len(filtered))
+		resources = filtered
 	}
 
 	// Add data rows
@@ -933,6 +956,9 @@ func (a *App) refreshEventsTable() {
 
 // navigateInto drills down into the selected resource
 func (a *App) navigateInto() {
+	// Clear any active filter when navigating
+	a.filterText = ""
+
 	// Can't navigate if in Pod view
 	if a.viewState.viewType == PodView {
 		debugLog("navigateInto: already in PodView, ignoring")
@@ -1108,6 +1134,9 @@ func (a *App) navigateInto() {
 
 // navigateBack goes up one level in the hierarchy
 func (a *App) navigateBack() {
+	// Clear any active filter when navigating
+	a.filterText = ""
+
 	debugLog("navigateBack: current viewType=%d", a.viewState.viewType)
 	switch a.viewState.viewType {
 	case ForestView:
@@ -1272,10 +1301,10 @@ func (a *App) updateStatusBar() {
 	// Pod view has different status bar
 	if a.viewState.viewType == PodView {
 		if a.activePane == ResourcesPane {
-			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> scroll <[white]Esc[dimgray]> back <[white]q[dimgray]> quit"
+			shortcuts := "<[white]/[dimgray]> filter <[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> scroll <[white]Esc[dimgray]> back <[white]q[dimgray]> quit"
 			text = fmt.Sprintf(" [yellow]Pod Status[-] [dimgray]|[-] Viewing: [white]%s[-] [dimgray]|[-] %s", a.viewState.selectedPod, shortcuts)
 		} else {
-			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate <[white]Esc[dimgray]> back <[white]q[dimgray]> quit"
+			shortcuts := "<[white]/[dimgray]> filter <[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate <[white]Esc[dimgray]> back <[white]q[dimgray]> quit"
 			text = fmt.Sprintf(" [yellow]Events[-] [dimgray]|[-] Pod: [white]%s[-] [dimgray]|[-] %s", a.viewState.selectedPod, shortcuts)
 		}
 		a.statusBar.SetText(text)
@@ -1293,7 +1322,7 @@ func (a *App) updateStatusBar() {
 			canDrillDown := true // All resources can be drilled down now
 			canGoBack := a.viewState.viewType != ForestView
 
-			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
+			shortcuts := "<[white]/[dimgray]> filter <[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
 			if canDrillDown {
 				shortcuts += " <[white]Enter[dimgray]> drill down"
 			}
@@ -1304,7 +1333,7 @@ func (a *App) updateStatusBar() {
 
 			text = fmt.Sprintf(" [yellow]Resources[-] [dimgray]|[-] Selected: [white]%s[-] [dimgray](%s)[-] [dimgray]|[-] %s", name, resourceType, shortcuts)
 		} else {
-			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
+			shortcuts := "<[white]/[dimgray]> filter <[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
 			if a.viewState.viewType != ForestView {
 				shortcuts += " <[white]Esc[dimgray]> back"
 			}
@@ -1315,14 +1344,14 @@ func (a *App) updateStatusBar() {
 		row, _ := a.eventsTable.GetSelection()
 		if row > 0 && row < a.eventsTable.GetRowCount() {
 			eventType := strings.TrimSpace(a.eventsTable.GetCell(row, 0).Text)
-			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
+			shortcuts := "<[white]/[dimgray]> filter <[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
 			if a.viewState.viewType != ForestView {
 				shortcuts += " <[white]Esc[dimgray]> back"
 			}
 			shortcuts += " <[white]q[dimgray]> quit"
 			text = fmt.Sprintf(" [yellow]Events[-] [dimgray]|[-] Selected: [white]%s[-] [dimgray]|[-] %s", eventType, shortcuts)
 		} else {
-			shortcuts := "<[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
+			shortcuts := "<[white]/[dimgray]> filter <[white]Tab[dimgray]> switch pane <[white]↑↓[dimgray]> navigate"
 			if a.viewState.viewType != ForestView {
 				shortcuts += " <[white]Esc[dimgray]> back"
 			}
@@ -1333,25 +1362,109 @@ func (a *App) updateStatusBar() {
 	a.statusBar.SetText(text)
 }
 
+// activateFilter enters search/filter mode, showing the filter input bar.
+func (a *App) activateFilter() {
+	if a.filterActive {
+		return
+	}
+	a.filterActive = true
+	a.filterText = ""
+	a.filterInput.SetText("")
+
+	// Show the filter bar at the top of the root layout
+	a.rootFlex.Clear()
+	a.rootFlex.AddItem(a.filterInput, 1, 0, true)
+	a.rootFlex.AddItem(a.mainFlex, 0, 1, false)
+	a.rootFlex.AddItem(a.statusBar, 1, 0, false)
+
+	a.SetFocus(a.filterInput)
+	debugLog("filter mode activated")
+}
+
+// deactivateFilter exits search/filter mode.
+// If clearFilter is true the filter text is cleared and the table is refreshed.
+func (a *App) deactivateFilter(clearFilter bool) {
+	if !a.filterActive {
+		return
+	}
+	a.filterActive = false
+
+	if clearFilter {
+		a.filterText = ""
+		a.filterInput.SetText("")
+	}
+
+	// Hide the filter bar
+	a.rootFlex.Clear()
+	a.rootFlex.AddItem(a.mainFlex, 0, 1, true)
+	a.rootFlex.AddItem(a.statusBar, 1, 0, false)
+
+	// Restore focus to the active pane
+	if a.activePane == ResourcesPane {
+		if a.viewState.viewType == PodView {
+			a.SetFocus(a.resourcesView)
+		} else {
+			a.SetFocus(a.resourcesTable)
+		}
+	} else {
+		a.SetFocus(a.eventsTable)
+	}
+
+	a.refreshResourcesView()
+	a.refreshEventsTable()
+	a.updateStatusBar()
+	debugLog("filter mode deactivated (clearFilter=%v, filterText=%q)", clearFilter, a.filterText)
+}
+
 func (a *App) setupKeyBindings() {
-	// Global key handler
+	// Global key handler — runs before any widget sees the event.
 	a.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// Ctrl+C always quits, regardless of mode.
+		if event.Key() == tcell.KeyCtrlC {
+			a.Stop()
+			return nil
+		}
+
+		// ----- Filter mode -----
+		if a.filterActive {
+			switch event.Key() {
+			case tcell.KeyEsc:
+				// Exit filter mode and clear filter
+				a.deactivateFilter(true)
+				return nil
+			case tcell.KeyEnter:
+				// Exit filter mode but keep filter applied
+				a.deactivateFilter(false)
+				return nil
+			case tcell.KeyTab:
+				// Allow pane switching while filtering
+				a.switchPane()
+				return nil
+			}
+			// Let all other keys (runes, backspace, etc.) reach the InputField.
+			return event
+		}
+
+		// ----- Normal mode -----
 		switch event.Key() {
 		case tcell.KeyTab:
 			a.switchPane()
 			return nil
 		case tcell.KeyEsc:
-			// Go back in hierarchy
 			a.navigateBack()
 			return nil
-		case tcell.KeyCtrlC:
-			a.Stop()
-			return nil
 		case tcell.KeyRune:
-			if event.Rune() == 'q' {
+			switch event.Rune() {
+			case 'q', 'Q':
 				a.Stop()
 				return nil
+			case '/':
+				a.activateFilter()
+				return nil
 			}
+			// Consume all other runes so they don't reach the table's
+			// built-in search handler.
+			return nil
 		}
 		return event
 	})
@@ -1359,14 +1472,13 @@ func (a *App) setupKeyBindings() {
 	// Resources table handler
 	a.resourcesTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEnter {
-			// Drill down into selected resource
 			a.navigateInto()
 			return nil
 		}
 		return event
 	})
 
-	// Events table handler - no special enter behavior needed
+	// Events table handler — no special enter behavior needed.
 	a.eventsTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		return event
 	})
@@ -1393,12 +1505,17 @@ func (a *App) Run() error {
 	a.resourcesView.SetTitleAlign(tview.AlignLeft)
 	a.resourcesView.SetBackgroundColor(tcell.ColorBlack)
 
-	// Create header bar
-	headerBar := tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
-	headerBar.SetText(" [yellow::b]🌳 Arborist[-] [dimgray]|[-] [green]Grove Operator[-] [dimgray]|[-] [cyan]Hierarchical Resource Viewer[-]")
-	headerBar.SetBackgroundColor(tcell.ColorBlack)
+	// Create filter input bar (hidden by default, shown when '/' is pressed)
+	a.filterInput = tview.NewInputField().
+		SetLabel("[yellow]/[-] ").
+		SetLabelColor(tcell.ColorYellow).
+		SetFieldBackgroundColor(tcell.ColorBlack).
+		SetFieldTextColor(tcell.ColorWhite)
+	a.filterInput.SetBackgroundColor(tcell.ColorBlack)
+	a.filterInput.SetChangedFunc(func(text string) {
+		a.filterText = text
+		a.refreshResourcesView()
+	})
 
 	// Create status bar
 	a.statusBar = tview.NewTextView().
@@ -1415,10 +1532,9 @@ func (a *App) Run() error {
 		AddItem(a.resourcesTable, 0, 1, true).
 		AddItem(a.eventsTable, 0, 1, false)
 
-	// Create overall layout
-	rootFlex := tview.NewFlex().
+	// Create overall layout (no header bar — filter bar appears here when active)
+	a.rootFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(headerBar, 1, 0, false).
 		AddItem(a.mainFlex, 0, 1, true).
 		AddItem(a.statusBar, 1, 0, false)
 
@@ -1442,7 +1558,7 @@ func (a *App) Run() error {
 
 	// Set root and run
 	debugLog("starting tview application event loop")
-	return a.SetRoot(rootFlex, true).SetFocus(a.resourcesTable).Run()
+	return a.SetRoot(a.rootFlex, true).SetFocus(a.resourcesTable).Run()
 }
 
 func main() {
@@ -1466,6 +1582,16 @@ func main() {
 	}
 
 	debugLog("starting arborist")
+
+	// Check for subcommands in positional args
+	args := flag.Args()
+	if len(args) > 0 && args[0] == "topology" {
+		if err := runTopologyCommand(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Recover from panics (e.g. nil pointer in a tview callback) so we can
 	// log the stack trace and restore the terminal before exiting.
