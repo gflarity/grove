@@ -16,22 +16,21 @@ func (m Model) View() string {
 
 	var sections []string
 
-	// Empty line at top for spacing (ensures top border is visible)
-	sections = append(sections, "")
-
-	// Header bar (in its own frame)
+	// Header bar
 	sections = append(sections, m.renderHeaderFrame())
 
-	// Filter bar (if active) - rendered inside the resources frame
-	// so we don't add it separately here
+	// Filter bar (if active) - standalone framed box between header and resources
+	if m.filterActive {
+		sections = append(sections, m.renderFilterFrame())
+	}
 
 	// Calculate available height for the main viewport.
 	// Must match handleWindowSize — see that function for the full breakdown.
-	// Fixed: 1(blank) + 6(header) + 2*(2 border + 1 table header) = 13
+	// Fixed: 6(header) + 2*(2 border + 1 table header) = 12
 	// (section headers are now embedded in the top border, not separate lines)
-	fixedLines := 13
+	fixedLines := 12
 	if m.filterActive {
-		fixedLines++
+		fixedLines += 3 // filter frame: top border + content + bottom border
 	}
 	availableHeight := m.height - fixedLines
 	resourcesHeight := availableHeight / 2
@@ -179,9 +178,101 @@ func (m Model) renderHeader() string {
 	return logo
 }
 
-// renderFilterBar renders the filter input bar.
+// renderFilterBar renders the filter input bar (plain text, no frame).
 func (m Model) renderFilterBar() string {
 	return FilterBarStyle.Render("/") + " " + m.filterInput.View()
+}
+
+// renderFilterFrame renders the filter input as a standalone framed box between
+// the header and the resources table, k9s-style. Uses a normal (non-rounded)
+// border and a tree emoji prefix like k9s uses a poodle.
+//
+//	┌──────────────────────────────────────────┐
+//	│ 🌲/                                      │
+//	└──────────────────────────────────────────┘
+func (m Model) renderFilterFrame() string {
+	border := lipgloss.NormalBorder()
+	bc := lipgloss.NewStyle().Foreground(ColorBorderFocused)
+	contentWidth := m.width - 2 // inside left + right border chars
+
+	// Content: tree emoji + filter input.
+	// Clamp to contentWidth so the right border is never pushed off-screen.
+	content := "🌲" + m.filterInput.View()
+	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
+
+	lineWidth := lipgloss.Width(content)
+	pad := contentWidth - lineWidth
+	if pad < 0 {
+		pad = 0
+	}
+
+	topLine := bc.Render(border.TopLeft + strings.Repeat(border.Top, contentWidth) + border.TopRight)
+	contentLine := bc.Render(border.Left) + content + strings.Repeat(" ", pad) + bc.Render(border.Right)
+	bottomLine := bc.Render(border.BottomLeft + strings.Repeat(border.Bottom, contentWidth) + border.BottomRight)
+
+	return topLine + "\n" + contentLine + "\n" + bottomLine
+}
+
+// truncateStyled truncates a styled string (may contain ANSI escape sequences)
+// from the right to fit within maxWidth visual columns. If truncation is needed,
+// an ellipsis character is appended. Returns the original string unchanged if it
+// already fits.
+func truncateStyled(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+	// Truncate to maxWidth-1 to leave room for the ellipsis
+	truncated := lipgloss.NewStyle().MaxWidth(maxWidth - 1).Render(s)
+	return truncated + "…"
+}
+
+// truncateStyledLeft truncates a styled string (may contain ANSI escape sequences)
+// from the left to fit within maxWidth visual columns. If truncation is needed,
+// an ellipsis character is prepended. Useful for breadcrumbs where the deepest
+// (rightmost) path segment is most relevant.
+//
+// ANSI escape sequences are skipped as atomic units so that cut points never
+// fall inside an escape sequence.
+func truncateStyledLeft(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+
+	runes := []rune(s)
+	n := len(runes)
+	i := 0
+
+	for i < n {
+		// Skip ANSI escape sequences as atomic units (\x1b[...letter)
+		if runes[i] == '\x1b' && i+1 < n && runes[i+1] == '[' {
+			i += 2
+			for i < n {
+				ch := runes[i]
+				i++
+				if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
+					break
+				}
+			}
+			continue
+		}
+
+		// Advance past one visible character
+		i++
+
+		// Check whether "…" + remainder fits
+		remainder := string(runes[i:])
+		if lipgloss.Width("…"+remainder) <= maxWidth {
+			return "…" + remainder
+		}
+	}
+
+	return "…"
 }
 
 // renderFrameWithTitle renders a bordered frame with the title embedded in the
@@ -193,12 +284,20 @@ func (m Model) renderFilterBar() string {
 //	╰────────────────────────────────────────────────╯
 //
 // totalWidth is the desired total outer width of the rendered frame.
+// If the title is too wide for the frame, it is truncated with an ellipsis.
 func renderFrameWithTitle(title, content string, totalWidth int, borderColor lipgloss.Color) string {
 	border := lipgloss.RoundedBorder()
 	bc := lipgloss.NewStyle().Foreground(borderColor)
 	contentWidth := totalWidth - 2 // subtract left + right border chars
 
 	// --- Top border with embedded title ---
+	// Max title width = contentWidth minus 2 spaces around it minus at least 1 dash on each side
+	maxTitleWidth := contentWidth - 4
+	if maxTitleWidth < 1 {
+		maxTitleWidth = 1
+	}
+	title = truncateStyledLeft(title, maxTitleWidth)
+
 	titleWidth := lipgloss.Width(title)
 	// Available space for ─ characters = contentWidth minus title and 2 spaces around it
 	dashSpace := contentWidth - titleWidth - 2
@@ -233,26 +332,18 @@ func renderFrameWithTitle(title, content string, totalWidth int, borderColor lip
 
 // renderResourcesFrame renders the resources section in a framed box.
 // The section header is embedded in the top border (k9s-style).
+// The filter bar is now a separate framed section (see renderFilterFrame).
 func (m Model) renderResourcesFrame(height int) string {
 	// Section header becomes the border title
 	title := m.renderResourcesSectionHeader()
 
-	// Build the content (no section header line — it's in the border now)
-	var contentLines []string
-
-	// Filter bar (if active)
-	if m.filterActive {
-		contentLines = append(contentLines, m.renderFilterBar())
-	}
-
-	// Table content
+	// Build the content
+	var content string
 	if m.viewState.ViewType == data.PodView {
-		contentLines = append(contentLines, m.renderPodViewport())
+		content = m.renderPodViewport()
 	} else {
-		contentLines = append(contentLines, m.renderResourcesTable())
+		content = m.renderResourcesTable()
 	}
-
-	content := strings.Join(contentLines, "\n")
 
 	return renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
 }
