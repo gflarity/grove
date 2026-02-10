@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -36,36 +35,10 @@ type topologyGroup struct {
 	Pods  []string // Pod names sorted alphabetically
 }
 
-// runTopologyCommand implements the "arborist topology <podcliqueset> <domain>" CLI command.
-func runTopologyCommand(args []string) error {
-	fs := flag.NewFlagSet("topology", flag.ExitOnError)
-	namespace := fs.String("n", "", "Kubernetes namespace (defaults to current kubeconfig context namespace)")
-
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: arborist topology <podcliqueset> <topology-domain> [-n namespace]\n\n")
-		fmt.Fprintf(os.Stderr, "Show pods for a PodCliqueSet grouped by topology domain.\n\n")
-		fmt.Fprintf(os.Stderr, "Arguments:\n")
-		fmt.Fprintf(os.Stderr, "  podcliqueset     Name of the PodCliqueSet\n")
-		fmt.Fprintf(os.Stderr, "  topology-domain  Topology domain (e.g. rack, zone, block, host)\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
-	}
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	positional := fs.Args()
-	if len(positional) < 2 {
-		fs.Usage()
-		return fmt.Errorf("requires exactly 2 arguments: <podcliqueset> <topology-domain>")
-	}
-
-	pcsName := positional[0]
-	domain := positional[1]
-
+// runTopology implements the "arborist topology <podcliqueset> <domain>" CLI command.
+func runTopology(pcsName, domain, namespace string) error {
 	// Resolve namespace from kubeconfig if not specified
-	ns := *namespace
+	ns := namespace
 	if ns == "" {
 		resolved, err := resolveCurrentNamespace()
 		if err != nil {
