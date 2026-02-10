@@ -66,7 +66,6 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 	// Calculate table heights.
 	// Layout (lines):
-	//   1  empty line at top
 	//   6  header (left column: Context, Cluster, User, Arborist Rev, K8s Rev, View)
 	//   2  resources frame border (top + bottom)
 	//       (section header is embedded in the top border — no extra line)
@@ -75,12 +74,12 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	//       (section header is embedded in the top border — no extra line)
 	//   1  events table column header (TYPE, REASON, ...)
 	//  --
-	//  13  total fixed lines
+	//  12  total fixed lines
 	//
 	// The remaining height is split equally between the two table data areas.
-	fixedLines := 13
+	fixedLines := 12
 	if m.filterActive {
-		fixedLines++ // filter bar adds 1 line inside the resources frame
+		fixedLines += 3 // filter frame: top border + content + bottom border
 	}
 	availableHeight := m.height - fixedLines
 	paneHeight := availableHeight / 2
@@ -105,8 +104,8 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.podViewport.Width = frameContentWidth
 	m.podViewport.Height = paneHeight
 
-	// Update filter input width
-	m.filterInput.Width = m.width - 10
+	// Update filter input width (frame content width minus tree emoji)
+	m.filterInput.Width = m.width - 6
 
 	// Rebuild tables
 	m.rebuildResourcesTable()

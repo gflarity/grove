@@ -178,7 +178,7 @@ func WithArboristVersion(version string) Option {
 func NewModel(provider data.DataProvider, opts ...Option) Model {
 	// Initialize filter input
 	ti := textinput.New()
-	ti.Placeholder = "Filter..."
+	ti.Placeholder = ""
 	ti.CharLimit = 256
 	ti.Width = 40
 	ti.Prompt = "/ "
