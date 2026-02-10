@@ -14,22 +14,22 @@
 // limitations under the License.
 // */
 
-package main
+package cli
 
 import (
-	"github.com/ai-dynamo/grove/arborist/internal/cli"
-	"github.com/alecthomas/kong"
+	"fmt"
+	"os"
 )
 
-func main() {
-	var c cli.CLI
-	ctx := kong.Parse(&c,
-		kong.Name("arborist"),
-		kong.Description("Grove cluster inspector — interactive TUI and CLI tools for PodCliqueSets."),
-		kong.UsageOnError(),
-	)
-	defer c.Cleanup()
+// DiagnosticsCmd collects cluster diagnostics for a PodCliqueSet.
+type DiagnosticsCmd struct {
+	PodCliqueSet string `arg:"" optional:"" help:"Name of the PodCliqueSet (optional, collects all if omitted)."`
+	Namespace    string `short:"n" help:"Kubernetes namespace (defaults to current kubeconfig context namespace)."`
+	Output       string `short:"o" help:"Output directory for diagnostics bundle." default:"."`
+}
 
-	err := ctx.Run(&c)
-	ctx.FatalIfErrorf(err)
+// Run executes the diagnostics command.
+func (c *DiagnosticsCmd) Run(globals *CLI) error {
+	fmt.Fprintln(os.Stderr, "diagnostics command is not yet implemented")
+	return nil
 }

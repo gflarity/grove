@@ -1,0 +1,311 @@
+package tui
+
+import (
+	"fmt"
+
+	"github.com/ai-dynamo/grove/arborist/internal/data"
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// handleForestData handles ForestDataMsg.
+func (m Model) handleForestData(msg ForestDataMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading forest data: %v", msg.Err)
+		m.lastError = msg.Err
+		m.allResources["forest"] = []data.Resource{}
+	} else {
+		debugLogWithContext("loaded %d PodCliqueSets", len(msg.Resources))
+		m.allResources["forest"] = msg.Resources
+	}
+	m.rebuildResourcesTable()
+
+	// If we have PCSes, load events for the first one
+	if len(msg.Resources) > 0 {
+		firstPCS := msg.Resources[0]
+		return m, loadEventsForPCSCmd(m.provider, m.ctx, firstPCS.Name, firstPCS.Namespace)
+	}
+	return m, nil
+}
+
+// handleReplicaData handles ReplicaDataMsg.
+func (m Model) handleReplicaData(msg ReplicaDataMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading replica data: %v", msg.Err)
+		m.lastError = msg.Err
+		return m, nil
+	}
+
+	debugLogWithContext("loaded %d replica indexes for %s/%s", len(msg.ReplicaIndexes), msg.Namespace, msg.PCSName)
+
+	// If there's only 1 replica, skip directly to PodCliqueSetReplicaView
+	if len(msg.ReplicaIndexes) == 1 {
+		replicaIndex := msg.ReplicaIndexes[0]
+		oldViewType := m.viewState.ViewType
+		m.viewState.ViewType = data.PodCliqueSetReplicaView
+		m.viewState.SelectedReplicaIndex = replicaIndex
+
+		debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, fmt.Sprintf("single replica skip, replica=%q", replicaIndex))
+
+		// Build virtual replica resources for tracking (needed for back navigation)
+		key := "PodCliqueSet/" + msg.PCSName
+		m.allResources[key] = []data.Resource{{
+			Name:      msg.PCSName + "-replica-" + replicaIndex,
+			Type:      "PodCliqueSetReplica",
+			Namespace: msg.Namespace,
+		}}
+
+		// Store children data and load events
+		return m, tea.Batch(
+			loadReplicaChildrenCmd(m.provider, m.ctx, msg.PCSName, msg.Namespace, replicaIndex),
+			loadEventsForReplicaCmd(m.provider, m.ctx, msg.PCSName, msg.Namespace, replicaIndex),
+		)
+	}
+
+	// Multiple replicas, show PodCliqueSetView with replica list
+	m.viewState.ViewType = data.PodCliqueSetView
+
+	// Build virtual PodCliqueSetReplica resources
+	key := "PodCliqueSet/" + msg.PCSName
+	resources := make([]data.Resource, 0, len(msg.ReplicaIndexes))
+
+	for _, replicaIndex := range msg.ReplicaIndexes {
+		// Calculate aggregate ready/scheduled counts from ScalingGroups and PodCliques
+		var totalReady, totalScheduled, totalReplicas int
+
+		for _, sg := range msg.ScalingGroupsByReplica[replicaIndex] {
+			var ready, replicas int
+			fmt.Sscanf(sg.Ready, "%d/%d", &ready, &replicas)
+			totalReady += ready
+			totalReplicas += replicas
+
+			var scheduled, scheduledMax int
+			fmt.Sscanf(sg.Scheduled, "%d/%d", &scheduled, &scheduledMax)
+			totalScheduled += scheduled
+		}
+
+		for _, pc := range msg.PodCliquesByReplica[replicaIndex] {
+			var ready, replicas int
+			fmt.Sscanf(pc.Ready, "%d/%d", &ready, &replicas)
+			totalReady += ready
+			totalReplicas += replicas
+
+			var scheduled, scheduledMax int
+			fmt.Sscanf(pc.Scheduled, "%d/%d", &scheduled, &scheduledMax)
+			totalScheduled += scheduled
+		}
+
+		// Resolve topology for replica
+		replicaTopology := "N/A"
+		if m.cachedTopologyInfo != nil && m.cachedTopologyInfo.PCSPackDomain != "" {
+			replicaTopology = data.ResolveTopologyDisplay("", m.cachedTopologyInfo.PCSPackDomain)
+			domain := data.ExtractDomain(replicaTopology)
+			value := data.ResolveTopologyValueByReplicaIndex(domain, msg.PCSName, replicaIndex, m.cachedTopologyInfo, m.cachedPods, m.cachedNodeLabels)
+			replicaTopology = data.EnhanceTopologyDisplay(replicaTopology, value)
+		}
+
+		resources = append(resources, data.Resource{
+			Name:       fmt.Sprintf("%s-replica-%s", msg.PCSName, replicaIndex),
+			Type:       "PodCliqueSetReplica",
+			Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
+			Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
+			Namespace:  msg.Namespace,
+			ParentType: "PodCliqueSet",
+			ParentName: msg.PCSName,
+			Topology:   replicaTopology,
+		})
+	}
+
+	m.allResources[key] = resources
+	m.rebuildResourcesTable()
+
+	return m, loadEventsForPCSCmd(m.provider, m.ctx, msg.PCSName, msg.Namespace)
+}
+
+// handleReplicaChildren handles ReplicaChildrenMsg.
+func (m Model) handleReplicaChildren(msg ReplicaChildrenMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading replica children: %v", msg.Err)
+		m.lastError = msg.Err
+		return m, nil
+	}
+
+	key := "PodCliqueSetReplica/" + msg.PCSName + "/" + msg.ReplicaIndex
+	debugLogWithContext("loaded %d scaling groups and %d pod cliques for replica %s",
+		len(msg.ScalingGroups), len(msg.PodCliques), msg.ReplicaIndex)
+
+	// Set topology on PCSGs
+	for i := range msg.ScalingGroups {
+		pcsgConfigName := data.ExtractConfigName(msg.ScalingGroups[i].Name, msg.PCSName, msg.ReplicaIndex)
+		if m.cachedTopologyInfo != nil {
+			msg.ScalingGroups[i].Topology = m.cachedTopologyInfo.ResolvePCSGTopology(pcsgConfigName)
+			domain := data.ExtractDomain(msg.ScalingGroups[i].Topology)
+			value := data.ResolveTopologyValue(domain, "grove.io/podcliquescalinggroup", msg.ScalingGroups[i].Name, m.cachedTopologyInfo, m.cachedPods, m.cachedNodeLabels)
+			msg.ScalingGroups[i].Topology = data.EnhanceTopologyDisplay(msg.ScalingGroups[i].Topology, value)
+		} else {
+			msg.ScalingGroups[i].Topology = "N/A"
+		}
+	}
+
+	// Set topology on standalone PodCliques
+	for i := range msg.PodCliques {
+		cliqueTemplateName := data.ExtractConfigName(msg.PodCliques[i].Name, msg.PCSName, msg.ReplicaIndex)
+		if m.cachedTopologyInfo != nil {
+			msg.PodCliques[i].Topology = m.cachedTopologyInfo.ResolveStandaloneCliqueTopology(cliqueTemplateName)
+			domain := data.ExtractDomain(msg.PodCliques[i].Topology)
+			value := data.ResolveTopologyValue(domain, "grove.io/podclique", msg.PodCliques[i].Name, m.cachedTopologyInfo, m.cachedPods, m.cachedNodeLabels)
+			msg.PodCliques[i].Topology = data.EnhanceTopologyDisplay(msg.PodCliques[i].Topology, value)
+		} else {
+			msg.PodCliques[i].Topology = "N/A"
+		}
+	}
+
+	// Combine scaling groups and pod cliques
+	resources := append(msg.ScalingGroups, msg.PodCliques...)
+	m.allResources[key] = resources
+	m.rebuildResourcesTable()
+
+	return m, nil
+}
+
+// handlePCSGChildren handles PCSGChildrenMsg.
+func (m Model) handlePCSGChildren(msg PCSGChildrenMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading PCSG children: %v", msg.Err)
+		m.lastError = msg.Err
+		return m, nil
+	}
+
+	key := "PodCliqueScalingGroup/" + msg.PCSGName
+	debugLogWithContext("loaded %d pod cliques for PCSG %s", len(msg.PodCliques), msg.PCSGName)
+
+	// Set topology on PodCliques within this PCSG
+	pcsgConfigName := data.ExtractConfigName(msg.PCSGName, m.viewState.SelectedPodCliqueSet, m.viewState.SelectedReplicaIndex)
+	for i := range msg.PodCliques {
+		cliqueTemplateName := data.ExtractCliqueTemplateNameFromPCSGChild(msg.PodCliques[i].Name, msg.PCSGName)
+		if m.cachedTopologyInfo != nil {
+			msg.PodCliques[i].Topology = m.cachedTopologyInfo.ResolveCliqueInPCSGTopology(cliqueTemplateName, pcsgConfigName)
+			domain := data.ExtractDomain(msg.PodCliques[i].Topology)
+			value := data.ResolveTopologyValue(domain, "grove.io/podclique", msg.PodCliques[i].Name, m.cachedTopologyInfo, m.cachedPods, m.cachedNodeLabels)
+			msg.PodCliques[i].Topology = data.EnhanceTopologyDisplay(msg.PodCliques[i].Topology, value)
+		} else {
+			msg.PodCliques[i].Topology = "N/A"
+		}
+	}
+
+	m.allResources[key] = msg.PodCliques
+	m.rebuildResourcesTable()
+
+	return m, nil
+}
+
+// handlePodCliqueChildren handles PodCliqueChildrenMsg.
+func (m Model) handlePodCliqueChildren(msg PodCliqueChildrenMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading PodClique children: %v", msg.Err)
+		m.lastError = msg.Err
+		return m, nil
+	}
+
+	key := "PodClique/" + msg.PodCliqueName
+	debugLogWithContext("loaded %d pods for PodClique %s", len(msg.Pods), msg.PodCliqueName)
+
+	// Set topology on Pods (inherited from parent PodClique)
+	basePodTopology := "N/A"
+	if m.cachedTopologyInfo != nil {
+		if m.viewState.SelectedScalingGroup != "" {
+			pcsgConfigName := data.ExtractConfigName(m.viewState.SelectedScalingGroup, m.viewState.SelectedPodCliqueSet, m.viewState.SelectedReplicaIndex)
+			cliqueTemplateName := data.ExtractCliqueTemplateNameFromPCSGChild(msg.PodCliqueName, m.viewState.SelectedScalingGroup)
+			effectiveClique := m.cachedTopologyInfo.ResolveCliqueInPCSGTopology(cliqueTemplateName, pcsgConfigName)
+			basePodTopology = data.WrapInherited(effectiveClique)
+		} else {
+			cliqueTemplateName := data.ExtractConfigName(msg.PodCliqueName, m.viewState.SelectedPodCliqueSet, m.viewState.SelectedReplicaIndex)
+			effectiveClique := m.cachedTopologyInfo.ResolveStandaloneCliqueTopology(cliqueTemplateName)
+			basePodTopology = data.WrapInherited(effectiveClique)
+		}
+	}
+
+	domain := data.ExtractDomain(basePodTopology)
+	for i := range msg.Pods {
+		if domain != "" {
+			nodeName := ""
+			if cached, ok := m.cachedPods[msg.Pods[i].Name]; ok {
+				nodeName = cached.NodeName
+			}
+			value := data.ResolveTopologyValueForNode(domain, nodeName, m.cachedTopologyInfo, m.cachedNodeLabels)
+			msg.Pods[i].Topology = data.EnhanceTopologyDisplay(basePodTopology, value)
+		} else {
+			msg.Pods[i].Topology = basePodTopology
+		}
+	}
+
+	m.allResources[key] = msg.Pods
+	m.rebuildResourcesTable()
+
+	return m, nil
+}
+
+// handleEvents handles EventsMsg.
+func (m Model) handleEvents(msg EventsMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading events: %v", msg.Err)
+		m.lastError = msg.Err
+		m.allEvents = []data.Event{}
+	} else {
+		debugLogWithContext("loaded %d events", len(msg.Events))
+		m.allEvents = msg.Events
+	}
+	m.rebuildEventsTable()
+	return m, nil
+}
+
+// handlePodYAML handles PodYAMLMsg.
+func (m Model) handlePodYAML(msg PodYAMLMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading Pod YAML: %v", msg.Err)
+		m.podYAMLData[msg.PodName] = fmt.Sprintf("# Error loading Pod YAML: %v", msg.Err)
+	} else {
+		debugLogWithContext("loaded %d bytes of YAML for Pod %s", len(msg.YAML), msg.PodName)
+		m.podYAMLData[msg.PodName] = msg.YAML
+	}
+	m.updatePodViewport()
+	return m, nil
+}
+
+// handleTopologyInfo handles TopologyInfoMsg.
+func (m Model) handleTopologyInfo(msg TopologyInfoMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading topology info: %v", msg.Err)
+		m.cachedTopologyInfo = nil
+	} else if msg.TopologyInfo != nil {
+		debugLogWithContext("built topology info: PCSPackDomain=%q, %d PCSGs, %d cliques",
+			msg.TopologyInfo.PCSPackDomain, len(msg.TopologyInfo.PCSGPackDomains), len(msg.TopologyInfo.CliquePackDomains))
+		m.cachedTopologyInfo = msg.TopologyInfo
+	}
+	return m, loadNodeLabelsCmd(m.provider, m.ctx, m.cachedTopologyInfo)
+}
+
+// handlePodInfo handles PodInfoMsg.
+func (m Model) handlePodInfo(msg PodInfoMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading pod info: %v", msg.Err)
+		m.cachedPods = nil
+	} else {
+		debugLogWithContext("cached %d pods for PCS %s/%s", len(msg.PodInfos), msg.Namespace, msg.PCSName)
+		m.cachedPods = msg.PodInfos
+	}
+	return m, nil
+}
+
+// handleNodeLabels handles NodeLabelsMsg.
+func (m Model) handleNodeLabels(msg NodeLabelsMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading node labels: %v", msg.Err)
+		m.cachedNodeLabels = nil
+	} else {
+		debugLogWithContext("cached labels for %d nodes", len(msg.NodeLabels))
+		m.cachedNodeLabels = msg.NodeLabels
+	}
+	// Rebuild tables to apply topology values
+	m.rebuildResourcesTable()
+	return m, nil
+}
