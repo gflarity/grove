@@ -234,8 +234,10 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.resourcesTable, cmd = m.resourcesTable.Update(msg)
-			// Load events for newly selected resource
-			m.loadEventsForSelection()
+			// Load/filter events for newly selected resource
+			if eventsCmd := m.eventsCommandForSelection(); eventsCmd != nil {
+				return m, tea.Batch(cmd, eventsCmd)
+			}
 			return m, cmd
 		}
 		var cmd tea.Cmd

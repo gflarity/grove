@@ -406,8 +406,11 @@ func (m Model) renderTopologyPodsSectionHeader() string {
 	count := len(m.topologyPodsTable.Rows())
 	breadcrumb := m.topologyBreadcrumbString()
 	if breadcrumb == "" {
-		// At top-level, show the selected domain name as context
-		if selectedRow := m.topologyDomainsTable.SelectedRow(); len(selectedRow) >= 1 {
+		if len(m.topologyDrillStack) == 0 {
+			// Top-level domain list — pods aren't scoped yet
+			breadcrumb = "N/A"
+		} else if selectedRow := m.topologyDomainsTable.SelectedRow(); len(selectedRow) >= 1 {
+			// Drilled into a domain showing values — show the highlighted value
 			breadcrumb = selectedRow[0]
 		}
 	}
