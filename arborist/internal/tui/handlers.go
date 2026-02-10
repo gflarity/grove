@@ -296,6 +296,75 @@ func (m Model) handlePodInfo(msg PodInfoMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleTopologyCacheSynced handles TopologyCacheSyncedMsg.
+// Reads the initial snapshot, populates tables, and starts listening for updates.
+func (m Model) handleTopologyCacheSynced(_ TopologyCacheSyncedMsg) (tea.Model, tea.Cmd) {
+	debugLogWithContext("topology cache synced")
+
+	if m.topologyCache == nil {
+		return m, nil
+	}
+
+	snapshot := m.topologyCache.Snapshot()
+	m.topologyViewData = snapshot
+
+	// Validate drill stack against new data
+	m.validateTopologyDrillStack()
+
+	m.rebuildTopologyDomainsTable()
+	m.rebuildTopologyPodsTable()
+
+	// Start listening for updates
+	return m, waitForTopologyCacheUpdateCmd(m.topologyCache)
+}
+
+// handleTopologyViewData handles TopologyViewDataMsg.
+// Stores the new snapshot, rebuilds tables preserving drill-down state, and re-subscribes.
+func (m Model) handleTopologyViewData(msg TopologyViewDataMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR from topology cache: %v", msg.Err)
+		m.lastError = msg.Err
+		return m, nil
+	}
+
+	debugLogWithContext("received topology view data update")
+	m.topologyViewData = msg.Data
+
+	// Validate drill stack against new data (domain may have been removed)
+	m.validateTopologyDrillStack()
+
+	m.rebuildTopologyDomainsTable()
+	m.rebuildTopologyPodsTable()
+
+	// Re-subscribe for next update
+	if m.topologyCache != nil {
+		return m, waitForTopologyCacheUpdateCmd(m.topologyCache)
+	}
+	return m, nil
+}
+
+// validateTopologyDrillStack checks that the current drill stack is still valid
+// against the latest topology data. If a domain in the stack no longer exists
+// in the ClusterTopology, the stack is reset to the top level.
+func (m *Model) validateTopologyDrillStack() {
+	if m.topologyViewData == nil || len(m.topologyDrillStack) == 0 {
+		return
+	}
+
+	domainSet := make(map[string]bool)
+	for _, d := range m.topologyViewData.Domains {
+		domainSet[d.Domain] = true
+	}
+
+	for _, entry := range m.topologyDrillStack {
+		if !domainSet[entry.Domain] {
+			debugLogWithContext("drill stack domain %q no longer exists, resetting", entry.Domain)
+			m.topologyDrillStack = nil
+			return
+		}
+	}
+}
+
 // handleNodeLabels handles NodeLabelsMsg.
 func (m Model) handleNodeLabels(msg NodeLabelsMsg) (tea.Model, tea.Cmd) {
 	if msg.Err != nil {

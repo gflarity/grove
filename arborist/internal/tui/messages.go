@@ -84,6 +84,15 @@ type NodeLabelsMsg struct {
 	Err        error
 }
 
+// TopologyViewDataMsg delivers a new snapshot from the topology cache.
+type TopologyViewDataMsg struct {
+	Data *data.TopologyViewData
+	Err  error
+}
+
+// TopologyCacheSyncedMsg signals the topology cache has completed initial sync.
+type TopologyCacheSyncedMsg struct{}
+
 // ErrorMsg is a generic error message for operations that don't have a specific message type.
 type ErrorMsg struct {
 	Operation string

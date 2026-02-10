@@ -42,11 +42,15 @@ func (m Model) View() string {
 		eventsHeight = 3
 	}
 
-	// Resources section (framed)
-	sections = append(sections, m.renderResourcesFrame(resourcesHeight))
-
-	// Events section (framed)
-	sections = append(sections, m.renderEventsFrame(eventsHeight))
+	// Render view-specific panes
+	switch m.viewState.ViewType {
+	case data.TopologyView:
+		sections = append(sections, m.renderTopologyDomainsFrame(resourcesHeight))
+		sections = append(sections, m.renderTopologyPodsFrame(eventsHeight))
+	default:
+		sections = append(sections, m.renderResourcesFrame(resourcesHeight))
+		sections = append(sections, m.renderEventsFrame(eventsHeight))
+	}
 
 	// Note: bottom menu bar removed — shortcuts are now displayed in the header
 	// (see renderHeaderFrame middle column). renderMenuBar() and buildShortcutsString()
@@ -70,6 +74,8 @@ func (m Model) viewDisplayName() string {
 		return "PodClique"
 	case data.PodView:
 		return "Pod"
+	case data.TopologyView:
+		return "Topology"
 	default:
 		return "Unknown"
 	}
@@ -113,6 +119,8 @@ func (m Model) renderHeaderFrame() string {
 		items = append(items, menuItem{"↑↓", "Nav"})
 		items = append(items, menuItem{"enter", "Drill"})
 	}
+
+	items = append(items, menuItem{"t", "Toggle"})
 
 	if m.viewState.ViewType != data.ForestView {
 		items = append(items, menuItem{"esc", "Back"})
@@ -360,6 +368,52 @@ func (m Model) renderEventsFrame(height int) string {
 	return renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
 }
 
+// renderTopologyDomainsFrame renders the topology domains section in a framed box.
+func (m Model) renderTopologyDomainsFrame(height int) string {
+	title := m.renderTopologyDomainsSectionHeader()
+	content := m.topologyDomainsTable.View()
+	return renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
+}
+
+// renderTopologyPodsFrame renders the topology pods section in a framed box.
+func (m Model) renderTopologyPodsFrame(height int) string {
+	title := m.renderTopologyPodsSectionHeader()
+	content := m.topologyPodsTable.View()
+	return renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
+}
+
+// renderTopologyDomainsSectionHeader renders the section header for the topology domains pane.
+func (m Model) renderTopologyDomainsSectionHeader() string {
+	count := len(m.topologyDomainsTable.Rows())
+
+	if len(m.topologyDrillStack) == 0 {
+		return renderSectionHeader("Topology Domains", count, m.activePane == data.TopologyDomainsPane, "")
+	}
+
+	// Drilled in — show the current domain name and breadcrumb
+	currentDomain, _ := m.currentTopologyDomain()
+	breadcrumb := m.topologyBreadcrumbString()
+	label := currentDomain
+	if label == "" {
+		label = "Topology Domains"
+	}
+
+	return renderSectionHeader(label, count, m.activePane == data.TopologyDomainsPane, breadcrumb)
+}
+
+// renderTopologyPodsSectionHeader renders the section header for the topology pods pane.
+func (m Model) renderTopologyPodsSectionHeader() string {
+	count := len(m.topologyPodsTable.Rows())
+	breadcrumb := m.topologyBreadcrumbString()
+	if breadcrumb == "" {
+		// At top-level, show the selected domain name as context
+		if selectedRow := m.topologyDomainsTable.SelectedRow(); len(selectedRow) >= 1 {
+			breadcrumb = selectedRow[0]
+		}
+	}
+	return renderSectionHeader("Pods", count, m.activePane == data.TopologyPodsPane, breadcrumb)
+}
+
 // renderResourcesSection renders the resources section: header + table (no border).
 // Kept for compatibility - now delegates to frame version internals.
 func (m Model) renderResourcesSection(height int) string {
@@ -385,51 +439,49 @@ func (m Model) renderEventsSection(height int) string {
 	return header + "\n" + content
 }
 
+// renderSectionHeader renders a generic section header in k9s style.
+// Example: "Resources [3] Forest > my-pcs" or "Events [5]".
+// The label is styled as active or inactive. The optional suffix is appended after
+// the count (e.g. breadcrumb text, filter indicator).
+func renderSectionHeader(label string, count int, isActive bool, suffix string) string {
+	countStr := SectionCountStyle.Render(fmt.Sprintf("[%d]", count))
+
+	var styledLabel string
+	if isActive {
+		styledLabel = SectionHeaderActiveStyle.Render(label)
+	} else {
+		styledLabel = SectionHeaderInactiveStyle.Render(label)
+	}
+
+	result := styledLabel + " " + countStr
+	if suffix != "" {
+		result += " " + suffix
+	}
+	return result
+}
+
 // renderResourcesSectionHeader renders the resources section header in k9s style.
 // Example: "Resources [3] Forest > my-pcs > replica-0"
 func (m Model) renderResourcesSectionHeader() string {
-	breadcrumb := m.renderBreadcrumb()
-
-	// Count resources
 	viewKey := m.getCurrentViewKey()
 	resources := m.allResources[viewKey]
-	count := len(resources)
-	countStr := SectionCountStyle.Render(fmt.Sprintf("[%d]", count))
 
-	// Active/inactive styling
-	var label string
-	if m.activePane == data.ResourcesPane {
-		label = SectionHeaderActiveStyle.Render("Resources")
-	} else {
-		label = SectionHeaderInactiveStyle.Render("Resources")
-	}
-
-	parts := label + " " + countStr + " " + breadcrumb
+	suffix := m.renderBreadcrumb()
 
 	// Add filter indicator
 	if m.filterText != "" {
-		parts += " " + SectionCountStyle.Render("|") + " " +
+		suffix += " " + SectionCountStyle.Render("|") + " " +
 			FilterBarStyle.Render("filter:") + " " + m.filterText
 	}
 
-	return parts
+	return renderSectionHeader("Resources", len(resources), m.activePane == data.ResourcesPane, suffix)
 }
 
 // renderEventsSectionHeader renders the events section header in k9s style.
 // Example: "Events [5]"
 func (m Model) renderEventsSectionHeader() string {
 	events := m.getFilteredEvents()
-	count := len(events)
-	countStr := SectionCountStyle.Render(fmt.Sprintf("[%d]", count))
-
-	var label string
-	if m.activePane == data.EventsPane {
-		label = SectionHeaderActiveStyle.Render("Events")
-	} else {
-		label = SectionHeaderInactiveStyle.Render("Events")
-	}
-
-	return label + " " + countStr
+	return renderSectionHeader("Events", len(events), m.activePane == data.EventsPane, "")
 }
 
 // renderResourcesTable renders the resources table.
@@ -509,6 +561,8 @@ func (m Model) renderMenuBar() string {
 		items = append(items, menuItem{"enter", "Drill"})
 	}
 
+	items = append(items, menuItem{"t", "Toggle"})
+
 	if m.viewState.ViewType != data.ForestView {
 		items = append(items, menuItem{"esc", "Back"})
 	}
@@ -543,6 +597,8 @@ func (m Model) buildShortcutsString() string {
 		parts = append(parts, "<↑↓>Nav")
 		parts = append(parts, "<enter>Drill")
 	}
+
+	parts = append(parts, "<t>Toggle")
 
 	if m.viewState.ViewType != data.ForestView {
 		parts = append(parts, "<esc>Back")

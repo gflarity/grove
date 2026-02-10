@@ -8,18 +8,51 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// switchPane toggles between Resources and Events panes.
-func (m *Model) switchPane() {
-	if m.activePane == data.ResourcesPane {
-		m.activePane = data.EventsPane
-		m.resourcesTable.Blur()
-		m.eventsTable.Focus()
-	} else {
-		m.activePane = data.ResourcesPane
-		m.eventsTable.Blur()
-		m.resourcesTable.Focus()
+// panesForCurrentView returns the ordered list of panes available in the
+// current view. This is the single source of truth for pane cycling.
+func (m *Model) panesForCurrentView() []data.Pane {
+	if m.viewState.ViewType == data.TopologyView {
+		return []data.Pane{data.TopologyDomainsPane, data.TopologyPodsPane}
 	}
+	return []data.Pane{data.ResourcesPane, data.EventsPane}
+}
+
+// switchPane cycles to the next pane in the current view's pane list.
+func (m *Model) switchPane() {
+	panes := m.panesForCurrentView()
+	currentIdx := 0
+	for i, p := range panes {
+		if p == m.activePane {
+			currentIdx = i
+			break
+		}
+	}
+	nextIdx := (currentIdx + 1) % len(panes)
+	m.activePane = panes[nextIdx]
+	m.updateTableFocus()
 	debugLogWithContext("switched pane to %s", data.PaneName(m.activePane))
+}
+
+// updateTableFocus blurs all tables and focuses the one corresponding to the
+// active pane. Called after any pane change to keep focus state consistent.
+func (m *Model) updateTableFocus() {
+	// Blur all tables
+	m.resourcesTable.Blur()
+	m.eventsTable.Blur()
+	m.topologyDomainsTable.Blur()
+	m.topologyPodsTable.Blur()
+
+	// Focus the active pane's table
+	switch m.activePane {
+	case data.ResourcesPane:
+		m.resourcesTable.Focus()
+	case data.EventsPane:
+		m.eventsTable.Focus()
+	case data.TopologyDomainsPane:
+		m.topologyDomainsTable.Focus()
+	case data.TopologyPodsPane:
+		m.topologyPodsTable.Focus()
+	}
 }
 
 // loadEventsForSelection loads events based on the current selection.
@@ -160,6 +193,117 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 	return m, nil
+}
+
+// topologyDrillInto pushes to the drill stack based on the current selection.
+func (m *Model) topologyDrillInto() {
+	if m.topologyViewData == nil {
+		return
+	}
+
+	if len(m.topologyDrillStack) == 0 {
+		// At top-level domains — drill into the selected domain
+		selectedRow := m.topologyDomainsTable.SelectedRow()
+		if len(selectedRow) < 2 || selectedRow[0] == "N/A" {
+			return // N/A is not drillable
+		}
+
+		domain := selectedRow[0]
+		key := selectedRow[1]
+
+		m.topologyDrillStack = append(m.topologyDrillStack, data.TopologyDrillSelection{
+			Domain: domain,
+			Key:    key,
+			Value:  "", // no value selected yet — will show values list
+		})
+
+		debugLogWithContext("topology drill into domain: %s (key: %s)", domain, key)
+	} else {
+		// At a values list — select the value and advance to next domain
+		selectedRow := m.topologyDomainsTable.SelectedRow()
+		if len(selectedRow) < 1 {
+			return
+		}
+
+		value := selectedRow[0]
+
+		// Set the value on the current drill entry
+		m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = value
+
+		// Check if there's a next domain to drill into
+		currentDomain := m.topologyDrillStack[len(m.topologyDrillStack)-1].Domain
+		domains := m.topologyViewData.Domains
+
+		nextDomain := ""
+		nextKey := ""
+		for i, d := range domains {
+			if d.Domain == currentDomain && i+1 < len(domains) {
+				next := domains[i+1]
+				if next.Domain != "N/A" {
+					nextDomain = next.Domain
+					nextKey = next.Key
+				}
+				break
+			}
+		}
+
+		if nextDomain != "" {
+			// Push next domain onto the stack
+			m.topologyDrillStack = append(m.topologyDrillStack, data.TopologyDrillSelection{
+				Domain: nextDomain,
+				Key:    nextKey,
+				Value:  "", // will show values list for this domain
+			})
+			debugLogWithContext("topology drill into value %q, advancing to domain: %s", value, nextDomain)
+		} else {
+			debugLogWithContext("topology drill: at narrowest domain, no-op")
+			// At the narrowest domain, enter on a value is a no-op.
+			// But we already set the value, so pop it back to no-value state
+			// Actually: the plan says enter at narrowest is no-op. So undo the value set.
+			m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = ""
+			return
+		}
+	}
+
+	m.rebuildTopologyDomainsTable()
+	m.rebuildTopologyPodsTable()
+}
+
+// topologyDrillBack pops the last entry from the drill stack.
+func (m *Model) topologyDrillBack() {
+	if len(m.topologyDrillStack) == 0 {
+		return
+	}
+
+	lastEntry := m.topologyDrillStack[len(m.topologyDrillStack)-1]
+
+	if lastEntry.Value == "" {
+		// At a domain with no value selected yet — pop this entry entirely
+		m.topologyDrillStack = m.topologyDrillStack[:len(m.topologyDrillStack)-1]
+	} else {
+		// Has a value selected — clear the value to go back to value selection
+		m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = ""
+	}
+
+	debugLogWithContext("topology drill back, stack depth now: %d", len(m.topologyDrillStack))
+	m.rebuildTopologyDomainsTable()
+	m.rebuildTopologyPodsTable()
+}
+
+// topologyBreadcrumbString generates a breadcrumb like "region=us-east-1 > zone=us-east-1a".
+func (m *Model) topologyBreadcrumbString() string {
+	if len(m.topologyDrillStack) == 0 {
+		return ""
+	}
+
+	var parts []string
+	for _, entry := range m.topologyDrillStack {
+		if entry.Value != "" {
+			parts = append(parts, entry.Domain+"="+entry.Value)
+		}
+	}
+
+	return strings.Join(parts, " > ")
 }
 
 // navigateBack goes up one level in the hierarchy.

@@ -74,6 +74,13 @@ func (c *TUICmd) Run(globals *CLI) error {
 	arboristVersion := resolveArboristVersion()
 	tui.DebugLog("arborist version=%s", arboristVersion)
 
+	// Create the topology cache for the Topology view (informer-backed)
+	var topologyCache data.TopologyCache
+	if k8sClient != nil {
+		topologyCache = k8sClient.NewTopologyCache()
+		tui.DebugLog("topology cache created")
+	}
+
 	// Create the Bubble Tea model
 	m := tui.NewModel(provider,
 		tui.WithContext(context.Background()),
@@ -82,7 +89,13 @@ func (c *TUICmd) Run(globals *CLI) error {
 		tui.WithUserName(userName),
 		tui.WithK8sVersion(k8sVersion),
 		tui.WithArboristVersion(arboristVersion),
+		tui.WithTopologyCache(topologyCache),
 	)
+
+	// Ensure topology cache is cleaned up when the TUI exits
+	if topologyCache != nil {
+		defer topologyCache.Stop()
+	}
 
 	// Create and run the Bubble Tea program
 	p := tea.NewProgram(

@@ -1514,3 +1514,900 @@ func TestHeaderShowsCurrentViewName(t *testing.T) {
 		t.Errorf("expected header to show 'Pod' view name, got:\n%s", header)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Topology View Tests (Phase 6)
+// ---------------------------------------------------------------------------
+
+// sampleTopologyViewData creates a TopologyViewData snapshot for testing.
+func sampleTopologyViewData() *data.TopologyViewData {
+	return &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+			{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+			{Domain: "rack", Key: "topology.kubernetes.io/rack", ValuesCount: 6},
+			{Domain: "N/A", Key: "—", ValuesCount: -1},
+		},
+		NodeLabels: map[string]map[string]string{
+			"node-01": {
+				"topology.kubernetes.io/region": "us-east-1",
+				"topology.kubernetes.io/zone":   "us-east-1a",
+				"topology.kubernetes.io/rack":   "rack-01",
+			},
+			"node-02": {
+				"topology.kubernetes.io/region": "us-east-1",
+				"topology.kubernetes.io/zone":   "us-east-1a",
+				"topology.kubernetes.io/rack":   "rack-02",
+			},
+			"node-03": {
+				"topology.kubernetes.io/region": "us-east-1",
+				"topology.kubernetes.io/zone":   "us-east-1b",
+				"topology.kubernetes.io/rack":   "rack-03",
+			},
+			"node-04": {
+				"topology.kubernetes.io/region": "us-west-2",
+				"topology.kubernetes.io/zone":   "us-west-2a",
+				"topology.kubernetes.io/rack":   "rack-04",
+			},
+			"node-05": {
+				"topology.kubernetes.io/region": "us-west-2",
+				"topology.kubernetes.io/zone":   "us-west-2a",
+				"topology.kubernetes.io/rack":   "rack-05",
+			},
+			"node-06": {
+				"topology.kubernetes.io/region": "us-west-2",
+				"topology.kubernetes.io/zone":   "us-west-2b",
+				"topology.kubernetes.io/rack":   "rack-06",
+			},
+		},
+		Pods: []data.TopologyViewPod{
+			{Namespace: "default", Node: "node-01", Name: "pod-a", Topology: "rack: rack-01", Phase: "Running"},
+			{Namespace: "default", Node: "node-02", Name: "pod-b", Topology: "rack: rack-02", Phase: "Running"},
+			{Namespace: "default", Node: "node-03", Name: "pod-c", Topology: "rack: rack-03", Phase: "Running"},
+			{Namespace: "default", Node: "node-04", Name: "pod-d", Topology: "rack: rack-04", Phase: "Running"},
+			{Namespace: "default", Node: "node-05", Name: "pod-e", Topology: "rack: rack-05", Phase: "Pending"},
+			{Namespace: "default", Node: "node-06", Name: "pod-f", Topology: "rack: rack-06", Phase: "Running"},
+		},
+		DomainToKey: map[string]string{
+			"region": "topology.kubernetes.io/region",
+			"zone":   "topology.kubernetes.io/zone",
+			"rack":   "topology.kubernetes.io/rack",
+		},
+	}
+}
+
+// newTopologyTestModel creates a Model with a MockTopologyCache pre-loaded
+// with topology data. It simulates toggling to Topology view and receiving
+// the initial cache sync.
+func newTopologyTestModel() Model {
+	mp := data.NewMockProvider()
+	mockCache := data.NewMockTopologyCache()
+	mockCache.SetSnapshot(sampleTopologyViewData())
+
+	m := NewModel(mp, WithTopologyCache(mockCache))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// Toggle to Topology view — this starts the cache
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+
+	// The cmd is startTopologyCacheCmd. Execute it to get TopologyCacheSyncedMsg.
+	if cmd != nil {
+		msg := cmd()
+		if msg != nil {
+			m, _ = applyMsg(m, msg)
+		}
+	}
+
+	return m
+}
+
+func TestTopologyView_ToggleForestToTopology(t *testing.T) {
+	mp := data.NewMockProvider()
+	mp.PodCliqueSets = samplePCSResources()
+	mockCache := data.NewMockTopologyCache()
+	mockCache.SetSnapshot(sampleTopologyViewData())
+
+	m := NewModel(mp, WithTopologyCache(mockCache))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// Initially in Forest view
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Press 't' to toggle to Topology view
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView after pressing t, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.activePane != data.TopologyDomainsPane {
+		t.Fatalf("expected TopologyDomainsPane, got %s", data.PaneName(m.activePane))
+	}
+	if !m.topologyCacheStarted {
+		t.Fatal("expected topologyCacheStarted to be true")
+	}
+
+	// Execute startTopologyCacheCmd to get TopologyCacheSyncedMsg
+	if cmd != nil {
+		msg := cmd()
+		if msg != nil {
+			m, _ = applyMsg(m, msg)
+		}
+	}
+
+	// After sync, view data should be populated
+	if m.topologyViewData == nil {
+		t.Fatal("expected topologyViewData to be set after cache sync")
+	}
+
+	// View should show Topology
+	assertView(t, m, []string{"Topology"})
+}
+
+func TestTopologyView_ToggleTopologyToForest(t *testing.T) {
+	m := newTopologyTestModel()
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Press 't' to toggle back to Forest
+	m = sendRune(m, 't')
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after toggling back, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.activePane != data.ResourcesPane {
+		t.Fatalf("expected ResourcesPane after toggling to Forest, got %s", data.PaneName(m.activePane))
+	}
+}
+
+func TestTopologyView_DomainTableShowsCorrectDomains(t *testing.T) {
+	m := newTopologyTestModel()
+
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 domain rows (region, zone, rack, N/A), got %d", len(rows))
+	}
+
+	// Check domain names
+	expectedDomains := []string{"region", "zone", "rack", "N/A"}
+	for i, expected := range expectedDomains {
+		if rows[i][0] != expected {
+			t.Errorf("row %d: expected domain %q, got %q", i, expected, rows[i][0])
+		}
+	}
+
+	// Check that N/A row has "—" for key
+	if rows[3][1] != "—" {
+		t.Errorf("expected N/A key to be '—', got %q", rows[3][1])
+	}
+}
+
+func TestTopologyView_DrillIntoDomain(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Cursor is on first row (region). Press Enter to drill in.
+	m = sendKey(m, tea.KeyEnter)
+
+	// Should have drill stack with one entry
+	if len(m.topologyDrillStack) != 1 {
+		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
+	}
+	if m.topologyDrillStack[0].Domain != "region" {
+		t.Fatalf("expected drill into 'region', got %q", m.topologyDrillStack[0].Domain)
+	}
+	if m.topologyDrillStack[0].Value != "" {
+		t.Fatalf("expected empty value (showing values list), got %q", m.topologyDrillStack[0].Value)
+	}
+
+	// Domains table should now show distinct region values
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 region values (us-east-1, us-west-2), got %d", len(rows))
+	}
+
+	// Values should be sorted
+	if rows[0][0] != "us-east-1" {
+		t.Errorf("expected first value 'us-east-1', got %q", rows[0][0])
+	}
+	if rows[1][0] != "us-west-2" {
+		t.Errorf("expected second value 'us-west-2', got %q", rows[1][0])
+	}
+}
+
+func TestTopologyView_DrillIntoValueAdvancesToNextDomain(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Drill into region
+	m = sendKey(m, tea.KeyEnter)
+
+	// Select first value (us-east-1) and drill in
+	m = sendKey(m, tea.KeyEnter)
+
+	// Should have advanced to zone domain
+	if len(m.topologyDrillStack) != 2 {
+		t.Fatalf("expected drill stack depth 2, got %d", len(m.topologyDrillStack))
+	}
+	if m.topologyDrillStack[0].Domain != "region" {
+		t.Fatalf("expected first stack entry domain='region', got %q", m.topologyDrillStack[0].Domain)
+	}
+	if m.topologyDrillStack[0].Value != "us-east-1" {
+		t.Fatalf("expected first stack entry value='us-east-1', got %q", m.topologyDrillStack[0].Value)
+	}
+	if m.topologyDrillStack[1].Domain != "zone" {
+		t.Fatalf("expected second stack entry domain='zone', got %q", m.topologyDrillStack[1].Domain)
+	}
+	if m.topologyDrillStack[1].Value != "" {
+		t.Fatalf("expected second stack entry empty value, got %q", m.topologyDrillStack[1].Value)
+	}
+
+	// Should show zone values scoped to us-east-1
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 zone values for us-east-1 (us-east-1a, us-east-1b), got %d", len(rows))
+	}
+	if rows[0][0] != "us-east-1a" {
+		t.Errorf("expected first zone value 'us-east-1a', got %q", rows[0][0])
+	}
+	if rows[1][0] != "us-east-1b" {
+		t.Errorf("expected second zone value 'us-east-1b', got %q", rows[1][0])
+	}
+}
+
+func TestTopologyView_EscGoesBackOneDrillLevel(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Drill into region
+	m = sendKey(m, tea.KeyEnter)
+	if len(m.topologyDrillStack) != 1 {
+		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
+	}
+
+	// Press Esc to go back
+	m = sendKey(m, tea.KeyEsc)
+	if len(m.topologyDrillStack) != 0 {
+		t.Fatalf("expected drill stack to be empty after Esc, got depth %d", len(m.topologyDrillStack))
+	}
+
+	// Should be back at domain list
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 domain rows after Esc, got %d", len(rows))
+	}
+}
+
+func TestTopologyView_EscFromEmptyDrillStackSwitchesToForest(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// At top-level domains (empty drill stack), Esc switches back to Forest
+	if len(m.topologyDrillStack) != 0 {
+		t.Fatalf("expected empty drill stack, got depth %d", len(m.topologyDrillStack))
+	}
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc at top-level Topology, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestTopologyView_PodsTableFiltersCorrectly(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// At top-level, cursor on "region" — pods table should show all pods on nodes
+	// that have the region label key
+	podRows := m.topologyPodsTable.Rows()
+	if len(podRows) != 6 {
+		t.Fatalf("expected 6 pods when highlighting 'region' domain, got %d", len(podRows))
+	}
+
+	// Drill into region (showing values list: us-east-1, us-west-2)
+	m = sendKey(m, tea.KeyEnter)
+
+	// Cursor defaults to first value (us-east-1) — pods are filtered to nodes
+	// matching the highlighted value. us-east-1 has nodes: node-01, node-02, node-03 => 3 pods.
+	podRows = m.topologyPodsTable.Rows()
+	if len(podRows) != 3 {
+		t.Fatalf("expected 3 pods when highlighting us-east-1 value, got %d", len(podRows))
+	}
+
+	// Move cursor down to us-west-2 — pods should change to that region's nodes
+	m = sendKey(m, tea.KeyDown)
+	podRows = m.topologyPodsTable.Rows()
+	// us-west-2 has nodes: node-04, node-05, node-06 => 3 pods
+	if len(podRows) != 3 {
+		t.Fatalf("expected 3 pods when highlighting us-west-2 value, got %d", len(podRows))
+	}
+	for _, row := range podRows {
+		if len(row) >= 3 {
+			name := row[2]
+			if name != "pod-d" && name != "pod-e" && name != "pod-f" {
+				t.Errorf("unexpected pod %q in us-west-2 filtered list", name)
+			}
+		}
+	}
+
+	// Move cursor back up to us-east-1 and select it — advance to zone values
+	m = sendKey(m, tea.KeyUp)
+	m = sendKey(m, tea.KeyEnter)
+
+	// Now at zone values level with region=us-east-1 committed. Zone values are:
+	// us-east-1a (cursor defaults here), us-east-1b.
+	// Highlighting us-east-1a filters to nodes: node-01, node-02 => 2 pods.
+	podRows = m.topologyPodsTable.Rows()
+	if len(podRows) != 2 {
+		t.Fatalf("expected 2 pods when highlighting zone us-east-1a, got %d", len(podRows))
+	}
+
+	// Verify pod names are from us-east-1a nodes (node-01, node-02)
+	podNames := make(map[string]bool)
+	for _, row := range podRows {
+		if len(row) >= 3 {
+			podNames[row[2]] = true
+		}
+	}
+	for _, expected := range []string{"pod-a", "pod-b"} {
+		if !podNames[expected] {
+			t.Errorf("expected pod %q in filtered list", expected)
+		}
+	}
+
+	// Move cursor down to us-east-1b — should show pod-c (node-03)
+	m = sendKey(m, tea.KeyDown)
+	podRows = m.topologyPodsTable.Rows()
+	if len(podRows) != 1 {
+		t.Fatalf("expected 1 pod when highlighting zone us-east-1b, got %d", len(podRows))
+	}
+	if len(podRows[0]) >= 3 && podRows[0][2] != "pod-c" {
+		t.Errorf("expected pod-c for zone us-east-1b, got %q", podRows[0][2])
+	}
+}
+
+func TestTopologyView_TabSwitchesBetweenPanes(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Initially in TopologyDomainsPane
+	if m.activePane != data.TopologyDomainsPane {
+		t.Fatalf("expected TopologyDomainsPane, got %s", data.PaneName(m.activePane))
+	}
+	if !m.topologyDomainsTable.Focused() {
+		t.Fatal("expected topology domains table to be focused")
+	}
+
+	// Press Tab to switch to TopologyPodsPane
+	m = sendKey(m, tea.KeyTab)
+	if m.activePane != data.TopologyPodsPane {
+		t.Fatalf("expected TopologyPodsPane after Tab, got %s", data.PaneName(m.activePane))
+	}
+	if !m.topologyPodsTable.Focused() {
+		t.Fatal("expected topology pods table to be focused after Tab")
+	}
+	if m.topologyDomainsTable.Focused() {
+		t.Fatal("expected topology domains table to be blurred after Tab")
+	}
+
+	// Press Tab again to switch back to TopologyDomainsPane
+	m = sendKey(m, tea.KeyTab)
+	if m.activePane != data.TopologyDomainsPane {
+		t.Fatalf("expected TopologyDomainsPane after second Tab, got %s", data.PaneName(m.activePane))
+	}
+	if !m.topologyDomainsTable.Focused() {
+		t.Fatal("expected topology domains table to be focused after second Tab")
+	}
+}
+
+func TestTopologyView_NADomainIsNotDrillable(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Navigate cursor to N/A row (last row, index 3)
+	m = sendKey(m, tea.KeyDown) // zone
+	m = sendKey(m, tea.KeyDown) // rack
+	m = sendKey(m, tea.KeyDown) // N/A
+
+	// Press Enter on N/A — should be a no-op
+	m = sendKey(m, tea.KeyEnter)
+
+	if len(m.topologyDrillStack) != 0 {
+		t.Fatalf("expected empty drill stack after Enter on N/A, got depth %d", len(m.topologyDrillStack))
+	}
+
+	// Should still be at top-level domains
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 domain rows (no drill happened), got %d", len(rows))
+	}
+}
+
+func TestTopologyView_CacheUpdateRebuildsTables(t *testing.T) {
+	mp := data.NewMockProvider()
+	mockCache := data.NewMockTopologyCache()
+	mockCache.SetSnapshot(sampleTopologyViewData())
+
+	m := NewModel(mp, WithTopologyCache(mockCache))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// Toggle to Topology view and handle sync
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if cmd != nil {
+		msg := cmd()
+		if msg != nil {
+			m, _ = applyMsg(m, msg)
+		}
+	}
+
+	// Drill into region
+	m = sendKey(m, tea.KeyEnter)
+	if len(m.topologyDrillStack) != 1 {
+		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
+	}
+
+	// Now simulate a cache update with additional pods
+	updatedData := sampleTopologyViewData()
+	updatedData.Pods = append(updatedData.Pods, data.TopologyViewPod{
+		Namespace: "default", Node: "node-01", Name: "pod-new", Topology: "rack: rack-01", Phase: "Running",
+	})
+
+	// Deliver TopologyViewDataMsg directly
+	m = mustApply(m, TopologyViewDataMsg{Data: updatedData})
+
+	// Drill stack should be preserved
+	if len(m.topologyDrillStack) != 1 {
+		t.Fatalf("expected drill stack preserved after cache update, got depth %d", len(m.topologyDrillStack))
+	}
+	if m.topologyDrillStack[0].Domain != "region" {
+		t.Fatalf("expected drill stack domain='region', got %q", m.topologyDrillStack[0].Domain)
+	}
+}
+
+func TestTopologyView_DeepDrillDown(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Drill: region -> us-east-1 -> zone values -> us-east-1a -> rack values
+	m = sendKey(m, tea.KeyEnter) // into region (shows values)
+	m = sendKey(m, tea.KeyEnter) // select us-east-1, advance to zone (shows values)
+	m = sendKey(m, tea.KeyEnter) // select us-east-1a, advance to rack (shows values)
+
+	// Stack: [{region, _, us-east-1}, {zone, _, us-east-1a}, {rack, _, ""}]
+	if len(m.topologyDrillStack) != 3 {
+		t.Fatalf("expected drill stack depth 3, got %d", len(m.topologyDrillStack))
+	}
+
+	// Should show rack values for region=us-east-1 AND zone=us-east-1a
+	// Nodes matching: node-01 (rack-01), node-02 (rack-02)
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rack values (rack-01, rack-02), got %d", len(rows))
+	}
+
+	// Drill-back logic:
+	// - If last entry has empty Value: pop the entry
+	// - If last entry has non-empty Value: clear the Value
+
+	// Esc 1: last={rack, _, ""} -> pop. Stack: [{region, _, us-east-1}, {zone, _, us-east-1a}]
+	m = sendKey(m, tea.KeyEsc)
+	if len(m.topologyDrillStack) != 2 {
+		t.Fatalf("expected depth 2 after Esc 1, got %d", len(m.topologyDrillStack))
+	}
+
+	// Esc 2: last={zone, _, us-east-1a} -> clear value. Stack: [{region, _, us-east-1}, {zone, _, ""}]
+	m = sendKey(m, tea.KeyEsc)
+	if len(m.topologyDrillStack) != 2 {
+		t.Fatalf("expected depth 2 after Esc 2 (value cleared), got %d", len(m.topologyDrillStack))
+	}
+
+	// Esc 3: last={zone, _, ""} -> pop. Stack: [{region, _, us-east-1}]
+	m = sendKey(m, tea.KeyEsc)
+	if len(m.topologyDrillStack) != 1 {
+		t.Fatalf("expected depth 1 after Esc 3, got %d", len(m.topologyDrillStack))
+	}
+
+	// Esc 4: last={region, _, us-east-1} -> clear value. Stack: [{region, _, ""}]
+	m = sendKey(m, tea.KeyEsc)
+	if len(m.topologyDrillStack) != 1 {
+		t.Fatalf("expected depth 1 after Esc 4 (value cleared), got %d", len(m.topologyDrillStack))
+	}
+
+	// Esc 5: last={region, _, ""} -> pop. Stack: []
+	m = sendKey(m, tea.KeyEsc)
+	if len(m.topologyDrillStack) != 0 {
+		t.Fatalf("expected empty drill stack after Esc 5, got depth %d", len(m.topologyDrillStack))
+	}
+
+	// Esc 6: empty stack -> switches to Forest
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestTopologyView_NarrowestDomainEnterIsNoop(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Drill down to the narrowest domain (rack)
+	// region -> us-east-1 -> zone -> us-east-1a -> rack -> rack-01 (should be noop)
+	m = sendKey(m, tea.KeyEnter) // into region
+	m = sendKey(m, tea.KeyEnter) // us-east-1 -> zone
+	m = sendKey(m, tea.KeyEnter) // us-east-1a -> rack
+
+	stackDepthAtRack := len(m.topologyDrillStack) // should be 3
+
+	// Select rack-01 and press Enter — should be no-op (N/A is next, not drillable)
+	m = sendKey(m, tea.KeyEnter)
+
+	if len(m.topologyDrillStack) != stackDepthAtRack {
+		t.Fatalf("expected drill stack depth unchanged at narrowest domain, was %d, got %d",
+			stackDepthAtRack, len(m.topologyDrillStack))
+	}
+}
+
+func TestTopologyView_TogglePreservesDrillStackOnReturn(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Drill into region
+	m = sendKey(m, tea.KeyEnter)
+	if len(m.topologyDrillStack) != 1 {
+		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
+	}
+
+	// Toggle to Forest
+	m = sendRune(m, 't')
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Toggle back to Topology — drill stack should be reset
+	m = sendRune(m, 't')
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if len(m.topologyDrillStack) != 0 {
+		t.Fatalf("expected drill stack reset on toggle back, got depth %d", len(m.topologyDrillStack))
+	}
+}
+
+func TestTopologyView_ViewShowsTopologyHeader(t *testing.T) {
+	m := newTopologyTestModel()
+
+	view := m.View()
+	// View should show "Topology" in the header
+	if !strings.Contains(view, "Topology") {
+		t.Errorf("expected view to contain 'Topology', got:\n%s", view)
+	}
+	// Should show Topology Domains section header
+	if !strings.Contains(view, "Topology Domains") {
+		t.Errorf("expected view to contain 'Topology Domains', got:\n%s", view)
+	}
+	// Should show Pods section header
+	if !strings.Contains(view, "Pods") {
+		t.Errorf("expected view to contain 'Pods', got:\n%s", view)
+	}
+}
+
+func TestTopologyView_WindowResizeUpdatesTopologyTables(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Resize
+	m = mustApply(m, tea.WindowSizeMsg{Width: 200, Height: 60})
+
+	// View should still render correctly
+	view := m.View()
+	if view == "" || view == "Loading..." {
+		t.Fatal("expected rendered view after resize")
+	}
+	if !strings.Contains(view, "Topology") {
+		t.Error("expected 'Topology' in resized view")
+	}
+}
+
+func TestTopologyView_ArrowKeysNavigateDomains(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Initial cursor should be at row 0 (region)
+	selectedRow := m.topologyDomainsTable.SelectedRow()
+	if len(selectedRow) < 1 || selectedRow[0] != "region" {
+		t.Fatalf("expected initial selection on 'region', got %v", selectedRow)
+	}
+
+	// Down arrow
+	m = sendKey(m, tea.KeyDown)
+	selectedRow = m.topologyDomainsTable.SelectedRow()
+	if len(selectedRow) < 1 || selectedRow[0] != "zone" {
+		t.Fatalf("expected selection on 'zone' after down arrow, got %v", selectedRow)
+	}
+
+	// Down arrow
+	m = sendKey(m, tea.KeyDown)
+	selectedRow = m.topologyDomainsTable.SelectedRow()
+	if len(selectedRow) < 1 || selectedRow[0] != "rack" {
+		t.Fatalf("expected selection on 'rack' after down arrow, got %v", selectedRow)
+	}
+}
+
+func TestTopologyView_EnterOnPodsPane_IsNoop(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Switch to pods pane
+	m = sendKey(m, tea.KeyTab)
+	if m.activePane != data.TopologyPodsPane {
+		t.Fatalf("expected TopologyPodsPane, got %s", data.PaneName(m.activePane))
+	}
+
+	// Enter on pods pane should not change view or drill state
+	beforeView := m.viewState.ViewType
+	beforeDrillLen := len(m.topologyDrillStack)
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != beforeView {
+		t.Fatalf("expected view unchanged, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if len(m.topologyDrillStack) != beforeDrillLen {
+		t.Fatalf("expected drill stack unchanged, got depth %d", len(m.topologyDrillStack))
+	}
+}
+
+func TestTopologyView_CacheUpdatePreservesDrillDown(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Drill into region > us-east-1 > zone
+	m = sendKey(m, tea.KeyEnter) // into region values
+	m = sendKey(m, tea.KeyEnter) // select us-east-1, into zone values
+
+	originalStackDepth := len(m.topologyDrillStack)
+
+	// Simulate cache update with same domain structure
+	updatedData := sampleTopologyViewData()
+	// Add an extra pod
+	updatedData.Pods = append(updatedData.Pods, data.TopologyViewPod{
+		Namespace: "staging", Node: "node-01", Name: "extra-pod", Topology: "N/A", Phase: "Running",
+	})
+
+	m = mustApply(m, TopologyViewDataMsg{Data: updatedData})
+
+	// Drill stack should be preserved
+	if len(m.topologyDrillStack) != originalStackDepth {
+		t.Fatalf("expected drill stack depth %d after update, got %d", originalStackDepth, len(m.topologyDrillStack))
+	}
+
+	// The zone values should still show us-east-1 zones
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 zone values after update, got %d", len(rows))
+	}
+}
+
+func TestTopologyView_CacheUpdateInvalidDomainResetsDrillStack(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Drill into region
+	m = sendKey(m, tea.KeyEnter)
+	if len(m.topologyDrillStack) != 1 {
+		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
+	}
+
+	// Simulate cache update with different domains (region removed)
+	updatedData := &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+			{Domain: "N/A", Key: "—", ValuesCount: -1},
+		},
+		NodeLabels:  sampleTopologyViewData().NodeLabels,
+		Pods:        sampleTopologyViewData().Pods,
+		DomainToKey: map[string]string{"zone": "topology.kubernetes.io/zone"},
+	}
+
+	m = mustApply(m, TopologyViewDataMsg{Data: updatedData})
+
+	// Drill stack should be reset (region no longer exists)
+	if len(m.topologyDrillStack) != 0 {
+		t.Fatalf("expected drill stack reset when domain removed, got depth %d", len(m.topologyDrillStack))
+	}
+}
+
+func TestTopologyView_TopologyCacheSyncedMsg(t *testing.T) {
+	mp := data.NewMockProvider()
+	mockCache := data.NewMockTopologyCache()
+	mockCache.SetSnapshot(sampleTopologyViewData())
+
+	m := NewModel(mp, WithTopologyCache(mockCache))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// Manually set up topology view state
+	m.viewState.ViewType = data.TopologyView
+	m.activePane = data.TopologyDomainsPane
+	m.topologyCache = mockCache
+	m.topologyCacheStarted = true
+
+	// Send TopologyCacheSyncedMsg
+	m, cmd := applyMsg(m, TopologyCacheSyncedMsg{})
+
+	if m.topologyViewData == nil {
+		t.Fatal("expected topologyViewData to be set after sync")
+	}
+
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 domain rows after sync, got %d", len(rows))
+	}
+
+	// Should have returned a cmd to wait for updates
+	if cmd == nil {
+		t.Fatal("expected waitForTopologyCacheUpdateCmd after sync")
+	}
+}
+
+func TestTopologyView_NilCacheToggleDoesNotPanic(t *testing.T) {
+	mp := data.NewMockProvider()
+	// No topology cache set
+	m := NewModel(mp)
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// Press 't' — should toggle view but not start cache (no cache available)
+	m = sendRune(m, 't')
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView even without cache, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Should not panic and should not have started cache
+	if m.topologyCacheStarted {
+		t.Fatal("expected topologyCacheStarted to be false without a cache")
+	}
+
+	// Toggle back should work
+	m = sendRune(m, 't')
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestTopologyView_EmptySnapshot(t *testing.T) {
+	mp := data.NewMockProvider()
+	mockCache := data.NewMockTopologyCache()
+	// Set a minimal empty snapshot
+	mockCache.SetSnapshot(&data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "N/A", Key: "—", ValuesCount: -1},
+		},
+		NodeLabels:  map[string]map[string]string{},
+		Pods:        []data.TopologyViewPod{},
+		DomainToKey: map[string]string{},
+	})
+
+	m := NewModel(mp, WithTopologyCache(mockCache))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// Toggle to topology
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if cmd != nil {
+		msg := cmd()
+		if msg != nil {
+			m, _ = applyMsg(m, msg)
+		}
+	}
+
+	// Domain table should have just N/A
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 domain row (N/A), got %d", len(rows))
+	}
+	if rows[0][0] != "N/A" {
+		t.Errorf("expected domain 'N/A', got %q", rows[0][0])
+	}
+
+	// Pods table should be empty
+	podRows := m.topologyPodsTable.Rows()
+	if len(podRows) != 0 {
+		t.Fatalf("expected 0 pod rows, got %d", len(podRows))
+	}
+}
+
+func TestTopologyView_BreadcrumbString(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Empty drill stack
+	bc := m.topologyBreadcrumbString()
+	if bc != "" {
+		t.Errorf("expected empty breadcrumb at top level, got %q", bc)
+	}
+
+	// Drill into region
+	m = sendKey(m, tea.KeyEnter)
+	bc = m.topologyBreadcrumbString()
+	// No value selected yet, so breadcrumb should be empty
+	if bc != "" {
+		t.Errorf("expected empty breadcrumb when no value selected, got %q", bc)
+	}
+
+	// Select us-east-1
+	m = sendKey(m, tea.KeyEnter)
+	bc = m.topologyBreadcrumbString()
+	if !strings.Contains(bc, "region=us-east-1") {
+		t.Errorf("expected breadcrumb to contain 'region=us-east-1', got %q", bc)
+	}
+
+	// Select us-east-1a (advance to rack)
+	m = sendKey(m, tea.KeyEnter)
+	bc = m.topologyBreadcrumbString()
+	if !strings.Contains(bc, "region=us-east-1") {
+		t.Errorf("expected breadcrumb to contain 'region=us-east-1', got %q", bc)
+	}
+	if !strings.Contains(bc, "zone=us-east-1a") {
+		t.Errorf("expected breadcrumb to contain 'zone=us-east-1a', got %q", bc)
+	}
+}
+
+func TestTopologyView_MovingDomainCursorUpdatesPods(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// At top-level, cursor on "region" — all pods shown
+	podRows := m.topologyPodsTable.Rows()
+	initialPodCount := len(podRows)
+	if initialPodCount != 6 {
+		t.Fatalf("expected 6 pods when on 'region', got %d", initialPodCount)
+	}
+
+	// Move cursor to "zone" — should still show all pods (all nodes have zone)
+	m = sendKey(m, tea.KeyDown)
+	podRows = m.topologyPodsTable.Rows()
+	if len(podRows) != 6 {
+		t.Fatalf("expected 6 pods when on 'zone', got %d", len(podRows))
+	}
+}
+
+func TestTopologyView_SecondToggleUsesWarmCache(t *testing.T) {
+	mp := data.NewMockProvider()
+	mockCache := data.NewMockTopologyCache()
+	mockCache.SetSnapshot(sampleTopologyViewData())
+
+	m := NewModel(mp, WithTopologyCache(mockCache))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// First toggle: starts cache
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if cmd != nil {
+		msg := cmd()
+		if msg != nil {
+			m, _ = applyMsg(m, msg)
+		}
+	}
+	if !m.topologyCacheStarted {
+		t.Fatal("expected cache to be started after first toggle")
+	}
+
+	// Toggle back to Forest
+	m = sendRune(m, 't')
+
+	// Toggle to Topology again — should NOT return a start cmd (cache already running)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// cmd should be nil (no cache start needed)
+	if cmd != nil {
+		t.Fatal("expected nil cmd on second toggle (cache already warm)")
+	}
+
+	// Data should already be populated from the warm cache
+	if m.topologyViewData == nil {
+		t.Fatal("expected topologyViewData to be set from warm cache")
+	}
+}
+
+func TestTopologyView_TopologyViewDataMsgWithError(t *testing.T) {
+	m := newTopologyTestModel()
+
+	m = mustApply(m, TopologyViewDataMsg{Err: errForTest("cache error")})
+
+	if m.lastError == nil {
+		t.Fatal("expected lastError to be set")
+	}
+	if !strings.Contains(m.lastError.Error(), "cache error") {
+		t.Errorf("expected error message to contain 'cache error', got %q", m.lastError.Error())
+	}
+}

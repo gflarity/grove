@@ -50,6 +50,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case NodeLabelsMsg:
 		return m.handleNodeLabels(msg)
 
+	case TopologyCacheSyncedMsg:
+		return m.handleTopologyCacheSynced(msg)
+
+	case TopologyViewDataMsg:
+		return m.handleTopologyViewData(msg)
+
 	case ErrorMsg:
 		debugLog("ERROR: %s: %v", msg.Operation, msg.Err)
 		m.lastError = msg.Err
@@ -90,15 +96,10 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// Table dimensions — frame uses .Width(m.width - 2), so the content area
 	// inside the border is m.width - 2. Tables and highlight should match.
 	frameContentWidth := m.width - 2
-	m.resourcesTable.SetWidth(frameContentWidth)
-	m.resourcesTable.SetHeight(paneHeight)
-	m.eventsTable.SetWidth(frameContentWidth)
-	m.eventsTable.SetHeight(paneHeight)
-
-	// Update table styles so the selected-row highlight spans the full frame width
-	styledWidth := ArboristTableStylesWithWidth(frameContentWidth)
-	m.resourcesTable.SetStyles(styledWidth)
-	m.eventsTable.SetStyles(styledWidth)
+	resizeTable(&m.resourcesTable, frameContentWidth, paneHeight)
+	resizeTable(&m.eventsTable, frameContentWidth, paneHeight)
+	resizeTable(&m.topologyDomainsTable, frameContentWidth, paneHeight)
+	resizeTable(&m.topologyPodsTable, frameContentWidth, paneHeight)
 
 	// Update viewport for pod view
 	m.podViewport.Width = frameContentWidth
@@ -110,6 +111,10 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// Rebuild tables
 	m.rebuildResourcesTable()
 	m.rebuildEventsTable()
+	if m.viewState.ViewType == data.TopologyView {
+		m.rebuildTopologyDomainsTable()
+		m.rebuildTopologyPodsTable()
+	}
 
 	if !m.ready {
 		m.ready = true
@@ -179,16 +184,48 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyEsc:
+		// In Topology view with empty drill stack, switch back to Forest
+		if m.viewState.ViewType == data.TopologyView && len(m.topologyDrillStack) == 0 {
+			m.viewState.ViewType = data.ForestView
+			m.activePane = data.ResourcesPane
+			m.updateTableFocus()
+			debugLogWithContext("switched from TopologyView to ForestView via Esc")
+			return m, nil
+		}
+		// In Topology view with drill stack, pop back
+		if m.viewState.ViewType == data.TopologyView {
+			m.topologyDrillBack()
+			return m, nil
+		}
 		return m.navigateBack()
 
 	case tea.KeyEnter:
+		// Topology view: drill into domains
+		if m.viewState.ViewType == data.TopologyView && m.activePane == data.TopologyDomainsPane {
+			m.topologyDrillInto()
+			return m, nil
+		}
 		if m.activePane == data.ResourcesPane {
 			return m.navigateInto()
 		}
 		return m, nil
 
 	case tea.KeyUp, tea.KeyDown:
-		// Pass to active table
+		// Topology view key handling
+		if m.viewState.ViewType == data.TopologyView {
+			if m.activePane == data.TopologyDomainsPane {
+				var cmd tea.Cmd
+				m.topologyDomainsTable, cmd = m.topologyDomainsTable.Update(msg)
+				// Rebuild pods table based on new domain selection
+				m.rebuildTopologyPodsTable()
+				return m, cmd
+			}
+			var cmd tea.Cmd
+			m.topologyPodsTable, cmd = m.topologyPodsTable.Update(msg)
+			return m, cmd
+		}
+
+		// Forest view key handling
 		if m.activePane == data.ResourcesPane {
 			if m.viewState.ViewType == data.PodView {
 				var cmd tea.Cmd
@@ -210,6 +247,8 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "q", "Q":
 			debugLogWithContext("quitting (q)")
 			return m, tea.Quit
+		case "t", "T":
+			return m.toggleTopologyView()
 		case "/":
 			m.filterActive = true
 			m.filterInput.SetValue(m.filterText)
@@ -219,5 +258,39 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	return m, nil
+}
+
+// toggleTopologyView switches between Forest and Topology views.
+func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
+	if m.viewState.ViewType == data.TopologyView {
+		// Switch back to Forest
+		m.viewState.ViewType = data.ForestView
+		m.activePane = data.ResourcesPane
+		m.updateTableFocus()
+		debugLogWithContext("toggled from TopologyView to ForestView")
+		return m, nil
+	}
+
+	// Switch to Topology view (only from ForestView or any forest sub-view)
+	m.viewState.ViewType = data.TopologyView
+	m.activePane = data.TopologyDomainsPane
+	m.topologyDrillStack = nil // reset drill state
+	m.updateTableFocus()
+	debugLogWithContext("toggled to TopologyView")
+
+	// Start cache if not already started
+	if !m.topologyCacheStarted && m.topologyCache != nil {
+		m.topologyCacheStarted = true
+		debugLogWithContext("starting topology cache")
+		return m, startTopologyCacheCmd(m.topologyCache, m.ctx)
+	}
+
+	// Cache already running — rebuild from existing snapshot
+	if m.topologyCache != nil {
+		m.topologyViewData = m.topologyCache.Snapshot()
+		m.rebuildTopologyDomainsTable()
+		m.rebuildTopologyPodsTable()
+	}
 	return m, nil
 }
