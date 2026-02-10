@@ -4,14 +4,15 @@ import "github.com/charmbracelet/bubbles/key"
 
 // KeyMap defines all key bindings for the arborist TUI.
 type KeyMap struct {
-	Quit   key.Binding
-	CtrlC  key.Binding
-	Tab    key.Binding
-	Enter  key.Binding
-	Back   key.Binding
-	Filter key.Binding
-	Up     key.Binding
-	Down   key.Binding
+	Quit     key.Binding
+	CtrlC    key.Binding
+	Tab      key.Binding
+	Enter    key.Binding
+	Back     key.Binding
+	Filter   key.Binding
+	Up       key.Binding
+	Down     key.Binding
+	Topology key.Binding
 }
 
 // DefaultKeyMap returns the default key bindings matching the existing TUI behavior.
@@ -49,13 +50,17 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("down"),
 			key.WithHelp("↓", "down"),
 		),
+		Topology: key.NewBinding(
+			key.WithKeys("t", "T"),
+			key.WithHelp("t", "toggle topology"),
+		),
 	}
 }
 
 // ShortHelp returns the key bindings shown in the short help view (status bar).
 func (k KeyMap) ShortHelp() []key.Binding {
 	return []key.Binding{
-		k.Filter, k.Tab, k.Up, k.Down, k.Enter, k.Back, k.Quit,
+		k.Filter, k.Tab, k.Up, k.Down, k.Enter, k.Topology, k.Back, k.Quit,
 	}
 }
 
@@ -63,6 +68,6 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Filter, k.Tab, k.Up, k.Down},
-		{k.Enter, k.Back, k.Quit, k.CtrlC},
+		{k.Enter, k.Topology, k.Back, k.Quit, k.CtrlC},
 	}
 }

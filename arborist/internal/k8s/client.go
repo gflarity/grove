@@ -60,6 +60,13 @@ func NewK8sClient() (*K8sClient, error) {
 	}, nil
 }
 
+// NewTopologyCache creates a new InformerTopologyCache using this client's
+// clientset and dynamic client. The caller is responsible for calling Start()
+// and Stop() on the returned cache.
+func (k *K8sClient) NewTopologyCache() data.TopologyCache {
+	return NewInformerTopologyCache(k.clientset, k.dynamicClient)
+}
+
 // GetServerVersion returns the Kubernetes server version string (e.g. "v1.33.5+k3s1").
 // Returns "(unknown)" if the version cannot be determined.
 func (k *K8sClient) GetServerVersion() string {

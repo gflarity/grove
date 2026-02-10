@@ -27,6 +27,8 @@ type Pane int
 const (
 	ResourcesPane Pane = iota
 	EventsPane
+	TopologyDomainsPane
+	TopologyPodsPane
 )
 
 // ViewType represents the current view in the hierarchy.
@@ -39,6 +41,7 @@ const (
 	PodCliqueScalingGroupView
 	PodCliqueView
 	PodView
+	TopologyView
 )
 
 // ViewState tracks the current navigation state.
@@ -82,6 +85,37 @@ type CachedPodInfo struct {
 	Labels   map[string]string
 }
 
+// TopologyDomainRow represents a row in the Topology Domains table.
+type TopologyDomainRow struct {
+	Domain      string // "region", "rack", "N/A"
+	Key         string // node label key, or "—" for N/A
+	ValuesCount int    // count of distinct values across nodes, or -1 for N/A
+}
+
+// TopologyDrillSelection tracks one level of hierarchical drill-down.
+type TopologyDrillSelection struct {
+	Domain string // e.g. "region"
+	Key    string // e.g. "topology.kubernetes.io/region"
+	Value  string // e.g. "us-east-1" (empty if just selected the domain row)
+}
+
+// TopologyViewPod represents a pod in the Topology Pods table.
+type TopologyViewPod struct {
+	Namespace string
+	Node      string // node name or "<pending>"
+	Name      string
+	Topology  string // "rack: rack-0", "(rack: rack-0)", "N/A"
+	Phase     string // Running, Pending, etc.
+}
+
+// TopologyViewData holds a point-in-time snapshot of all topology-relevant cluster state.
+type TopologyViewData struct {
+	Domains     []TopologyDomainRow         // sorted broadest to narrowest, N/A last
+	NodeLabels  map[string]map[string]string // nodeName -> labelKey -> labelValue
+	Pods        []TopologyViewPod           // all pods with topology info
+	DomainToKey map[string]string           // domain -> node label key (from ClusterTopology)
+}
+
 // ViewTypeName returns a human-readable name for a ViewType.
 func ViewTypeName(vt ViewType) string {
 	switch vt {
@@ -97,6 +131,8 @@ func ViewTypeName(vt ViewType) string {
 		return "PodCliqueView"
 	case PodView:
 		return "PodView"
+	case TopologyView:
+		return "TopologyView"
 	default:
 		return fmt.Sprintf("ViewType(%d)", vt)
 	}
@@ -109,6 +145,10 @@ func PaneName(p Pane) string {
 		return "Resources"
 	case EventsPane:
 		return "Events"
+	case TopologyDomainsPane:
+		return "TopologyDomains"
+	case TopologyPodsPane:
+		return "TopologyPods"
 	default:
 		return fmt.Sprintf("Pane(%d)", p)
 	}

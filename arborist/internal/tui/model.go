@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/ai-dynamo/grove/arborist/internal/data"
@@ -37,6 +38,24 @@ var (
 		{Title: "AGE", Weight: 1},
 		{Title: "FROM", Weight: 3},
 		{Title: "MESSAGE", Weight: 8},
+	}
+
+	topologyDomainColumnSpecs = []ColumnSpec{
+		{Title: "DOMAIN", Weight: 2},
+		{Title: "KEY", Weight: 5},
+		{Title: "VALUES", Weight: 1},
+	}
+
+	topologyDrillValueColumnSpecs = []ColumnSpec{
+		{Title: "VALUE", Weight: 1},
+	}
+
+	topologyPodColumnSpecs = []ColumnSpec{
+		{Title: "NAMESPACE", Weight: 2},
+		{Title: "NODE", Weight: 2},
+		{Title: "NAME", Weight: 4},
+		{Title: "TOPOLOGY", Weight: 3},
+		{Title: "PHASE", Weight: 1},
 	}
 )
 
@@ -100,10 +119,18 @@ type Model struct {
 	cachedNodeLabels   map[string]map[string]string
 
 	// Sub-models (bubbles components)
-	resourcesTable table.Model
-	eventsTable    table.Model
-	filterInput    textinput.Model
-	podViewport    viewport.Model
+	resourcesTable       table.Model
+	eventsTable          table.Model
+	topologyDomainsTable table.Model
+	topologyPodsTable    table.Model
+	filterInput          textinput.Model
+	podViewport          viewport.Model
+
+	// Topology view state
+	topologyViewData     *data.TopologyViewData
+	topologyDrillStack   []data.TopologyDrillSelection
+	topologyCache        data.TopologyCache
+	topologyCacheStarted bool
 
 	// Dependencies (injected)
 	provider data.DataProvider
@@ -174,6 +201,13 @@ func WithArboristVersion(version string) Option {
 	}
 }
 
+// WithTopologyCache sets the topology cache for the Topology view.
+func WithTopologyCache(cache data.TopologyCache) Option {
+	return func(m *Model) {
+		m.topologyCache = cache
+	}
+}
+
 // NewModel creates a new Model with the given DataProvider and options.
 func NewModel(provider data.DataProvider, opts ...Option) Model {
 	// Initialize filter input
@@ -202,32 +236,31 @@ func NewModel(provider data.DataProvider, opts ...Option) Model {
 	}
 
 	// Initialize tables with empty data (will be populated after data loads)
-	m.resourcesTable = m.createResourcesTableModel()
-	m.eventsTable = m.createEventsTableModel()
+	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
+	m.eventsTable = createTableModel(eventColumnSpecs, false)
+	m.topologyDomainsTable = createTableModel(topologyDomainColumnSpecs, true)
+	m.topologyPodsTable = createTableModel(topologyPodColumnSpecs, false)
 
 	return m
 }
 
-// createResourcesTableModel creates the resources table with appropriate columns.
-func (m *Model) createResourcesTableModel() table.Model {
-	columns := computeWeightedColumns(resourceColumnSpecs, 80) // placeholder widths until first resize
-	t := table.New(
-		table.WithColumns(columns),
-		table.WithRows([]table.Row{}),
-		table.WithFocused(true),
-		table.WithHeight(10),
-	)
-	t.SetStyles(ArboristTableStyles())
-	return t
+// resizeTable updates a table's width, height, and styles to match the current
+// terminal dimensions. Used by handleWindowSize to avoid duplicating resize
+// logic for every table in the TUI.
+func resizeTable(t *table.Model, width, height int) {
+	t.SetWidth(width)
+	t.SetHeight(height)
+	t.SetStyles(ArboristTableStylesWithWidth(width))
 }
 
-// createEventsTableModel creates the events table with appropriate columns.
-func (m *Model) createEventsTableModel() table.Model {
-	columns := computeWeightedColumns(eventColumnSpecs, 80) // placeholder widths until first resize
+// createTableModel creates a table.Model with the given column spec and focus state.
+// This is the shared factory used by all table types in the TUI.
+func createTableModel(specs []ColumnSpec, focused bool) table.Model {
+	columns := computeWeightedColumns(specs, 80) // placeholder widths until first resize
 	t := table.New(
 		table.WithColumns(columns),
 		table.WithRows([]table.Row{}),
-		table.WithFocused(false),
+		table.WithFocused(focused),
 		table.WithHeight(10),
 	)
 	t.SetStyles(ArboristTableStyles())
@@ -360,4 +393,207 @@ func (m *Model) updatePodViewport() {
 		yaml = "# No YAML data available for pod: " + m.viewState.SelectedPod
 	}
 	m.podViewport.SetContent(yaml)
+}
+
+// rebuildTopologyDomainsTable rebuilds the top pane of the Topology view.
+// If the drill stack is empty, shows domain rows. If drilled in, shows distinct
+// values for the current domain scoped by the breadcrumb.
+func (m *Model) rebuildTopologyDomainsTable() {
+	if m.topologyViewData == nil {
+		m.topologyDomainsTable.SetRows([]table.Row{})
+		return
+	}
+
+	// Remember what the user was looking at for cursor restoration
+	prevSelectedName := ""
+	if row := m.topologyDomainsTable.SelectedRow(); len(row) >= 1 {
+		prevSelectedName = row[0]
+	}
+
+	if len(m.topologyDrillStack) == 0 {
+		// Top-level: show domain rows (DOMAIN, KEY, VALUES)
+		// Clear rows, set columns, then set rows to avoid column/row count mismatch
+		// panics (SetColumns and SetRows both trigger UpdateViewport which renders).
+		m.topologyDomainsTable.SetRows([]table.Row{})
+		w := tableContentWidth(m.width, len(topologyDomainColumnSpecs))
+		m.topologyDomainsTable.SetColumns(computeWeightedColumns(topologyDomainColumnSpecs, w))
+
+		rows := make([]table.Row, 0, len(m.topologyViewData.Domains))
+		for _, d := range m.topologyViewData.Domains {
+			valuesStr := "—"
+			if d.ValuesCount >= 0 {
+				valuesStr = fmt.Sprintf("%d", d.ValuesCount)
+			}
+			rows = append(rows, table.Row{d.Domain, d.Key, valuesStr})
+		}
+		m.topologyDomainsTable.SetRows(rows)
+	} else {
+		// Drilled in: show distinct values for the current domain
+		currentDomain, currentKey := m.currentTopologyDomain()
+		if currentDomain == "" {
+			m.topologyDomainsTable.SetRows([]table.Row{})
+			return
+		}
+
+		// Clear rows, set columns, then set rows to avoid column/row mismatch panics.
+		m.topologyDomainsTable.SetRows([]table.Row{})
+		w := tableContentWidth(m.width, len(topologyDrillValueColumnSpecs))
+		m.topologyDomainsTable.SetColumns(computeWeightedColumns(topologyDrillValueColumnSpecs, w))
+
+		// Get matching nodes based on breadcrumb constraints
+		matchingNodes := data.FilterNodesByBreadcrumb(m.topologyViewData.NodeLabels, m.topologyDrillStack)
+
+		// Get distinct values for the current domain key
+		values := data.DistinctValuesForDomain(m.topologyViewData.NodeLabels, currentKey, matchingNodes)
+
+		rows := make([]table.Row, 0, len(values))
+		for _, v := range values {
+			rows = append(rows, table.Row{v})
+		}
+		m.topologyDomainsTable.SetRows(rows)
+
+		_ = currentDomain // used for title rendering
+	}
+
+	// Restore cursor by name
+	rows := m.topologyDomainsTable.Rows()
+	if prevSelectedName != "" {
+		for i, row := range rows {
+			if len(row) >= 1 && row[0] == prevSelectedName {
+				m.topologyDomainsTable.SetCursor(i)
+				return
+			}
+		}
+	}
+	// Ensure cursor is valid (bubbles/table doesn't auto-reset cursor when rows
+	// go from 0→N, so we must explicitly set it).
+	if len(rows) > 0 {
+		cursor := m.topologyDomainsTable.Cursor()
+		if cursor < 0 || cursor >= len(rows) {
+			m.topologyDomainsTable.SetCursor(0)
+		}
+	}
+}
+
+// rebuildTopologyPodsTable rebuilds the bottom pane of the Topology view.
+// It shows pods on nodes matching the current breadcrumb constraints.
+func (m *Model) rebuildTopologyPodsTable() {
+	if m.topologyViewData == nil {
+		m.topologyPodsTable.SetRows([]table.Row{})
+		return
+	}
+
+	// Remember what the user was looking at for cursor restoration
+	prevSelectedName := ""
+	if row := m.topologyPodsTable.SelectedRow(); len(row) >= 3 {
+		prevSelectedName = row[2] // NAME column
+	}
+
+	// Get matching nodes based on breadcrumb
+	matchingNodes := data.FilterNodesByBreadcrumb(m.topologyViewData.NodeLabels, m.topologyDrillStack)
+
+	// Additionally filter by the currently highlighted row in the domains table.
+	if len(m.topologyDrillStack) == 0 {
+		// At top-level: highlighted row is a domain — filter to nodes that have that label key.
+		selectedRow := m.topologyDomainsTable.SelectedRow()
+		if len(selectedRow) >= 2 && selectedRow[0] != "N/A" {
+			domainKey := selectedRow[1] // KEY column
+			var filtered []string
+			for _, nodeName := range matchingNodes {
+				if labels, ok := m.topologyViewData.NodeLabels[nodeName]; ok {
+					if _, hasKey := labels[domainKey]; hasKey {
+						filtered = append(filtered, nodeName)
+					}
+				}
+			}
+			matchingNodes = filtered
+		}
+	} else {
+		// Drilled into a values list: highlighted row is a value — filter to nodes
+		// where the current domain's label key matches the highlighted value.
+		lastEntry := m.topologyDrillStack[len(m.topologyDrillStack)-1]
+		if lastEntry.Value == "" {
+			// Showing the values list for this domain; use the highlighted value
+			selectedRow := m.topologyDomainsTable.SelectedRow()
+			if len(selectedRow) >= 1 && selectedRow[0] != "" {
+				highlightedValue := selectedRow[0]
+				var filtered []string
+				for _, nodeName := range matchingNodes {
+					if labels, ok := m.topologyViewData.NodeLabels[nodeName]; ok {
+						if labels[lastEntry.Key] == highlightedValue {
+							filtered = append(filtered, nodeName)
+						}
+					}
+				}
+				matchingNodes = filtered
+			}
+		}
+	}
+
+	// Filter pods by matching nodes
+	filteredPods := data.FilterPodsByNodes(m.topologyViewData.Pods, matchingNodes)
+
+	rows := make([]table.Row, 0, len(filteredPods))
+	for _, p := range filteredPods {
+		rows = append(rows, table.Row{p.Namespace, p.Node, p.Name, p.Topology, p.Phase})
+	}
+	m.topologyPodsTable.SetRows(rows)
+
+	// Set column widths
+	w := tableContentWidth(m.width, len(topologyPodColumnSpecs))
+	m.topologyPodsTable.SetColumns(computeWeightedColumns(topologyPodColumnSpecs, w))
+
+	// Restore cursor by name
+	if prevSelectedName != "" {
+		for i, row := range rows {
+			if len(row) >= 3 && row[2] == prevSelectedName {
+				m.topologyPodsTable.SetCursor(i)
+				return
+			}
+		}
+	}
+	// Ensure cursor is valid (bubbles/table doesn't auto-reset cursor when rows
+	// go from 0→N, so we must explicitly set it).
+	if len(rows) > 0 {
+		cursor := m.topologyPodsTable.Cursor()
+		if cursor < 0 || cursor >= len(rows) {
+			m.topologyPodsTable.SetCursor(0)
+		}
+	}
+}
+
+// currentTopologyDomain returns the domain name and label key for the current
+// drill-down level. If drilled into a domain but no value selected yet, it
+// returns that domain. If a value was selected, it returns the next domain
+// in the hierarchy.
+func (m *Model) currentTopologyDomain() (string, string) {
+	if m.topologyViewData == nil || len(m.topologyViewData.Domains) == 0 {
+		return "", ""
+	}
+
+	// Find the domain we should be showing values for
+	if len(m.topologyDrillStack) == 0 {
+		return "", ""
+	}
+
+	lastEntry := m.topologyDrillStack[len(m.topologyDrillStack)-1]
+
+	// If the last entry has no value, we're showing values for that domain
+	if lastEntry.Value == "" {
+		return lastEntry.Domain, lastEntry.Key
+	}
+
+	// Last entry has a value — find the next domain in the hierarchy
+	domains := m.topologyViewData.Domains
+	for i, d := range domains {
+		if d.Domain == lastEntry.Domain && i+1 < len(domains) {
+			next := domains[i+1]
+			if next.Domain == "N/A" {
+				return "", "" // no more drillable domains
+			}
+			return next.Domain, next.Key
+		}
+	}
+
+	return "", "" // at the narrowest domain
 }

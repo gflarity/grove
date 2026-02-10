@@ -248,6 +248,32 @@ func loadPodInfoCmd(provider data.DataProvider, ctx context.Context, pcsName, na
 	}
 }
 
+// startTopologyCacheCmd starts the topology cache and waits for initial sync.
+func startTopologyCacheCmd(cache data.TopologyCache, ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("startTopologyCache")
+		if err := cache.Start(ctx); err != nil {
+			return ErrorMsg{Operation: "startTopologyCache", Err: err}
+		}
+		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		cache.WaitForSync(syncCtx)
+		return TopologyCacheSyncedMsg{}
+	}
+}
+
+// waitForTopologyCacheUpdateCmd blocks until the cache has a new snapshot.
+func waitForTopologyCacheUpdateCmd(cache data.TopologyCache) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("waitForTopologyCacheUpdate")
+		_, ok := <-cache.Updates()
+		if !ok {
+			return nil // channel closed, cache stopped
+		}
+		return TopologyViewDataMsg{Data: cache.Snapshot()}
+	}
+}
+
 // loadNodeLabelsCmd creates a command to load node topology labels.
 func loadNodeLabelsCmd(provider data.DataProvider, ctx context.Context, topologyInfo *data.TopologyInfo) tea.Cmd {
 	return func() tea.Msg {
