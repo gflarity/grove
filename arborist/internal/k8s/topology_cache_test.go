@@ -216,18 +216,15 @@ func TestInformerTopologyCache_RebuildSnapshot(t *testing.T) {
 		t.Fatal("Snapshot() returned nil after sync + update")
 	}
 
-	// Verify domains: zone, rack, N/A
-	if len(snap.Domains) != 3 {
-		t.Fatalf("expected 3 domains (zone, rack, N/A), got %d", len(snap.Domains))
+	// Verify domains: zone, rack
+	if len(snap.Domains) != 2 {
+		t.Fatalf("expected 2 domains (zone, rack), got %d", len(snap.Domains))
 	}
 	if snap.Domains[0].Domain != "zone" {
 		t.Errorf("domain[0] = %q, want %q", snap.Domains[0].Domain, "zone")
 	}
 	if snap.Domains[1].Domain != "rack" {
 		t.Errorf("domain[1] = %q, want %q", snap.Domains[1].Domain, "rack")
-	}
-	if snap.Domains[2].Domain != "N/A" {
-		t.Errorf("domain[2] = %q, want %q", snap.Domains[2].Domain, "N/A")
 	}
 
 	// Verify zone has 2 distinct values
@@ -329,12 +326,9 @@ func TestInformerTopologyCache_EmptyCluster(t *testing.T) {
 		t.Fatal("Snapshot() returned nil after sync")
 	}
 
-	// Only N/A domain when there's no ClusterTopology
-	if len(snap.Domains) != 1 {
-		t.Fatalf("expected 1 domain (N/A), got %d", len(snap.Domains))
-	}
-	if snap.Domains[0].Domain != "N/A" {
-		t.Errorf("domain[0] = %q, want %q", snap.Domains[0].Domain, "N/A")
+	// No domains when there's no ClusterTopology
+	if len(snap.Domains) != 0 {
+		t.Fatalf("expected 0 domains, got %d", len(snap.Domains))
 	}
 
 	if len(snap.Pods) != 0 {

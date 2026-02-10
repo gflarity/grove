@@ -494,20 +494,11 @@ func (m *Model) rebuildTopologyPodsTable() {
 
 	// Additionally filter by the currently highlighted row in the domains table.
 	if len(m.topologyDrillStack) == 0 {
-		// At top-level: highlighted row is a domain — filter to nodes that have that label key.
-		selectedRow := m.topologyDomainsTable.SelectedRow()
-		if len(selectedRow) >= 2 && selectedRow[0] != "N/A" {
-			domainKey := selectedRow[1] // KEY column
-			var filtered []string
-			for _, nodeName := range matchingNodes {
-				if labels, ok := m.topologyViewData.NodeLabels[nodeName]; ok {
-					if _, hasKey := labels[domainKey]; hasKey {
-						filtered = append(filtered, nodeName)
-					}
-				}
-			}
-			matchingNodes = filtered
-		}
+		// At top-level: don't show any pods until the user drills into a domain.
+		m.topologyPodsTable.SetRows([]table.Row{})
+		w := tableContentWidth(m.width, len(topologyPodColumnSpecs))
+		m.topologyPodsTable.SetColumns(computeWeightedColumns(topologyPodColumnSpecs, w))
+		return
 	} else {
 		// Drilled into a values list: highlighted row is a value — filter to nodes
 		// where the current domain's label key matches the highlighted value.
@@ -588,9 +579,6 @@ func (m *Model) currentTopologyDomain() (string, string) {
 	for i, d := range domains {
 		if d.Domain == lastEntry.Domain && i+1 < len(domains) {
 			next := domains[i+1]
-			if next.Domain == "N/A" {
-				return "", "" // no more drillable domains
-			}
 			return next.Domain, next.Key
 		}
 	}

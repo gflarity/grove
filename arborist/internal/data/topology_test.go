@@ -757,8 +757,8 @@ func TestBuildTopologyViewData(t *testing.T) {
 	result := BuildTopologyViewData(levels, pcsSpecs, pods, nodeLabels)
 
 	// Verify domains
-	if len(result.Domains) != 4 { // region, zone, rack, N/A
-		t.Fatalf("expected 4 domains, got %d", len(result.Domains))
+	if len(result.Domains) != 3 { // region, zone, rack
+		t.Fatalf("expected 3 domains, got %d", len(result.Domains))
 	}
 
 	// Check domain ordering and values
@@ -770,7 +770,6 @@ func TestBuildTopologyViewData(t *testing.T) {
 		{"region", "topology.kubernetes.io/region", 2},   // us-east-1, us-west-2
 		{"zone", "topology.kubernetes.io/zone", 3},       // us-east-1a, us-east-1b, us-west-2a
 		{"rack", "topology.io/rack", 3},                  // rack-0, rack-1, rack-2
-		{"N/A", "—", -1},
 	}
 	for i, exp := range expectedDomains {
 		if result.Domains[i].Domain != exp.domain {
@@ -837,11 +836,8 @@ func TestBuildTopologyViewData(t *testing.T) {
 func TestBuildTopologyViewData_NoLevels(t *testing.T) {
 	result := BuildTopologyViewData(nil, nil, nil, nil)
 
-	if len(result.Domains) != 1 {
-		t.Fatalf("expected 1 domain (N/A), got %d", len(result.Domains))
-	}
-	if result.Domains[0].Domain != "N/A" {
-		t.Errorf("domain[0].Domain = %q, want %q", result.Domains[0].Domain, "N/A")
+	if len(result.Domains) != 0 {
+		t.Fatalf("expected 0 domains, got %d", len(result.Domains))
 	}
 	if len(result.Pods) != 0 {
 		t.Errorf("expected 0 pods, got %d", len(result.Pods))

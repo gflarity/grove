@@ -55,10 +55,33 @@ func (m *Model) updateTableFocus() {
 	}
 }
 
-// loadEventsForSelection loads events based on the current selection.
-func (m *Model) loadEventsForSelection() {
-	// This is called when selection changes - we'll trigger event reload via commands
-	// For now, events are already loaded when navigating
+// eventsCommandForSelection returns a tea.Cmd that updates the events table
+// to reflect the currently highlighted resource row. In ForestView this means
+// loading events for the highlighted PodCliqueSet from the backend; in
+// PodCliqueView the events are already loaded so we just rebuild the table
+// with the client-side filter (no server call needed).
+func (m *Model) eventsCommandForSelection() tea.Cmd {
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 3 {
+		return nil
+	}
+
+	selectedNamespace := selectedRow[0]
+	selectedType := selectedRow[1]
+	selectedName := selectedRow[2]
+
+	switch m.viewState.ViewType {
+	case data.ForestView:
+		if selectedType == "PodCliqueSet" {
+			return loadEventsForPCSCmd(m.provider, m.ctx, selectedName, selectedNamespace)
+		}
+	case data.PodCliqueView:
+		// Client-side filter: getFilteredEvents reads the current selected row,
+		// so just rebuilding the events table is sufficient.
+		m.rebuildEventsTable()
+	}
+
+	return nil
 }
 
 // getCurrentViewKey returns the key for looking up resources in allResources map.
@@ -204,8 +227,8 @@ func (m *Model) topologyDrillInto() {
 	if len(m.topologyDrillStack) == 0 {
 		// At top-level domains — drill into the selected domain
 		selectedRow := m.topologyDomainsTable.SelectedRow()
-		if len(selectedRow) < 2 || selectedRow[0] == "N/A" {
-			return // N/A is not drillable
+		if len(selectedRow) < 2 {
+			return
 		}
 
 		domain := selectedRow[0]
@@ -238,11 +261,8 @@ func (m *Model) topologyDrillInto() {
 		nextKey := ""
 		for i, d := range domains {
 			if d.Domain == currentDomain && i+1 < len(domains) {
-				next := domains[i+1]
-				if next.Domain != "N/A" {
-					nextDomain = next.Domain
-					nextKey = next.Key
-				}
+				nextDomain = domains[i+1].Domain
+				nextKey = domains[i+1].Key
 				break
 			}
 		}

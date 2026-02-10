@@ -660,6 +660,54 @@ func TestEventsAreLoadedForPCS(t *testing.T) {
 	}
 }
 
+func TestEventsChangeWhenSelectingDifferentPCS(t *testing.T) {
+	mp := buildFullMockProvider()
+
+	// Set up distinct events for alpha-pcs and beta-pcs so we can tell them apart
+	alphaEvents := []data.Event{
+		{Type: "Normal", Reason: "Scaled", Age: "5m", From: "controller", Message: "alpha event 1", Parent: "alpha-pcs"},
+	}
+	betaEvents := []data.Event{
+		{Type: "Warning", Reason: "Unschedulable", Age: "2m", From: "scheduler", Message: "beta event 1", Parent: "beta-pcs"},
+		{Type: "Warning", Reason: "BackOff", Age: "1m", From: "kubelet", Message: "beta event 2", Parent: "beta-pcs"},
+	}
+	mp.Events["pcs/default/alpha-pcs"] = alphaEvents
+	mp.Events["pcs/staging/beta-pcs"] = betaEvents
+
+	m := newTestModelWithProvider(mp)
+
+	// Load forest data and initial events (for first PCS = alpha-pcs)
+	m = executeCmdAndApply(m, m.Init())
+
+	// Verify we start at ForestView with events for alpha-pcs
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if len(m.allEvents) != len(alphaEvents) {
+		t.Fatalf("expected %d alpha events initially, got %d", len(alphaEvents), len(m.allEvents))
+	}
+
+	// Press Down to select beta-pcs, which should trigger loading beta events
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+
+	// The cmd should include an event-loading command for beta-pcs
+	if cmd == nil {
+		t.Fatal("expected a command after pressing Down (to load events for newly selected PCS)")
+	}
+	m = executeCmdAndApply(m, cmd)
+
+	// Now allEvents should contain beta-pcs events
+	if len(m.allEvents) != len(betaEvents) {
+		t.Fatalf("expected %d beta events after selecting beta-pcs, got %d", len(betaEvents), len(m.allEvents))
+	}
+	for _, e := range m.allEvents {
+		if e.Parent != "beta-pcs" {
+			t.Errorf("expected event parent to be beta-pcs, got %s", e.Parent)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 6.8 Test: Pod YAML view
 // ---------------------------------------------------------------------------
@@ -1526,7 +1574,6 @@ func sampleTopologyViewData() *data.TopologyViewData {
 			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
 			{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
 			{Domain: "rack", Key: "topology.kubernetes.io/rack", ValuesCount: 6},
-			{Domain: "N/A", Key: "—", ValuesCount: -1},
 		},
 		NodeLabels: map[string]map[string]string{
 			"node-01": {
@@ -1668,21 +1715,16 @@ func TestTopologyView_DomainTableShowsCorrectDomains(t *testing.T) {
 	m := newTopologyTestModel()
 
 	rows := m.topologyDomainsTable.Rows()
-	if len(rows) != 4 {
-		t.Fatalf("expected 4 domain rows (region, zone, rack, N/A), got %d", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 domain rows (region, zone, rack), got %d", len(rows))
 	}
 
 	// Check domain names
-	expectedDomains := []string{"region", "zone", "rack", "N/A"}
+	expectedDomains := []string{"region", "zone", "rack"}
 	for i, expected := range expectedDomains {
 		if rows[i][0] != expected {
 			t.Errorf("row %d: expected domain %q, got %q", i, expected, rows[i][0])
 		}
-	}
-
-	// Check that N/A row has "—" for key
-	if rows[3][1] != "—" {
-		t.Errorf("expected N/A key to be '—', got %q", rows[3][1])
 	}
 }
 
@@ -1774,8 +1816,8 @@ func TestTopologyView_EscGoesBackOneDrillLevel(t *testing.T) {
 
 	// Should be back at domain list
 	rows := m.topologyDomainsTable.Rows()
-	if len(rows) != 4 {
-		t.Fatalf("expected 4 domain rows after Esc, got %d", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 domain rows after Esc, got %d", len(rows))
 	}
 }
 
@@ -1797,11 +1839,10 @@ func TestTopologyView_EscFromEmptyDrillStackSwitchesToForest(t *testing.T) {
 func TestTopologyView_PodsTableFiltersCorrectly(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// At top-level, cursor on "region" — pods table should show all pods on nodes
-	// that have the region label key
+	// At top-level, pods table should be empty until user drills in
 	podRows := m.topologyPodsTable.Rows()
-	if len(podRows) != 6 {
-		t.Fatalf("expected 6 pods when highlighting 'region' domain, got %d", len(podRows))
+	if len(podRows) != 0 {
+		t.Fatalf("expected 0 pods at top level (before drilling), got %d", len(podRows))
 	}
 
 	// Drill into region (showing values list: us-east-1, us-west-2)
@@ -1899,25 +1940,15 @@ func TestTopologyView_TabSwitchesBetweenPanes(t *testing.T) {
 	}
 }
 
-func TestTopologyView_NADomainIsNotDrillable(t *testing.T) {
+func TestTopologyView_NoNADomainRow(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Navigate cursor to N/A row (last row, index 3)
-	m = sendKey(m, tea.KeyDown) // zone
-	m = sendKey(m, tea.KeyDown) // rack
-	m = sendKey(m, tea.KeyDown) // N/A
-
-	// Press Enter on N/A — should be a no-op
-	m = sendKey(m, tea.KeyEnter)
-
-	if len(m.topologyDrillStack) != 0 {
-		t.Fatalf("expected empty drill stack after Enter on N/A, got depth %d", len(m.topologyDrillStack))
-	}
-
-	// Should still be at top-level domains
+	// The domain table should not have an N/A row
 	rows := m.topologyDomainsTable.Rows()
-	if len(rows) != 4 {
-		t.Fatalf("expected 4 domain rows (no drill happened), got %d", len(rows))
+	for i, row := range rows {
+		if len(row) >= 1 && row[0] == "N/A" {
+			t.Errorf("row %d: unexpected N/A domain row in topology domains table", i)
+		}
 	}
 }
 
@@ -2035,7 +2066,7 @@ func TestTopologyView_NarrowestDomainEnterIsNoop(t *testing.T) {
 
 	stackDepthAtRack := len(m.topologyDrillStack) // should be 3
 
-	// Select rack-01 and press Enter — should be no-op (N/A is next, not drillable)
+	// Select rack-01 and press Enter — should be no-op (no more domains to drill into)
 	m = sendKey(m, tea.KeyEnter)
 
 	if len(m.topologyDrillStack) != stackDepthAtRack {
@@ -2192,7 +2223,6 @@ func TestTopologyView_CacheUpdateInvalidDomainResetsDrillStack(t *testing.T) {
 	updatedData := &data.TopologyViewData{
 		Domains: []data.TopologyDomainRow{
 			{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
-			{Domain: "N/A", Key: "—", ValuesCount: -1},
 		},
 		NodeLabels:  sampleTopologyViewData().NodeLabels,
 		Pods:        sampleTopologyViewData().Pods,
@@ -2229,8 +2259,8 @@ func TestTopologyView_TopologyCacheSyncedMsg(t *testing.T) {
 	}
 
 	rows := m.topologyDomainsTable.Rows()
-	if len(rows) != 4 {
-		t.Fatalf("expected 4 domain rows after sync, got %d", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 domain rows after sync, got %d", len(rows))
 	}
 
 	// Should have returned a cmd to wait for updates
@@ -2269,9 +2299,7 @@ func TestTopologyView_EmptySnapshot(t *testing.T) {
 	mockCache := data.NewMockTopologyCache()
 	// Set a minimal empty snapshot
 	mockCache.SetSnapshot(&data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
-			{Domain: "N/A", Key: "—", ValuesCount: -1},
-		},
+		Domains:     []data.TopologyDomainRow{},
 		NodeLabels:  map[string]map[string]string{},
 		Pods:        []data.TopologyViewPod{},
 		DomainToKey: map[string]string{},
@@ -2289,13 +2317,10 @@ func TestTopologyView_EmptySnapshot(t *testing.T) {
 		}
 	}
 
-	// Domain table should have just N/A
+	// Domain table should be empty
 	rows := m.topologyDomainsTable.Rows()
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 domain row (N/A), got %d", len(rows))
-	}
-	if rows[0][0] != "N/A" {
-		t.Errorf("expected domain 'N/A', got %q", rows[0][0])
+	if len(rows) != 0 {
+		t.Fatalf("expected 0 domain rows, got %d", len(rows))
 	}
 
 	// Pods table should be empty
@@ -2343,18 +2368,17 @@ func TestTopologyView_BreadcrumbString(t *testing.T) {
 func TestTopologyView_MovingDomainCursorUpdatesPods(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// At top-level, cursor on "region" — all pods shown
+	// At top-level, pods table should be empty (no drill yet)
 	podRows := m.topologyPodsTable.Rows()
-	initialPodCount := len(podRows)
-	if initialPodCount != 6 {
-		t.Fatalf("expected 6 pods when on 'region', got %d", initialPodCount)
+	if len(podRows) != 0 {
+		t.Fatalf("expected 0 pods at top level, got %d", len(podRows))
 	}
 
-	// Move cursor to "zone" — should still show all pods (all nodes have zone)
+	// Move cursor to "zone" — still at top level, pods remain empty
 	m = sendKey(m, tea.KeyDown)
 	podRows = m.topologyPodsTable.Rows()
-	if len(podRows) != 6 {
-		t.Fatalf("expected 6 pods when on 'zone', got %d", len(podRows))
+	if len(podRows) != 0 {
+		t.Fatalf("expected 0 pods at top level on 'zone', got %d", len(podRows))
 	}
 }
 

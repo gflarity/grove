@@ -383,12 +383,7 @@ func BuildTopologyViewData(
 			ValuesCount: len(values),
 		})
 	}
-	// Always append N/A row
-	domains = append(domains, TopologyDomainRow{
-		Domain:      "N/A",
-		Key:         "—",
-		ValuesCount: -1,
-	})
+	// N/A row removed — it adds no value to the topology view
 
 	// Pre-build TopologyInfo cache (pcsName -> *TopologyInfo)
 	topoInfoCache := make(map[string]*TopologyInfo, len(pcsSpecs))
