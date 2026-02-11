@@ -122,7 +122,7 @@ func (m Model) renderHeaderFrame() string {
 	userLine := HeaderLabelStyle.Render("User:        ") + " " + HeaderValueStyle.Render(orUnknown(m.userName))
 	arboristLine := HeaderLabelStyle.Render("Arborist Rev:") + " " + HeaderValueStyle.Render(orUnknown(m.arboristVersion))
 	k8sLine := HeaderLabelStyle.Render("K8s Rev:     ") + " " + HeaderValueStyle.Render(orUnknown(m.k8sVersion))
-	viewLine := HeaderLabelStyle.Render("View:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
+	viewLine := HeaderLabelStyle.Render("Lens:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
 
 	leftCol := lipgloss.JoinVertical(lipgloss.Left, contextLine, clusterLine, userLine, arboristLine, k8sLine, viewLine)
 

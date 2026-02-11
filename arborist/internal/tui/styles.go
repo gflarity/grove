@@ -100,7 +100,7 @@ var (
 	HeaderInfoStyle = lipgloss.NewStyle().
 			Foreground(ColorCadetBlue)
 
-	// HeaderLabelStyle is for "Context:", "Cluster:", "View:" labels (k9s-style faint/muted).
+	// HeaderLabelStyle is for "Context:", "Cluster:", "Lens:" labels (k9s-style faint/muted).
 	HeaderLabelStyle = lipgloss.NewStyle().
 				Foreground(ColorCadetBlue)
 
