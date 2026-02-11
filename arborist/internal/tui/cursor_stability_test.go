@@ -331,6 +331,7 @@ func TestC4_PodCliqueScalingGroupView_CacheUpdatePreservesSelectedReplica(t *tes
 
 func TestC5_PodCliqueScalingGroupReplicaView_CacheUpdatePreservesSelectedPodClique(t *testing.T) {
 	// Setup helper: add a second PodClique to PCSG replica-0 for richer testing.
+	// Names are chosen so that sorted order is: backup (0), worker (1).
 	setupWithTwoPodCliques := func(t *testing.T) (*data.MockGlobalCache, Model) {
 		t.Helper()
 		mc := buildFullMockCache()
@@ -354,6 +355,11 @@ func TestC5_PodCliqueScalingGroupReplicaView_CacheUpdatePreservesSelectedPodCliq
 
 	t.Run("data changes", func(t *testing.T) {
 		mc, m := setupWithTwoPodCliques(t)
+		// Sorted order: backup (0), worker (1). Cursor falls to index 0 = backup.
+		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill-0-backup")
+
+		// Move cursor to worker
+		m = sendKey(m, tea.KeyDown)
 		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill-0-worker")
 
 		// Change PodClique Ready
@@ -369,6 +375,11 @@ func TestC5_PodCliqueScalingGroupReplicaView_CacheUpdatePreservesSelectedPodCliq
 
 	t.Run("selected PodClique removed — cursor clamps", func(t *testing.T) {
 		mc, m := setupWithTwoPodCliques(t)
+		// Sorted order: backup (0), worker (1). Cursor falls to index 0 = backup.
+		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill-0-backup")
+
+		// Move cursor to worker
+		m = sendKey(m, tea.KeyDown)
 		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill-0-worker")
 
 		// Remove the worker, keep only backup
@@ -465,6 +476,55 @@ func TestC6_PodCliqueView_CacheUpdatePreservesSelectedPod(t *testing.T) {
 			t.Error("cursor should not be on removed pod")
 		}
 	})
+}
+
+// ===========================================================================
+// C6b. PodCliqueView — reversed pod order doesn't cause row reorder
+// ===========================================================================
+
+func TestC6b_PodCliqueView_ReversedPodOrderStable(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Navigate to PodCliqueView: alpha-pcs → PodCliqueSetReplicaView → standalone PC
+	m = sendKey(m, tea.KeyEnter) // alpha-pcs → PodCliqueSetReplicaView (single replica skip)
+	m = sendKey(m, tea.KeyDown)  // move to standalone PodClique
+	m = sendKey(m, tea.KeyEnter) // → PodCliqueView
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Cursor naturally falls on worker-1 (index 1, from parent cursor fallback).
+	// Pods sorted by name: worker-0 (0), worker-1 (1), worker-2 (2).
+	assertCursorOnName(t, m, "alpha-pcs-0-pc-worker-1")
+
+	// Record row order — should be sorted by name
+	rows := m.resourcesTable.Rows()
+	if len(rows) < 3 {
+		t.Fatalf("expected at least 3 pod rows, got %d", len(rows))
+	}
+	firstNameBefore := rows[0][2]
+
+	// Cache update: reverse pod order (simulates non-deterministic map iteration)
+	m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		pods := snap.PodsByPodClique["alpha-pcs-0-standalone-pc"]
+		for i, j := 0, len(pods)-1; i < j; i, j = i+1, j-1 {
+			pods[i], pods[j] = pods[j], pods[i]
+		}
+	})
+
+	// Row order must be preserved (sorted by name) despite reversed input
+	rowsAfter := m.resourcesTable.Rows()
+	if len(rowsAfter) < 3 {
+		t.Fatalf("expected at least 3 pod rows after update, got %d", len(rowsAfter))
+	}
+	firstNameAfter := rowsAfter[0][2]
+	if firstNameBefore != firstNameAfter {
+		t.Errorf("pod row order changed: first row was %q, now %q", firstNameBefore, firstNameAfter)
+	}
+
+	// Cursor should still be on worker-1
+	assertCursorOnName(t, m, "alpha-pcs-0-pc-worker-1")
 }
 
 // ===========================================================================
@@ -1254,6 +1314,64 @@ func TestC14_RapidSuccessiveCacheUpdates(t *testing.T) {
 				}
 			}
 		}
+	})
+
+	t.Run("reversed resource order — cursor should not visually jump", func(t *testing.T) {
+		// This test reproduces the real-world bug: informer store List()
+		// returns items in non-deterministic order. When the order flips
+		// between cache updates, the cursor appears to jump because the
+		// rows swap positions. The fix is to sort resource lists by name.
+		mc := buildFullMockCache()
+		m := newTestModelWithCache(mc)
+
+		// Navigate to PodCliqueSetReplicaView for alpha-pcs (single replica skip)
+		m = sendKey(m, tea.KeyEnter)
+		if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+			t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		}
+
+		// Cursor should be on first row: alpha-pcs-0-sg-prefill
+		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill")
+
+		// Record current row order
+		rowsBefore := m.resourcesTable.Rows()
+		if len(rowsBefore) < 2 {
+			t.Fatalf("expected at least 2 rows, got %d", len(rowsBefore))
+		}
+		firstNameBefore := rowsBefore[0][2]
+
+		// Cache update: reverse the order of PodCliques and ScalingGroups.
+		// This simulates what happens when informer store List() returns
+		// items in a different map iteration order.
+		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+			pcs := snap.PodCliquesByReplica["alpha-pcs/0"]
+			if len(pcs) >= 2 {
+				// Reverse slice
+				for i, j := 0, len(pcs)-1; i < j; i, j = i+1, j-1 {
+					pcs[i], pcs[j] = pcs[j], pcs[i]
+				}
+			}
+			sgs := snap.ScalingGroupsByReplica["alpha-pcs/0"]
+			if len(sgs) >= 2 {
+				for i, j := 0, len(sgs)-1; i < j; i, j = i+1, j-1 {
+					sgs[i], sgs[j] = sgs[j], sgs[i]
+				}
+			}
+		})
+
+		// Row order MUST remain the same (sorted by name)
+		rowsAfter := m.resourcesTable.Rows()
+		if len(rowsAfter) < 2 {
+			t.Fatalf("expected at least 2 rows after update, got %d", len(rowsAfter))
+		}
+		firstNameAfter := rowsAfter[0][2]
+		if firstNameBefore != firstNameAfter {
+			t.Errorf("row order changed: first row was %q, now %q — this causes the cursor to visually jump",
+				firstNameBefore, firstNameAfter)
+		}
+
+		// Cursor should still be on the same name
+		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill")
 	})
 
 	t.Run("topology: two updates — final state is correct", func(t *testing.T) {

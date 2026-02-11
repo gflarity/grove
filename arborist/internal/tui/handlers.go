@@ -203,6 +203,8 @@ func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
 		}
 		replicaChildren = append(replicaChildren, pc)
 	}
+	// Sort for stable table ordering (defense-in-depth; the cache also sorts).
+	data.SortResourcesByName(replicaChildren)
 	m.allResources[replicaChildKey] = replicaChildren
 
 	if pcsgName == "" && pcName == "" {
@@ -260,7 +262,9 @@ func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
 				}
 				pcsgChildren = append(pcsgChildren, pc)
 			}
-			m.allResources[pcsgReplicaChildKey] = pcsgChildren
+		// Sort for stable table ordering (defense-in-depth; the cache also sorts).
+		data.SortResourcesByName(pcsgChildren)
+		m.allResources[pcsgReplicaChildKey] = pcsgChildren
 		}
 	}
 
@@ -299,7 +303,9 @@ func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
 				podResources[i].Topology = basePodTopology
 			}
 		}
-		m.allResources[podCliqueKey] = podResources
+	// Sort for stable table ordering (defense-in-depth; the cache also sorts).
+	data.SortResourcesByName(podResources)
+	m.allResources[podCliqueKey] = podResources
 	}
 }
 

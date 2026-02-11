@@ -394,22 +394,33 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 	topologyViewData.NodeGPUProducts = nodeResult.nodeGPUProducts
 	topologyViewData.NodeGPUCapacity = nodeResult.nodeGPUCapacity
 
+	// Sort all resource lists by name for stable table ordering.
+	// Without this, informer store List() returns items in non-deterministic
+	// map iteration order, causing table rows to shuffle on each snapshot
+	// rebuild and making the cursor appear to jump randomly.
+	scalingGroupsByReplica := func() map[string][]data.Resource {
+		result := make(map[string][]data.Resource)
+		for k, v := range pcsgsByReplica {
+			result[k] = c.convertPCSGsToResources(v)
+		}
+		return result
+	}()
+	data.SortResourceMapsByName(scalingGroupsByReplica)
+	data.SortResourceMapsByName(pcsByReplica)
+	data.SortResourceMapsByName(pcsByPCSG)
+	data.SortResourceMapsByName(pcsByPCSGReplica)
+	data.SortResourceMapsByName(podsByPodClique)
+
 	snapshot := &data.CacheSnapshot{
-		PodCliqueSets:       pcsResources,
-		PodCliqueSetSpecs:   pcsSpecs,
-		ReplicaIndexesByPCS: replicaIndexesByPCS,
-		ScalingGroupsByReplica: func() map[string][]data.Resource {
-			result := make(map[string][]data.Resource)
-			for k, v := range pcsgsByReplica {
-				result[k] = c.convertPCSGsToResources(v)
-			}
-			return result
-		}(),
-		PodCliquesByReplica:  pcsByReplica,
-		ReplicaIndexesByPCSG: replicaIndexesByPCSG,
-		PodCliquesByPCSG:     pcsByPCSG,
+		PodCliqueSets:          pcsResources,
+		PodCliqueSetSpecs:      pcsSpecs,
+		ReplicaIndexesByPCS:    replicaIndexesByPCS,
+		ScalingGroupsByReplica: scalingGroupsByReplica,
+		PodCliquesByReplica:    pcsByReplica,
+		ReplicaIndexesByPCSG:   replicaIndexesByPCSG,
+		PodCliquesByPCSG:       pcsByPCSG,
 		PodCliquesByPCSGReplica: pcsByPCSGReplica,
-		PodsByPodClique:      podsByPodClique,
+		PodsByPodClique:        podsByPodClique,
 		EventsByObject:       eventsByObject,
 		TopologyViewData:     topologyViewData,
 		GPUSummary:           gpuSummary,
@@ -653,9 +664,7 @@ func (c *InformerGlobalCache) buildPCSResources(pcsSpecs map[string]*corev1alpha
 	}
 
 	// Sort by name for stable ordering
-	sort.Slice(resources, func(i, j int) bool {
-		return resources[i].Name < resources[j].Name
-	})
+	data.SortResourcesByName(resources)
 
 	return resources
 }
@@ -679,3 +688,4 @@ func containsString(slice []string, s string) bool {
 	}
 	return false
 }
+
