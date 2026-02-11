@@ -2572,3 +2572,773 @@ func TestCommandMode_SwitchToForestFromDeepView(t *testing.T) {
 		t.Fatalf("expected SelectedPodCliqueSet cleared, got %q", m.viewState.SelectedPodCliqueSet)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// YAML Overlay Tests
+// ---------------------------------------------------------------------------
+
+func TestYAMLOverlay_YKeyOpensOverlay(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// In ForestView with alpha-pcs selected
+	if m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay inactive initially")
+	}
+
+	// Press 'y' to open YAML overlay
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	if !m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay active after pressing y")
+	}
+	if m.yamlResourceType != "PodCliqueSet" {
+		t.Fatalf("expected yamlResourceType='PodCliqueSet', got %q", m.yamlResourceType)
+	}
+	if m.yamlResourceName != "alpha-pcs" {
+		t.Fatalf("expected yamlResourceName='alpha-pcs', got %q", m.yamlResourceName)
+	}
+	if cmd == nil {
+		t.Fatal("expected a command to load YAML")
+	}
+}
+
+func TestYAMLOverlay_EscClosesOverlay(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay active")
+	}
+
+	// Press Esc to close
+	m = sendKey(m, tea.KeyEsc)
+	if m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay closed after Esc")
+	}
+}
+
+func TestYAMLOverlay_QClosesOverlay(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay active")
+	}
+
+	// Press q to close (should NOT quit the app)
+	m = sendRune(m, 'q')
+	if m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay closed after q")
+	}
+	// Verify we're still in the model (not quitting)
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected still in ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestYAMLOverlay_CtrlCStillQuits(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	// Ctrl+C should still quit
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("expected quit command from Ctrl+C in YAML overlay")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+func TestYAMLOverlay_ResourceYAMLMsgPopulatesViewport(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	// Deliver ResourceYAMLMsg
+	yamlContent := "apiVersion: grove.io/v1alpha1\nkind: PodCliqueSet\nmetadata:\n  name: alpha-pcs\n"
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         yamlContent,
+	})
+
+	if m.yamlContent != yamlContent {
+		t.Fatalf("expected yamlContent to be set, got %q", m.yamlContent)
+	}
+}
+
+func TestYAMLOverlay_ResourceYAMLMsgError(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	// Deliver error message
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		Err:          errForTest("api error"),
+	})
+
+	if !strings.Contains(m.yamlContent, "Error") {
+		t.Fatalf("expected yamlContent to contain error message, got %q", m.yamlContent)
+	}
+	// Overlay should still be active (showing the error)
+	if !m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay still active after error")
+	}
+}
+
+func TestYAMLOverlay_ViewRendersOverlay(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay and deliver YAML content
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "apiVersion: grove.io/v1alpha1\nkind: PodCliqueSet\n",
+	})
+
+	view := m.View()
+
+	// Should show YAML content
+	assertView(t, m, []string{"YAML", "PodCliqueSet"})
+
+	// Should show overlay key hints
+	if !strings.Contains(view, "Close") {
+		t.Errorf("expected view to contain 'Close' hint")
+	}
+	if !strings.Contains(view, "Scroll") {
+		t.Errorf("expected view to contain 'Scroll' hint")
+	}
+	if !strings.Contains(view, "Search") {
+		t.Errorf("expected view to contain 'Search' hint")
+	}
+
+	// Should NOT show the normal resources table headers
+	// (the overlay takes over the full screen)
+	if strings.Contains(view, "NAMESPACE") && strings.Contains(view, "SCHEDULED") {
+		t.Errorf("expected overlay to replace normal view, but table headers are visible")
+	}
+}
+
+func TestYAMLOverlay_UpDownScrolls(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay with multi-line content
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	// Build long content that exceeds viewport height
+	var lines string
+	for i := 0; i < 100; i++ {
+		lines += "line: " + string(rune('0'+i%10)) + "\n"
+	}
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         lines,
+	})
+
+	initialOffset := m.yamlViewport.YOffset
+
+	// Press Down multiple times
+	m = sendKey(m, tea.KeyDown)
+	m = sendKey(m, tea.KeyDown)
+	m = sendKey(m, tea.KeyDown)
+
+	if m.yamlViewport.YOffset <= initialOffset {
+		t.Errorf("expected viewport to scroll down, offset was %d now %d", initialOffset, m.yamlViewport.YOffset)
+	}
+
+	// Press Up
+	scrolledOffset := m.yamlViewport.YOffset
+	m = sendKey(m, tea.KeyUp)
+
+	if m.yamlViewport.YOffset >= scrolledOffset {
+		t.Errorf("expected viewport to scroll up, offset was %d now %d", scrolledOffset, m.yamlViewport.YOffset)
+	}
+}
+
+func TestYAMLOverlay_PgUpPgDownScrolls(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay with multi-line content
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	var lines string
+	for i := 0; i < 200; i++ {
+		lines += "line: content here\n"
+	}
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         lines,
+	})
+
+	// PgDown should scroll more than a single Down
+	m = sendKey(m, tea.KeyPgDown)
+	afterPgDown := m.yamlViewport.YOffset
+
+	if afterPgDown == 0 {
+		t.Error("expected PgDown to scroll viewport")
+	}
+}
+
+func TestYAMLOverlay_SearchActivatesAndApplies(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay with content
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "line1: first\nline2: second\nline3: third\nsearchTarget: found-it\nline5: fifth\n",
+	})
+
+	// Press '/' to activate search
+	m = sendRune(m, '/')
+	if !m.yamlSearchActive {
+		t.Fatal("expected YAML search to be active after /")
+	}
+
+	// Type search text
+	for _, r := range "searchTarget" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Press Enter to apply search
+	m = sendKey(m, tea.KeyEnter)
+	if m.yamlSearchActive {
+		t.Fatal("expected YAML search deactivated after Enter")
+	}
+	if m.yamlSearchText != "searchTarget" {
+		t.Fatalf("expected yamlSearchText='searchTarget', got %q", m.yamlSearchText)
+	}
+}
+
+func TestYAMLOverlay_SearchEscCancels(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay and start search
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "some: yaml\n",
+	})
+
+	m = sendRune(m, '/')
+	if !m.yamlSearchActive {
+		t.Fatal("expected search active")
+	}
+
+	// Press Esc to cancel search (NOT close overlay)
+	m = sendKey(m, tea.KeyEsc)
+	if m.yamlSearchActive {
+		t.Fatal("expected search deactivated after Esc")
+	}
+	// Overlay should still be active
+	if !m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay still active after search Esc")
+	}
+}
+
+func TestYAMLOverlay_SearchViewShowsIndicator(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay, search, and apply
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "some: yaml\ntarget: value\n",
+	})
+
+	m = sendRune(m, '/')
+	for _, r := range "target" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	// View should show the search text and Next/Prev hints
+	view := m.View()
+	if !strings.Contains(view, "target") {
+		t.Errorf("expected view to show search text 'target'")
+	}
+	if !strings.Contains(view, "Next/Prev") {
+		t.Errorf("expected view to show 'Next/Prev' hint when search is active")
+	}
+}
+
+func TestYAMLOverlay_NoResourceSelectedDoesNothing(t *testing.T) {
+	// Empty model with no resources
+	m := newTestModel([]data.Resource{})
+
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	if m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay NOT to open when no resource is selected")
+	}
+	if cmd != nil {
+		t.Fatal("expected no command when no resource is selected")
+	}
+}
+
+func TestYAMLOverlay_VirtualTypeResolvesToParent(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Navigate into alpha-pcs (single replica skip → PodCliqueSetReplicaView)
+	m = sendKey(m, tea.KeyEnter)
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Go back and navigate into beta-pcs (2 replicas → PodCliqueSetView)
+	m = sendKey(m, tea.KeyEsc)
+	m = sendKey(m, tea.KeyDown) // move to beta-pcs
+	m = sendKey(m, tea.KeyEnter)
+	if m.viewState.ViewType != data.PodCliqueSetView {
+		t.Fatalf("expected PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// First row should be a PodCliqueSetReplica
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 2 || selectedRow[1] != "PodCliqueSetReplica" {
+		t.Fatalf("expected PodCliqueSetReplica selected, got %v", selectedRow)
+	}
+
+	// Press 'y' — should resolve to the PodCliqueSet parent
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	if !m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay active")
+	}
+	// yamlResourceType records the table's type (for display), but the actual
+	// fetch resolves to the parent PodCliqueSet
+	if m.yamlResourceType != "PodCliqueSetReplica" {
+		t.Fatalf("expected yamlResourceType='PodCliqueSetReplica', got %q", m.yamlResourceType)
+	}
+	if cmd == nil {
+		t.Fatal("expected a command to load YAML")
+	}
+}
+
+func TestYAMLOverlay_OverlayDoesNotInterfereWithNormalView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open and close YAML overlay
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "some: yaml\n",
+	})
+	m = sendKey(m, tea.KeyEsc)
+
+	// Should be back to normal view
+	if m.yamlOverlayActive {
+		t.Fatal("expected overlay closed")
+	}
+
+	// View should show normal forest data
+	assertView(t, m, []string{"alpha-pcs", "beta-pcs", "gamma-pcs"})
+	// Should NOT show YAML overlay content
+	assertNotInView(t, m, []string{"some: yaml"})
+}
+
+func TestYAMLOverlay_ResourceYAMLMsgIgnoredWhenOverlayClosed(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Deliver ResourceYAMLMsg without overlay being active (race condition defense)
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "apiVersion: grove.io/v1alpha1\n",
+	})
+
+	// Should not crash and overlay should remain inactive
+	if m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay to remain inactive")
+	}
+}
+
+func TestYAMLOverlay_HeaderShowsYAMLShortcut(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	header := m.renderHeaderFrame()
+	if !strings.Contains(header, "YAML") {
+		t.Errorf("expected header to contain 'YAML' shortcut, got:\n%s", header)
+	}
+}
+
+func TestYAMLOverlay_YKeyFromPodView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set up PodView state manually
+	m.viewState = data.ViewState{
+		ViewType:             data.PodView,
+		SelectedPodCliqueSet: "alpha-pcs",
+		SelectedReplicaIndex: "0",
+		SelectedPodClique:    "alpha-pcs-0-standalone-pc",
+		SelectedPod:          "alpha-pcs-0-pc-worker-0",
+	}
+
+	// Press 'y'
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	if !m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay active from PodView")
+	}
+	if m.yamlResourceType != "Pod" {
+		t.Fatalf("expected yamlResourceType='Pod', got %q", m.yamlResourceType)
+	}
+	if m.yamlResourceName != "alpha-pcs-0-pc-worker-0" {
+		t.Fatalf("expected yamlResourceName='alpha-pcs-0-pc-worker-0', got %q", m.yamlResourceName)
+	}
+	if cmd == nil {
+		t.Fatal("expected a command to load YAML")
+	}
+}
+
+func TestYAMLOverlay_WindowResizeUpdatesViewport(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "some: yaml\ncontent: here\n",
+	})
+
+	// Resize window
+	m = mustApply(m, tea.WindowSizeMsg{Width: 200, Height: 60})
+
+	// Overlay should still be active and renderable
+	if !m.yamlOverlayActive {
+		t.Fatal("expected overlay still active after resize")
+	}
+	view := m.View()
+	if view == "" {
+		t.Fatal("expected non-empty view after resize")
+	}
+}
+
+func TestYAMLOverlay_SelectedResourceInfo_ForestView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	resType, resName, ns := m.selectedResourceInfo()
+	if resType != "PodCliqueSet" {
+		t.Fatalf("expected type 'PodCliqueSet', got %q", resType)
+	}
+	if resName != "alpha-pcs" {
+		t.Fatalf("expected name 'alpha-pcs', got %q", resName)
+	}
+	if ns != "default" {
+		t.Fatalf("expected namespace 'default', got %q", ns)
+	}
+}
+
+func TestYAMLOverlay_SelectedResourceInfo_PodView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState = data.ViewState{
+		ViewType:             data.PodView,
+		SelectedPodCliqueSet: "alpha-pcs",
+		SelectedReplicaIndex: "0",
+		SelectedPodClique:    "alpha-pcs-0-standalone-pc",
+		SelectedPod:          "alpha-pcs-0-pc-worker-0",
+	}
+
+	resType, resName, _ := m.selectedResourceInfo()
+	if resType != "Pod" {
+		t.Fatalf("expected type 'Pod', got %q", resType)
+	}
+	if resName != "alpha-pcs-0-pc-worker-0" {
+		t.Fatalf("expected name 'alpha-pcs-0-pc-worker-0', got %q", resName)
+	}
+}
+
+func TestYAMLOverlay_NSearchJumpsToNextMatch(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay with content containing repeated matches
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	var lines string
+	for i := 0; i < 100; i++ {
+		if i == 30 || i == 60 || i == 90 {
+			lines += "match: found\n"
+		} else {
+			lines += "other: content\n"
+		}
+	}
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         lines,
+	})
+
+	// Search for "match"
+	m = sendRune(m, '/')
+	for _, r := range "match" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	firstOffset := m.yamlViewport.YOffset
+
+	// Press 'n' to go to next match
+	m = sendRune(m, 'n')
+	secondOffset := m.yamlViewport.YOffset
+
+	// Should have moved to a different position
+	if secondOffset == firstOffset {
+		// This might happen if both matches are visible in the same viewport page,
+		// but with matches at lines 30, 60, 90 and a typical viewport height of ~34,
+		// at least one 'n' should move the viewport
+		m = sendRune(m, 'n')
+		thirdOffset := m.yamlViewport.YOffset
+		if thirdOffset == firstOffset && thirdOffset == secondOffset {
+			t.Error("expected 'n' to navigate between search matches")
+		}
+	}
+}
+
+func TestYAMLOverlay_KeysPassedToViewportNotToNormalMode(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "some: yaml\n",
+	})
+
+	// 't' in overlay should NOT toggle topology view
+	m = sendRune(m, 't')
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected 't' in YAML overlay to NOT toggle topology, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	// Overlay should still be active (unknown key is a no-op)
+	if !m.yamlOverlayActive {
+		t.Fatal("expected overlay still active after pressing t")
+	}
+
+	// '/' should activate search, not the normal filter
+	m = sendRune(m, '/')
+	if m.yamlSearchActive != true {
+		t.Fatal("expected YAML search active after / in overlay")
+	}
+	if m.filterActive {
+		t.Fatal("expected normal filter NOT active when in YAML overlay")
+	}
+}
+
+func TestYAMLOverlay_SearchHighlightsMatches(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open YAML overlay with content
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         "apiVersion: grove.io/v1alpha1\nkind: PodCliqueSet\nmetadata:\n  name: alpha-pcs\n",
+	})
+
+	// Search for "PodCliqueSet"
+	m = sendRune(m, '/')
+	for _, r := range "PodCliqueSet" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	// The view should contain ANSI-styled highlight (the rendered view will have
+	// the search text rendered through YAMLSearchHighlightStyle)
+	view := m.View()
+	// The highlighted text should still appear in the view
+	if !strings.Contains(view, "PodCliqueSet") {
+		t.Errorf("expected view to still contain 'PodCliqueSet' (highlighted)")
+	}
+}
+
+func TestHighlightYAMLSearch_BasicHighlighting(t *testing.T) {
+	content := "line1: hello\nline2: world\nline3: hello world\n"
+
+	result := highlightYAMLSearch(content, "hello")
+	lines := strings.Split(result, "\n")
+
+	// All lines should be present
+	if len(lines) != 4 { // 3 lines + trailing empty from final \n
+		t.Fatalf("expected 4 lines (incl trailing), got %d", len(lines))
+	}
+
+	// Line 1 should contain "hello" (possibly styled)
+	if !strings.Contains(lines[0], "hello") {
+		t.Errorf("expected line1 to contain 'hello', got %q", lines[0])
+	}
+	// Line 1 should also contain the prefix
+	if !strings.Contains(lines[0], "line1: ") {
+		t.Errorf("expected line1 to preserve 'line1: ' prefix, got %q", lines[0])
+	}
+	// Line 2 should be completely unmodified (no match)
+	if lines[1] != "line2: world" {
+		t.Errorf("expected line2 unmodified, got %q", lines[1])
+	}
+	// Line 3 should contain both "hello" and "world"
+	if !strings.Contains(lines[2], "hello") || !strings.Contains(lines[2], "world") {
+		t.Errorf("expected line3 to contain 'hello' and 'world', got %q", lines[2])
+	}
+}
+
+func TestHighlightYAMLSearch_CaseInsensitive(t *testing.T) {
+	content := "Kind: PodCliqueSet\nkind: podcliqueset\nother: line\n"
+
+	result := highlightYAMLSearch(content, "kind")
+	lines := strings.Split(result, "\n")
+
+	// Both matching lines should contain the original text
+	if !strings.Contains(lines[0], "Kind") {
+		t.Errorf("expected first line to contain 'Kind', got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "kind") {
+		t.Errorf("expected second line to contain 'kind', got %q", lines[1])
+	}
+	// Non-matching line should be unmodified
+	if lines[2] != "other: line" {
+		t.Errorf("expected non-matching line unmodified, got %q", lines[2])
+	}
+}
+
+func TestHighlightYAMLSearch_EmptySearchReturnsOriginal(t *testing.T) {
+	content := "some: yaml\n"
+	result := highlightYAMLSearch(content, "")
+	if result != content {
+		t.Errorf("expected original content for empty search, got %q", result)
+	}
+}
+
+func TestHighlightYAMLSearch_MultipleMatchesPerLine(t *testing.T) {
+	content := "aa bb aa cc aa\n"
+
+	result := highlightYAMLSearch(content, "aa")
+
+	// Verify the non-matching parts are preserved verbatim
+	if !strings.Contains(result, " bb ") {
+		t.Error("expected ' bb ' to be preserved between highlights")
+	}
+	if !strings.Contains(result, " cc ") {
+		t.Error("expected ' cc ' to be preserved between highlights")
+	}
+}
+
+func TestHighlightYAMLSearch_PreservesOriginalCase(t *testing.T) {
+	// Search is case-insensitive but highlighted text should keep original case
+	content := "Name: MyResource\nname: other\n"
+	result := highlightYAMLSearch(content, "name")
+
+	// Both "Name" and "name" should appear (with original casing)
+	if !strings.Contains(result, "Name") {
+		t.Error("expected 'Name' (original case) to appear in highlighted output")
+	}
+	if !strings.Contains(result, "name") {
+		t.Error("expected 'name' (original case) to appear in highlighted output")
+	}
+}
+
+func TestHighlightYAMLSearch_NoMatchReturnsOriginal(t *testing.T) {
+	content := "line1: hello\nline2: world\n"
+	result := highlightYAMLSearch(content, "zzzzz")
+	if result != content {
+		t.Errorf("expected unmodified content when no match, got %q", result)
+	}
+}
+
+func TestHighlightYAMLSearch_WithANSI(t *testing.T) {
+	// Verify the function calls the highlight style by checking that
+	// the Render method is invoked (the output should contain the match text
+	// wrapped by whatever the style produces — even if no ANSI in test env,
+	// the function still runs the code path)
+	content := "target: value\nother: line\n"
+	result := highlightYAMLSearch(content, "target")
+
+	// The result should contain "target" somewhere
+	if !strings.Contains(result, "target") {
+		t.Error("expected 'target' to appear in result")
+	}
+	// And ": value" should be preserved
+	if !strings.Contains(result, ": value") {
+		t.Error("expected ': value' to be preserved after match")
+	}
+	// The non-matching line should be untouched
+	lines := strings.Split(result, "\n")
+	if lines[1] != "other: line" {
+		t.Errorf("expected non-matching line unchanged, got %q", lines[1])
+	}
+}
+
+func TestYAMLOverlay_SearchEscClearsHighlights(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	yamlContent := "apiVersion: grove.io/v1alpha1\nkind: PodCliqueSet\n"
+
+	// Open YAML overlay and search
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = mustApply(m, ResourceYAMLMsg{
+		ResourceType: "PodCliqueSet",
+		ResourceName: "alpha-pcs",
+		YAML:         yamlContent,
+	})
+
+	// Apply a search
+	m = sendRune(m, '/')
+	for _, r := range "kind" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.yamlSearchText != "kind" {
+		t.Fatalf("expected search text 'kind', got %q", m.yamlSearchText)
+	}
+
+	// Open search again and press Esc to cancel/clear
+	m = sendRune(m, '/')
+	m = sendKey(m, tea.KeyEsc)
+
+	// Search text should be cleared
+	if m.yamlSearchText != "" {
+		t.Fatalf("expected search text cleared after Esc, got %q", m.yamlSearchText)
+	}
+}

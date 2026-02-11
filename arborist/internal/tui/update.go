@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/ai-dynamo/grove/arborist/internal/data"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -28,6 +31,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PodYAMLMsg:
 		return m.handlePodYAML(msg)
+
+	case ResourceYAMLMsg:
+		return m.handleResourceYAML(msg)
 
 	case ErrorMsg:
 		debugLog("ERROR: %s: %v", msg.Operation, msg.Err)
@@ -68,6 +74,11 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 	m.filterInput.Width = m.width - 6
 	m.commandInput.Width = m.width - 6
+	m.yamlSearchInput.Width = m.width - 6
+
+	// Resize YAML overlay viewport
+	m.yamlViewport.Width = frameContentWidth
+	m.yamlViewport.Height = m.height - 6 // room for header/footer
 
 	// Rebuild tables
 	m.rebuildResourcesTable()
@@ -98,6 +109,11 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		debugLogWithContext("quitting (ctrl+c)")
 		return m, tea.Quit
+	}
+
+	// YAML overlay mode has its own key handling
+	if m.yamlOverlayActive {
+		return m.handleYAMLOverlayKey(msg)
 	}
 
 	// Command mode has different key handling
@@ -225,6 +241,8 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.commandInput.Focus()
 			debugLogWithContext("command mode activated")
 			return m, textinput.Blink
+		case "y", "Y":
+			return m.openYAMLOverlay()
 		}
 	}
 
@@ -288,6 +306,314 @@ func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
 		m.rebuildTopologyPodsTable()
 	}
 	return m, nil
+}
+
+// openYAMLOverlay starts loading YAML for the currently selected resource.
+func (m Model) openYAMLOverlay() (tea.Model, tea.Cmd) {
+	// Determine what resource is selected
+	resourceType, resourceName, namespace := m.selectedResourceInfo()
+	if resourceType == "" || resourceName == "" {
+		debugLogWithContext("openYAMLOverlay: no resource selected")
+		return m, nil
+	}
+
+	// For virtual replica types, resolve to the actual parent resource
+	actualType := resourceType
+	actualName := resourceName
+	switch resourceType {
+	case "PodCliqueSetReplica":
+		actualType = "PodCliqueSet"
+		actualName = m.viewState.SelectedPodCliqueSet
+	case "PodCliqueScalingGroupReplica":
+		actualType = "PodCliqueScalingGroup"
+		actualName = m.viewState.SelectedScalingGroup
+	}
+
+	// Set overlay state — show "Loading..." while fetching
+	m.yamlOverlayActive = true
+	m.yamlResourceType = resourceType
+	m.yamlResourceName = resourceName
+	m.yamlContent = "# Loading YAML for " + actualType + "/" + actualName + "..."
+	m.yamlSearchActive = false
+	m.yamlSearchText = ""
+	m.yamlSearchInput.SetValue("")
+
+	// Size the viewport
+	m.yamlViewport.Width = m.width - 4 // room for border + padding
+	m.yamlViewport.Height = m.height - 6 // room for header/footer
+	m.yamlViewport.SetContent(m.yamlContent)
+	m.yamlViewport.GotoTop()
+
+	debugLogWithContext("openYAMLOverlay: loading %s/%s (actual: %s/%s)", resourceType, resourceName, actualType, actualName)
+
+	return m, loadResourceYAMLCmd(m.cache, m.ctx, actualType, actualName, namespace)
+}
+
+// selectedResourceInfo returns the type, name, and namespace of the currently selected resource.
+func (m Model) selectedResourceInfo() (string, string, string) {
+	if m.viewState.ViewType == data.TopologyView {
+		// In topology view, use the pods table if focused on pods pane
+		if m.activePane == data.TopologyPodsPane {
+			row := m.topologyPodsTable.SelectedRow()
+			if len(row) >= 3 {
+				return "Pod", row[2], row[0] // NAME at index 2, NAMESPACE at index 0
+			}
+		}
+		return "", "", ""
+	}
+
+	// For PodView, the selected resource is the pod itself
+	if m.viewState.ViewType == data.PodView {
+		return "Pod", m.viewState.SelectedPod, m.resolveNamespace()
+	}
+
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 3 {
+		return "", "", ""
+	}
+	return selectedRow[1], selectedRow[2], selectedRow[0] // TYPE, NAME, NAMESPACE
+}
+
+// handleResourceYAML handles ResourceYAMLMsg.
+func (m Model) handleResourceYAML(msg ResourceYAMLMsg) (tea.Model, tea.Cmd) {
+	if !m.yamlOverlayActive {
+		return m, nil
+	}
+
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading resource YAML: %v", msg.Err)
+		m.yamlContent = fmt.Sprintf("# Error loading YAML for %s/%s: %v", msg.ResourceType, msg.ResourceName, msg.Err)
+	} else {
+		debugLogWithContext("loaded %d bytes of YAML for %s/%s", len(msg.YAML), msg.ResourceType, msg.ResourceName)
+		m.yamlContent = msg.YAML
+	}
+	m.updateYAMLViewportContent()
+	m.yamlViewport.GotoTop()
+	return m, nil
+}
+
+// handleYAMLOverlayKey handles keys when the YAML overlay is active.
+func (m Model) handleYAMLOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// If search is active in the YAML overlay, handle search input
+	if m.yamlSearchActive {
+		return m.handleYAMLSearchKey(msg)
+	}
+
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.yamlOverlayActive = false
+		m.yamlContent = ""
+		debugLogWithContext("YAML overlay closed")
+		return m, nil
+
+	case tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown, tea.KeyHome, tea.KeyEnd:
+		var cmd tea.Cmd
+		m.yamlViewport, cmd = m.yamlViewport.Update(msg)
+		return m, cmd
+
+	case tea.KeyRunes:
+		switch msg.String() {
+		case "q", "Q":
+			m.yamlOverlayActive = false
+			m.yamlContent = ""
+			debugLogWithContext("YAML overlay closed (q)")
+			return m, nil
+		case "/":
+			m.yamlSearchActive = true
+			m.yamlSearchInput.SetValue(m.yamlSearchText)
+			m.yamlSearchInput.Focus()
+			debugLogWithContext("YAML search mode activated")
+			return m, textinput.Blink
+		case "n":
+			// Jump to next search match
+			if m.yamlSearchText != "" {
+				m.yamlSearchNext(false)
+			}
+			return m, nil
+		case "N":
+			// Jump to previous search match
+			if m.yamlSearchText != "" {
+				m.yamlSearchNext(true)
+			}
+			return m, nil
+		}
+
+	case tea.KeyCtrlD:
+		// Half-page down (like vim)
+		var cmd tea.Cmd
+		m.yamlViewport.HalfViewDown()
+		return m, cmd
+
+	case tea.KeyCtrlU:
+		// Half-page up (like vim)
+		var cmd tea.Cmd
+		m.yamlViewport.HalfViewUp()
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+// handleYAMLSearchKey handles keys when the YAML search input is active.
+func (m Model) handleYAMLSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.yamlSearchActive = false
+		// Clear search and remove highlights
+		m.yamlSearchText = ""
+		m.yamlSearchInput.SetValue("")
+		m.updateYAMLViewportContent()
+		debugLogWithContext("YAML search cancelled")
+		return m, nil
+
+	case tea.KeyEnter:
+		m.yamlSearchActive = false
+		m.yamlSearchText = m.yamlSearchInput.Value()
+		m.updateYAMLViewportContent()
+		if m.yamlSearchText != "" {
+			m.applyYAMLSearch()
+		}
+		debugLogWithContext("YAML search applied: %q", m.yamlSearchText)
+		return m, nil
+
+	default:
+		var cmd tea.Cmd
+		m.yamlSearchInput, cmd = m.yamlSearchInput.Update(msg)
+		return m, cmd
+	}
+}
+
+// updateYAMLViewportContent sets the viewport content from yamlContent,
+// applying search highlighting if yamlSearchText is set.
+func (m *Model) updateYAMLViewportContent() {
+	if m.yamlSearchText == "" || m.yamlContent == "" {
+		m.yamlViewport.SetContent(m.yamlContent)
+		return
+	}
+
+	m.yamlViewport.SetContent(highlightYAMLSearch(m.yamlContent, m.yamlSearchText))
+}
+
+// highlightYAMLSearch returns content with all occurrences of searchText
+// highlighted using YAMLSearchHighlightStyle. Matching is case-insensitive.
+func highlightYAMLSearch(content, searchText string) string {
+	if searchText == "" {
+		return content
+	}
+
+	searchLower := strings.ToLower(searchText)
+	lines := strings.Split(content, "\n")
+	highlighted := make([]string, len(lines))
+
+	for i, line := range lines {
+		lineLower := strings.ToLower(line)
+		if !strings.Contains(lineLower, searchLower) {
+			highlighted[i] = line
+			continue
+		}
+
+		// Build the line with highlighted matches
+		var result strings.Builder
+		pos := 0
+		for {
+			idx := strings.Index(strings.ToLower(line[pos:]), searchLower)
+			if idx == -1 {
+				result.WriteString(line[pos:])
+				break
+			}
+			// Write text before the match
+			result.WriteString(line[pos : pos+idx])
+			// Write the matched text with highlight style (preserve original case)
+			matchEnd := pos + idx + len(searchText)
+			result.WriteString(YAMLSearchHighlightStyle.Render(line[pos+idx : matchEnd]))
+			pos = matchEnd
+		}
+		highlighted[i] = result.String()
+	}
+
+	return strings.Join(highlighted, "\n")
+}
+
+// applyYAMLSearch scrolls to the first search match.
+func (m *Model) applyYAMLSearch() {
+	if m.yamlSearchText == "" || m.yamlContent == "" {
+		return
+	}
+
+	searchLower := strings.ToLower(m.yamlSearchText)
+	lines := strings.Split(m.yamlContent, "\n")
+
+	// Find the first line containing the search text
+	for i, line := range lines {
+		if strings.Contains(strings.ToLower(line), searchLower) {
+			// Scroll viewport to show this line (center it if possible)
+			targetLine := i - m.yamlViewport.Height/2
+			if targetLine < 0 {
+				targetLine = 0
+			}
+			m.yamlViewport.SetYOffset(targetLine)
+			return
+		}
+	}
+}
+
+// yamlSearchNext jumps to the next (or previous) search match.
+func (m *Model) yamlSearchNext(reverse bool) {
+	if m.yamlSearchText == "" || m.yamlContent == "" {
+		return
+	}
+
+	searchLower := strings.ToLower(m.yamlSearchText)
+	lines := strings.Split(m.yamlContent, "\n")
+	currentLine := m.yamlViewport.YOffset + m.yamlViewport.Height/2
+
+	if reverse {
+		// Search backwards from current position
+		for i := currentLine - 1; i >= 0; i-- {
+			if strings.Contains(strings.ToLower(lines[i]), searchLower) {
+				targetLine := i - m.yamlViewport.Height/2
+				if targetLine < 0 {
+					targetLine = 0
+				}
+				m.yamlViewport.SetYOffset(targetLine)
+				return
+			}
+		}
+		// Wrap around
+		for i := len(lines) - 1; i >= currentLine; i-- {
+			if strings.Contains(strings.ToLower(lines[i]), searchLower) {
+				targetLine := i - m.yamlViewport.Height/2
+				if targetLine < 0 {
+					targetLine = 0
+				}
+				m.yamlViewport.SetYOffset(targetLine)
+				return
+			}
+		}
+	} else {
+		// Search forwards from current position
+		for i := currentLine + 1; i < len(lines); i++ {
+			if strings.Contains(strings.ToLower(lines[i]), searchLower) {
+				targetLine := i - m.yamlViewport.Height/2
+				if targetLine < 0 {
+					targetLine = 0
+				}
+				m.yamlViewport.SetYOffset(targetLine)
+				return
+			}
+		}
+		// Wrap around
+		for i := 0; i <= currentLine; i++ {
+			if strings.Contains(strings.ToLower(lines[i]), searchLower) {
+				targetLine := i - m.yamlViewport.Height/2
+				if targetLine < 0 {
+					targetLine = 0
+				}
+				m.yamlViewport.SetYOffset(targetLine)
+				return
+			}
+		}
+	}
 }
 
 // updateEventsForSelection updates allEvents based on the currently highlighted

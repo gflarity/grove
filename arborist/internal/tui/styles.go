@@ -259,6 +259,15 @@ var FootnoteStyle = lipgloss.NewStyle().
 	PaddingLeft(1)
 
 // =============================================================================
+// YAML Search Highlight Style
+// =============================================================================
+
+var YAMLSearchHighlightStyle = lipgloss.NewStyle().
+	Background(ColorDarkOrange).
+	Foreground(ColorBlack).
+	Bold(true)
+
+// =============================================================================
 // Shared Table Styles
 // =============================================================================
 

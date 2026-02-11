@@ -16,6 +16,14 @@ type PodYAMLMsg struct {
 	Err     error
 }
 
+// ResourceYAMLMsg is sent when a resource's YAML has been loaded (for the YAML overlay).
+type ResourceYAMLMsg struct {
+	ResourceType string
+	ResourceName string
+	YAML         string
+	Err          error
+}
+
 // ErrorMsg is a generic error message for operations that don't have a specific message type.
 type ErrorMsg struct {
 	Operation string
