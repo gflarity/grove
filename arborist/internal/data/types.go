@@ -73,6 +73,7 @@ type Resource struct {
 // Event represents a Kubernetes event.
 type Event struct {
 	Type      string    // Normal, Warning, Error
+	Kind      string    // InvolvedObject kind: Pod, PodClique, PodCliqueScalingGroup, etc.
 	Reason    string    // The reason for the event
 	Age       string    // How long ago
 	From      string    // Component that generated the event

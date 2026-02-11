@@ -19,6 +19,7 @@ func convertK8sEventToEvent(k8sEvent corev1.Event) data.Event {
 
 	return data.Event{
 		Type:      k8sEvent.Type,
+		Kind:      k8sEvent.InvolvedObject.Kind,
 		Reason:    k8sEvent.Reason,
 		Age:       age,
 		From:      k8sEvent.Source.Component,
