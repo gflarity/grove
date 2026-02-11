@@ -1244,7 +1244,7 @@ func TestHeaderShowsClusterInfo(t *testing.T) {
 	if !strings.Contains(header, "Forest") {
 		t.Errorf("expected header to contain view name 'Forest', got:\n%s", header)
 	}
-	for _, label := range []string{"Context:", "Cluster:", "User:", "Arborist Rev:", "K8s Rev:", "View:"} {
+	for _, label := range []string{"Context:", "Cluster:", "User:", "Arborist Rev:", "K8s Rev:", "Lens:"} {
 		if !strings.Contains(header, label) {
 			t.Errorf("expected header to contain '%s' label, got:\n%s", label, header)
 		}
