@@ -341,11 +341,12 @@ func ExtractCliqueTemplateNameFromPCSGChild(podCliqueResourceName, pcsgResourceN
 // TopologyPodInput represents raw pod data input for BuildTopologyViewData.
 // This decouples the topology view data construction from Kubernetes API types.
 type TopologyPodInput struct {
-	Namespace string
-	Name      string
-	NodeName  string
-	Phase     string
-	Labels    map[string]string
+	Namespace   string
+	Name        string
+	NodeName    string
+	Phase       string
+	Labels      map[string]string
+	GPURequests int64 // Sum of nvidia.com/gpu resource requests across all containers
 }
 
 // BuildTopologyViewData constructs a TopologyViewData snapshot from raw cluster state.

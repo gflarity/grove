@@ -130,44 +130,14 @@ func debugLogMsg(msg tea.Msg) {
 	case tea.WindowSizeMsg:
 		debugLogger.logger.Printf("%sMSG tea.WindowSizeMsg width=%d height=%d", prefix, m.Width, m.Height)
 
-	case ForestDataMsg:
-		debugLogger.logger.Printf("%sMSG ForestDataMsg resources=%d err=%v", prefix, len(m.Resources), m.Err)
+	case CacheSyncedMsg:
+		debugLogger.logger.Printf("%sMSG CacheSyncedMsg", prefix)
 
-	case ReplicaDataMsg:
-		debugLogger.logger.Printf("%sMSG ReplicaDataMsg pcs=%s replicas=%d err=%v", prefix, m.PCSName, len(m.ReplicaIndexes), m.Err)
-
-	case ReplicaChildrenMsg:
-		debugLogger.logger.Printf("%sMSG ReplicaChildrenMsg pcs=%s replica=%s scalingGroups=%d podCliques=%d err=%v",
-			prefix, m.PCSName, m.ReplicaIndex, len(m.ScalingGroups), len(m.PodCliques), m.Err)
-
-	case PCSGChildrenMsg:
-		debugLogger.logger.Printf("%sMSG PCSGChildrenMsg pcsg=%s podCliques=%d err=%v", prefix, m.PCSGName, len(m.PodCliques), m.Err)
-
-	case PodCliqueChildrenMsg:
-		debugLogger.logger.Printf("%sMSG PodCliqueChildrenMsg podClique=%s pods=%d err=%v", prefix, m.PodCliqueName, len(m.Pods), m.Err)
-
-	case EventsMsg:
-		debugLogger.logger.Printf("%sMSG EventsMsg events=%d err=%v", prefix, len(m.Events), m.Err)
+	case CacheUpdateMsg:
+		debugLogger.logger.Printf("%sMSG CacheUpdateMsg", prefix)
 
 	case PodYAMLMsg:
 		debugLogger.logger.Printf("%sMSG PodYAMLMsg pod=%s yamlLen=%d err=%v", prefix, m.PodName, len(m.YAML), m.Err)
-
-	case TopologyInfoMsg:
-		var pcsDomain string
-		var pcsgCount, cliqueCount int
-		if m.TopologyInfo != nil {
-			pcsDomain = m.TopologyInfo.PCSPackDomain
-			pcsgCount = len(m.TopologyInfo.PCSGPackDomains)
-			cliqueCount = len(m.TopologyInfo.CliquePackDomains)
-		}
-		debugLogger.logger.Printf("%sMSG TopologyInfoMsg pcs=%s pcsDomain=%q pcsgs=%d cliques=%d err=%v",
-			prefix, m.PCSName, pcsDomain, pcsgCount, cliqueCount, m.Err)
-
-	case PodInfoMsg:
-		debugLogger.logger.Printf("%sMSG PodInfoMsg pcs=%s pods=%d err=%v", prefix, m.PCSName, len(m.PodInfos), m.Err)
-
-	case NodeLabelsMsg:
-		debugLogger.logger.Printf("%sMSG NodeLabelsMsg nodes=%d err=%v", prefix, len(m.NodeLabels), m.Err)
 
 	case ErrorMsg:
 		debugLogger.logger.Printf("%sMSG ErrorMsg operation=%s err=%v", prefix, m.Operation, m.Err)

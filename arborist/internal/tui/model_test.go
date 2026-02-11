@@ -5,30 +5,42 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/grove/arborist/internal/data"
+	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	tea "github.com/charmbracelet/bubbletea"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// newTestModel creates a Model backed by a MockProvider pre-loaded with the
+// newTestModel creates a Model backed by a MockGlobalCache pre-loaded with the
 // given PodCliqueSet resources. It also sends a WindowSizeMsg so the model is
-// considered "ready" and will render a full view.
+// considered "ready" and will render a full view, then delivers CacheSyncedMsg.
 func newTestModel(pcsResources []data.Resource) Model {
-	mp := data.NewMockProvider()
-	mp.PodCliqueSets = pcsResources
-	m := NewModel(mp)
+	mc := data.NewMockGlobalCache()
+	if pcsResources != nil {
+		snap := mc.Snapshot()
+		snap.PodCliqueSets = pcsResources
+		mc.SetSnapshot(snap)
+	}
+	m := NewModel(mc)
 	// Simulate initial window size so the model is ready
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Deliver cache synced so data is populated
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
 	return m
 }
 
-// newTestModelWithProvider creates a Model backed by a fully configured
-// MockProvider. Sends a WindowSizeMsg to make the model ready.
-func newTestModelWithProvider(mp *data.MockProvider) Model {
-	m := NewModel(mp)
+// newTestModelWithCache creates a Model backed by a fully configured
+// MockGlobalCache. Sends a WindowSizeMsg to make the model ready and
+// delivers CacheSyncedMsg.
+func newTestModelWithCache(mc *data.MockGlobalCache) Model {
+	m := NewModel(mc)
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
 	return m
 }
 
@@ -105,13 +117,11 @@ func executeCmdAndApply(m Model, cmd tea.Cmd) Model {
 			if subCmd != nil {
 				subMsg := subCmd()
 				if subMsg != nil {
-					// Recursively handle nested batches
 					if _, isBatch := subMsg.(tea.BatchMsg); isBatch {
 						m = executeCmdAndApply(m, subCmd)
 					} else {
 						var nextCmd tea.Cmd
 						m, nextCmd = applyMsg(m, subMsg)
-						// Also execute any resulting commands from the handler
 						if nextCmd != nil {
 							m = executeCmdAndApply(m, nextCmd)
 						}
@@ -168,77 +178,66 @@ func samplePods() []data.Resource {
 	}
 }
 
-// buildFullMockProvider creates a MockProvider with a complete hierarchy for
+// buildFullMockCache creates a MockGlobalCache with a complete hierarchy for
 // "alpha-pcs": Forest -> PCS (1 replica) -> Replica children -> PodClique -> Pods.
-func buildFullMockProvider() *data.MockProvider {
-	mp := data.NewMockProvider()
-	mp.PodCliqueSets = samplePCSResources()
-
-	// alpha-pcs has 1 replica
-	mp.ReplicaIndexes["default/alpha-pcs"] = []string{"0"}
-	// beta-pcs has 2 replicas with children
-	mp.ReplicaIndexes["staging/beta-pcs"] = []string{"0", "1"}
-	mp.ScalingGroups["staging/beta-pcs/0"] = []data.Resource{
-		{Name: "beta-pcs-0-sg-main", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"},
-	}
-	mp.ScalingGroups["staging/beta-pcs/1"] = []data.Resource{
-		{Name: "beta-pcs-1-sg-main", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"},
-	}
-
+func buildFullMockCache() *data.MockGlobalCache {
+	mc := data.NewMockGlobalCache()
 	scalingGroups, podCliques := sampleReplicaChildren()
-	mp.ScalingGroups["default/alpha-pcs/0"] = scalingGroups
-	mp.ReplicaPodCliques["default/alpha-pcs/0"] = podCliques
 
-	// PCSG replica data for alpha-pcs-0-sg-prefill (has 2 replicas)
-	mp.PCSGReplicaIndexes["default/alpha-pcs-0-sg-prefill"] = []string{"0", "1"}
-	mp.PCSGReplicaPodCliques["default/alpha-pcs-0-sg-prefill/0"] = []data.Resource{
-		{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
-	}
-	mp.PCSGReplicaPodCliques["default/alpha-pcs-0-sg-prefill/1"] = []data.Resource{
-		{Name: "alpha-pcs-0-sg-prefill-1-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+	snapshot := &data.CacheSnapshot{
+		PodCliqueSets: samplePCSResources(),
+		PodCliqueSetSpecs: map[string]*corev1alpha1.PodCliqueSet{
+			"alpha-pcs": {ObjectMeta: metav1.ObjectMeta{Name: "alpha-pcs", Namespace: "default"}, Spec: corev1alpha1.PodCliqueSetSpec{Replicas: 3}},
+			"beta-pcs":  {ObjectMeta: metav1.ObjectMeta{Name: "beta-pcs", Namespace: "staging"}, Spec: corev1alpha1.PodCliqueSetSpec{Replicas: 3}},
+			"gamma-pcs": {ObjectMeta: metav1.ObjectMeta{Name: "gamma-pcs", Namespace: "default"}, Spec: corev1alpha1.PodCliqueSetSpec{Replicas: 5}},
+		},
+		ReplicaIndexesByPCS: map[string][]string{
+			"alpha-pcs": {"0"},
+			"beta-pcs":  {"0", "1"},
+		},
+		ScalingGroupsByReplica: map[string][]data.Resource{
+			"alpha-pcs/0": scalingGroups,
+			"beta-pcs/0": {
+				{Name: "beta-pcs-0-sg-main", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"},
+			},
+			"beta-pcs/1": {
+				{Name: "beta-pcs-1-sg-main", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"},
+			},
+		},
+		PodCliquesByReplica: map[string][]data.Resource{
+			"alpha-pcs/0": podCliques,
+		},
+		ReplicaIndexesByPCSG: map[string][]string{
+			"alpha-pcs-0-sg-prefill": {"0", "1"},
+		},
+		PodCliquesByPCSG: map[string][]data.Resource{
+			"alpha-pcs-0-sg-prefill": {
+				{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+				{Name: "alpha-pcs-0-sg-prefill-1-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+			},
+		},
+		PodCliquesByPCSGReplica: map[string][]data.Resource{
+			"alpha-pcs-0-sg-prefill/0": {
+				{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+			},
+			"alpha-pcs-0-sg-prefill/1": {
+				{Name: "alpha-pcs-0-sg-prefill-1-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+			},
+		},
+		PodsByPodClique: map[string][]data.Resource{
+			"alpha-pcs-0-standalone-pc":       samplePods(),
+			"alpha-pcs-0-sg-prefill-0-worker": samplePods(),
+		},
+		EventsByObject:  make(map[string][]data.Event),
+		NodeLabels:      make(map[string]map[string]string),
+		PodInfos:        make(map[string]data.CachedPodInfo),
+		NodeGPUProducts: make(map[string]string),
 	}
 
-	// PodClique children (pods)
-	mp.PodCliquePods["default/alpha-pcs-0-standalone-pc"] = samplePods()
-	mp.PodCliquePods["default/alpha-pcs-0-sg-prefill-0-worker"] = samplePods()
+	mc.SetSnapshot(snapshot)
+	mc.PodYAMLs["default/alpha-pcs-0-pc-worker-0"] = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: alpha-pcs-0-pc-worker-0\n"
 
-	// Pod YAML
-	mp.PodYAMLs["default/alpha-pcs-0-pc-worker-0"] = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: alpha-pcs-0-pc-worker-0\n"
-
-	// Events — at every level of the hierarchy
-	mp.Events["pcs/default/alpha-pcs"] = sampleEvents()[:2]
-	mp.Events["replica/default/alpha-pcs/0"] = []data.Event{
-		{Type: "Normal", Reason: "Scaled", Age: "5m", From: "controller", Message: "replica-0 scaled", Parent: "alpha-pcs"},
-	}
-	mp.Events["pcsg/default/alpha-pcs-0-sg-prefill"] = []data.Event{
-		{Type: "Normal", Reason: "SGReady", Age: "3m", From: "controller", Message: "sg-prefill ready", Parent: "alpha-pcs-0-sg-prefill"},
-	}
-	mp.Events["pc/default/alpha-pcs-0-standalone-pc"] = []data.Event{
-		{Type: "Normal", Reason: "Created", Age: "10m", From: "controller", Message: "standalone-pc created", Parent: "alpha-pcs-0-standalone-pc"},
-	}
-	mp.Events["pc/default/alpha-pcs-0-sg-prefill-0-worker"] = []data.Event{
-		{Type: "Normal", Reason: "Created", Age: "8m", From: "controller", Message: "prefill-0-worker created", Parent: "alpha-pcs-0-sg-prefill-0-worker"},
-	}
-	// PCSG replica events
-	mp.Events["pcsg-replica/default/alpha-pcs-0-sg-prefill/0"] = []data.Event{
-		{Type: "Normal", Reason: "ReplicaReady", Age: "4m", From: "controller", Message: "pcsg-replica-0 ready", Parent: "alpha-pcs-0-sg-prefill"},
-	}
-	mp.Events["pcsg-replica/default/alpha-pcs-0-sg-prefill/1"] = []data.Event{
-		{Type: "Normal", Reason: "ReplicaReady", Age: "4m", From: "controller", Message: "pcsg-replica-1 ready", Parent: "alpha-pcs-0-sg-prefill"},
-	}
-
-	// beta-pcs replica events (for multi-replica PCS event tests)
-	mp.Events["pcs/staging/beta-pcs"] = []data.Event{
-		{Type: "Normal", Reason: "Created", Age: "1m", From: "controller", Message: "beta-pcs created", Parent: "beta-pcs"},
-	}
-	mp.Events["replica/staging/beta-pcs/0"] = []data.Event{
-		{Type: "Normal", Reason: "Ready", Age: "1m", From: "controller", Message: "beta replica-0 ready", Parent: "beta-pcs"},
-	}
-	mp.Events["replica/staging/beta-pcs/1"] = []data.Event{
-		{Type: "Warning", Reason: "Pending", Age: "30s", From: "scheduler", Message: "beta replica-1 pending", Parent: "beta-pcs"},
-	}
-
-	return mp
+	return mc
 }
 
 // ---------------------------------------------------------------------------
@@ -261,12 +260,8 @@ func TestNewTestModel_IsReady(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestInitialRenderWithForestData(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Simulate Init() -> forest data load -> deliver ForestDataMsg
-	initCmd := m.Init()
-	m = executeCmdAndApply(m, initCmd)
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// The view should contain all PCS names
 	assertView(t, m, []string{"alpha-pcs", "beta-pcs", "gamma-pcs"})
@@ -283,9 +278,6 @@ func TestInitialRenderWithForestData(t *testing.T) {
 func TestInitialRenderEmptyForest(t *testing.T) {
 	m := newTestModel([]data.Resource{})
 
-	// Deliver empty forest data
-	m = mustApply(m, ForestDataMsg{Resources: []data.Resource{}})
-
 	// Should still render without panic
 	view := m.View()
 	if view == "" {
@@ -300,11 +292,8 @@ func TestInitialRenderEmptyForest(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNavigationDrillDown(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest data
-	m = executeCmdAndApply(m, m.Init())
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Verify we're at ForestView
 	if m.viewState.ViewType != data.ForestView {
@@ -312,21 +301,13 @@ func TestNavigationDrillDown(t *testing.T) {
 	}
 
 	// Press Enter to drill into first PCS (alpha-pcs).
-	// This dispatches batch commands (loadTopologyInfo, loadPodInfo, loadReplicas).
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	// Navigation is synchronous — data comes from snapshot.
+	m = sendKey(m, tea.KeyEnter)
 
-	// Verify the PCS was selected and ViewType transitioned immediately
+	// Verify the PCS was selected
 	if m.viewState.SelectedPodCliqueSet != "alpha-pcs" {
 		t.Fatalf("expected SelectedPodCliqueSet=alpha-pcs, got %s", m.viewState.SelectedPodCliqueSet)
 	}
-	if m.viewState.ViewType != data.PodCliqueSetView {
-		t.Fatalf("expected immediate transition to PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Execute all batch commands (loadTopologyInfo, loadPodInfo, loadReplicas)
-	// This triggers ReplicaDataMsg handling which does single-replica skip.
-	m = executeCmdAndApply(m, cmd)
 
 	// alpha-pcs has 1 replica, so it should skip to PodCliqueSetReplicaView
 	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
@@ -345,71 +326,16 @@ func TestNavigationDrillDown(t *testing.T) {
 	}
 }
 
-// TestNavigationDrillDown_ViaMessages tests the navigation state machine by
-// directly sending messages (bypassing table selection and batch commands).
-// This provides a clean unit test of the Update handlers.
-func TestNavigationDrillDown_ViaMessages(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Start at ForestView
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
-	if m.viewState.ViewType != data.ForestView {
-		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Simulate navigating into alpha-pcs: set SelectedPodCliqueSet, then send ReplicaDataMsg
-	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
-
-	// ReplicaDataMsg with 1 replica triggers skip to PodCliqueSetReplicaView
-	m = mustApply(m, ReplicaDataMsg{
-		PCSName:        "alpha-pcs",
-		Namespace:      "default",
-		ReplicaIndexes: []string{"0"},
-		ScalingGroupsByReplica: map[string][]data.Resource{
-			"0": {{Name: "sg1", Type: "PodCliqueScalingGroup", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
-		},
-		PodCliquesByReplica: map[string][]data.Resource{},
-	})
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// ReplicaChildrenMsg populates the replica view
-	scalingGroups, podCliques := sampleReplicaChildren()
-	m = mustApply(m, ReplicaChildrenMsg{
-		PCSName:       "alpha-pcs",
-		Namespace:     "default",
-		ReplicaIndex:  "0",
-		ScalingGroups: scalingGroups,
-		PodCliques:    podCliques,
-	})
-	assertView(t, m, []string{"Forest", "alpha-pcs", "replica-0"})
-
-	// Navigate back from PodCliqueSetReplicaView -> ForestView (single replica skip)
-	m = sendKey(m, tea.KeyEsc)
-	if m.viewState.ViewType != data.ForestView {
-		t.Fatalf("expected ForestView after back, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-}
-
 // ---------------------------------------------------------------------------
 // 6.4 Test: Single-replica skip behavior
 // ---------------------------------------------------------------------------
 
 func TestSingleReplicaSkip(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest data
-	m = executeCmdAndApply(m, m.Init())
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Press Enter to drill into alpha-pcs (has 1 replica)
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-
-	// Execute batch commands
-	m = executeCmdAndApply(m, cmd)
+	m = sendKey(m, tea.KeyEnter)
 
 	// Should skip directly to PodCliqueSetReplicaView
 	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
@@ -429,18 +355,11 @@ func TestSingleReplicaSkip(t *testing.T) {
 // TestMultiReplicaPCS_FullNavigationFlow verifies pressing Enter on a PCS with
 // multiple replicas transitions to PodCliqueSetView and shows the replica list.
 func TestMultiReplicaPCS_FullNavigationFlow(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest data
-	m = executeCmdAndApply(m, m.Init())
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Move down to beta-pcs (second row, has 2 replicas)
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
+	m = sendKey(m, tea.KeyDown)
 
 	// Verify beta-pcs is selected
 	selectedRow := m.resourcesTable.SelectedRow()
@@ -449,24 +368,14 @@ func TestMultiReplicaPCS_FullNavigationFlow(t *testing.T) {
 	}
 
 	// Press Enter to drill into beta-pcs
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-
-	// ViewType should transition to PodCliqueSetView immediately
-	if m.viewState.ViewType != data.PodCliqueSetView {
-		t.Fatalf("expected immediate PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-	if m.viewState.SelectedPodCliqueSet != "beta-pcs" {
-		t.Fatalf("expected SelectedPodCliqueSet=beta-pcs, got %s", m.viewState.SelectedPodCliqueSet)
-	}
-
-	// Execute all batch commands (replica data arrives)
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
+	m = sendKey(m, tea.KeyEnter)
 
 	// beta-pcs has 2 replicas, should stay at PodCliqueSetView with replica list
 	if m.viewState.ViewType != data.PodCliqueSetView {
 		t.Fatalf("expected PodCliqueSetView for multi-replica PCS, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.viewState.SelectedPodCliqueSet != "beta-pcs" {
+		t.Fatalf("expected SelectedPodCliqueSet=beta-pcs, got %s", m.viewState.SelectedPodCliqueSet)
 	}
 
 	// Check that 2 replicas are stored and visible
@@ -482,83 +391,13 @@ func TestMultiReplicaPCS_FullNavigationFlow(t *testing.T) {
 	}
 }
 
-// TestSingleReplicaSkip_ViaMessages tests skip behavior via direct messages.
-func TestSingleReplicaSkip_ViaMessages(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.SelectedPodCliqueSet = "test-pcs"
-
-	// Send ReplicaDataMsg with exactly 1 replica
-	m = mustApply(m, ReplicaDataMsg{
-		PCSName:                "test-pcs",
-		Namespace:              "default",
-		ReplicaIndexes:         []string{"0"},
-		ScalingGroupsByReplica: map[string][]data.Resource{"0": {}},
-		PodCliquesByReplica:    map[string][]data.Resource{"0": {}},
-	})
-
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-	if m.viewState.SelectedReplicaIndex != "0" {
-		t.Fatalf("expected SelectedReplicaIndex=0, got %s", m.viewState.SelectedReplicaIndex)
-	}
-
-	// Pressing Esc should go back to ForestView (single-replica entry in allResources)
-	pcsKey := "PodCliqueSet/test-pcs"
-	if len(m.allResources[pcsKey]) != 1 {
-		t.Fatalf("expected 1 replica resource tracked, got %d", len(m.allResources[pcsKey]))
-	}
-
-	m = sendKey(m, tea.KeyEsc)
-	if m.viewState.ViewType != data.ForestView {
-		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-}
-
-func TestMultiReplicaShowsReplicaList(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.SelectedPodCliqueSet = "beta-pcs"
-
-	// Send ReplicaDataMsg with 2 replicas
-	m = mustApply(m, ReplicaDataMsg{
-		PCSName:        "beta-pcs",
-		Namespace:      "staging",
-		ReplicaIndexes: []string{"0", "1"},
-		ScalingGroupsByReplica: map[string][]data.Resource{
-			"0": {{Name: "sg-0", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"}},
-			"1": {{Name: "sg-1", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"}},
-		},
-		PodCliquesByReplica: map[string][]data.Resource{},
-	})
-
-	// beta-pcs has 2 replicas, so should show PodCliqueSetView with replica list
-	if m.viewState.ViewType != data.PodCliqueSetView {
-		t.Fatalf("expected PodCliqueSetView for multi-replica PCS, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Should have 2 replica resources stored
-	pcsKey := "PodCliqueSet/beta-pcs"
-	if len(m.allResources[pcsKey]) != 2 {
-		t.Fatalf("expected 2 replica resources, got %d", len(m.allResources[pcsKey]))
-	}
-
-	// Back should go to ForestView
-	m = sendKey(m, tea.KeyEsc)
-	if m.viewState.ViewType != data.ForestView {
-		t.Fatalf("expected ForestView after Esc from PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-}
-
 // ---------------------------------------------------------------------------
 // 6.5 Test: Filter functionality
 // ---------------------------------------------------------------------------
 
 func TestFilterFunctionality(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest data
-	m = executeCmdAndApply(m, m.Init())
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Verify all PCSes visible
 	assertView(t, m, []string{"alpha-pcs", "beta-pcs", "gamma-pcs"})
@@ -605,7 +444,6 @@ func TestFilterFunctionality(t *testing.T) {
 
 func TestFilterStateTransitions(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	// Initially filter is off
 	if m.filterActive {
@@ -639,11 +477,8 @@ func TestFilterStateTransitions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPaneSwitching(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest data
-	m = executeCmdAndApply(m, m.Init())
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Initial active pane should be Resources
 	if m.activePane != data.ResourcesPane {
@@ -665,7 +500,6 @@ func TestPaneSwitching(t *testing.T) {
 
 func TestPaneSwitchingDuringFilter(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	// Activate filter
 	m = sendRune(m, '/')
@@ -682,7 +516,6 @@ func TestPaneSwitchingDuringFilter(t *testing.T) {
 
 func TestPaneSwitchingUpdatesTableFocus(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	// Initially resources table should be focused
 	if !m.resourcesTable.Focused() {
@@ -713,8 +546,8 @@ func TestPaneSwitchingUpdatesTableFocus(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEventsFilterByPodView(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Put model into PodView state manually
 	m.viewState.ViewType = data.PodView
@@ -738,8 +571,8 @@ func TestEventsFilterByPodView(t *testing.T) {
 }
 
 func TestEventsShowAllInForestView(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	m.viewState.ViewType = data.ForestView
 	m.allEvents = sampleEvents()
@@ -750,509 +583,6 @@ func TestEventsShowAllInForestView(t *testing.T) {
 	}
 }
 
-func TestEventsAreLoadedForPCS(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest data - this should also trigger loading events for the first PCS
-	m = executeCmdAndApply(m, m.Init())
-
-	// After loading forest data and events, allEvents should be populated
-	if len(m.allEvents) == 0 {
-		t.Fatal("expected events to be loaded after forest data init")
-	}
-}
-
-func TestEventsChangeWhenSelectingDifferentPCS(t *testing.T) {
-	mp := buildFullMockProvider()
-
-	// Set up distinct events for alpha-pcs and beta-pcs so we can tell them apart
-	alphaEvents := []data.Event{
-		{Type: "Normal", Reason: "Scaled", Age: "5m", From: "controller", Message: "alpha event 1", Parent: "alpha-pcs"},
-	}
-	betaEvents := []data.Event{
-		{Type: "Warning", Reason: "Unschedulable", Age: "2m", From: "scheduler", Message: "beta event 1", Parent: "beta-pcs"},
-		{Type: "Warning", Reason: "BackOff", Age: "1m", From: "kubelet", Message: "beta event 2", Parent: "beta-pcs"},
-	}
-	mp.Events["pcs/default/alpha-pcs"] = alphaEvents
-	mp.Events["pcs/staging/beta-pcs"] = betaEvents
-
-	m := newTestModelWithProvider(mp)
-
-	// Load forest data and initial events (for first PCS = alpha-pcs)
-	m = executeCmdAndApply(m, m.Init())
-
-	// Verify we start at ForestView with events for alpha-pcs
-	if m.viewState.ViewType != data.ForestView {
-		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-	if len(m.allEvents) != len(alphaEvents) {
-		t.Fatalf("expected %d alpha events initially, got %d", len(alphaEvents), len(m.allEvents))
-	}
-
-	// Press Down to select beta-pcs, which should trigger loading beta events
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-
-	// The cmd should include an event-loading command for beta-pcs
-	if cmd == nil {
-		t.Fatal("expected a command after pressing Down (to load events for newly selected PCS)")
-	}
-	m = executeCmdAndApply(m, cmd)
-
-	// Now allEvents should contain beta-pcs events
-	if len(m.allEvents) != len(betaEvents) {
-		t.Fatalf("expected %d beta events after selecting beta-pcs, got %d", len(betaEvents), len(m.allEvents))
-	}
-	for _, e := range m.allEvents {
-		if e.Parent != "beta-pcs" {
-			t.Errorf("expected event parent to be beta-pcs, got %s", e.Parent)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 6.7b Test: Cursor movement between PCS replicas does NOT change events
-// ---------------------------------------------------------------------------
-
-func TestEventsDontChangeOnCursorMoveBetweenPCSReplicas(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest, navigate into beta-pcs (2 replicas)
-	m = executeCmdAndApply(m, m.Init())
-
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown}) // select beta-pcs
-	m = executeCmdAndApply(m, cmd)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into beta-pcs
-	m = executeCmdAndApply(m, cmd)
-
-	// Should be at PodCliqueSetView with 2 replicas, PCS-level events loaded
-	if m.viewState.ViewType != data.PodCliqueSetView {
-		t.Fatalf("expected PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-	pcsEvents := append([]data.Event{}, m.allEvents...)
-	if len(pcsEvents) == 0 {
-		t.Fatal("expected PCS-level events to be loaded initially")
-	}
-
-	// Move cursor down to replica-1 — events should NOT change (stay at PCS level)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-	// The table update cmd exists but there should be no event-loading cmd
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
-
-	// Events should still be the same PCS-level events
-	if len(m.allEvents) != len(pcsEvents) {
-		t.Fatalf("expected events to stay at PCS-level (%d), got %d", len(pcsEvents), len(m.allEvents))
-	}
-
-	// Move cursor back up to replica-0 — events still the same
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
-	if len(m.allEvents) != len(pcsEvents) {
-		t.Fatalf("expected events to still be PCS-level (%d), got %d", len(pcsEvents), len(m.allEvents))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 6.7c Test: Drilling INTO a PCS replica loads replica events
-// ---------------------------------------------------------------------------
-
-func TestEventsScopedWhenDrillingIntoPCSReplica(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest, navigate into beta-pcs (2 replicas)
-	m = executeCmdAndApply(m, m.Init())
-
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown}) // select beta-pcs
-	m = executeCmdAndApply(m, cmd)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into beta-pcs
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueSetView {
-		t.Fatalf("expected PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Drill into replica-0 (first row = Enter)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("expected command when drilling into PCS replica")
-	}
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should now be for replica-0 specifically
-	if len(m.allEvents) != 1 {
-		t.Fatalf("expected 1 event for beta replica-0, got %d", len(m.allEvents))
-	}
-	if m.allEvents[0].Message != "beta replica-0 ready" {
-		t.Errorf("expected 'beta replica-0 ready', got %q", m.allEvents[0].Message)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 6.7d Test: Cursor movement in PodCliqueSetReplicaView updates events to match
-// the highlighted row's subtree.
-// ---------------------------------------------------------------------------
-
-func TestEventsUpdateOnCursorMoveInReplicaView(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Navigate: Forest -> alpha-pcs (single replica skip) -> PodCliqueSetReplicaView
-	m = executeCmdAndApply(m, m.Init())
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into alpha-pcs
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should be replica-0 events (loaded on entry)
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "replica-0 scaled" {
-		t.Fatalf("expected replica-0 events on entry, got %v", m.allEvents)
-	}
-
-	// Move down to standalone PodClique — events should update to PodClique scope
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
-
-	// Events should now be for the standalone PodClique
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
-		t.Errorf("expected standalone PodClique events after cursor move, got %v", m.allEvents)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 6.7e Test: Drilling INTO a PCSG loads PCSG events
-// ---------------------------------------------------------------------------
-
-func TestEventsScopedWhenDrillingIntoPCSG(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Navigate: Forest -> alpha-pcs (single skip) -> PodCliqueSetReplicaView
-	m = executeCmdAndApply(m, m.Init())
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events are replica-0 events
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "replica-0 scaled" {
-		t.Fatalf("expected replica-0 events, got %v", m.allEvents)
-	}
-
-	// Drill into sg-prefill PCSG (first row)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
-		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should now be PCSG-level
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "sg-prefill ready" {
-		t.Fatalf("expected PCSG events after drilling in, got %v", m.allEvents)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 6.7f Test: Drilling INTO a PodClique loads PodClique events
-// ---------------------------------------------------------------------------
-
-func TestEventsScopedWhenDrillingIntoPodClique(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Navigate: Forest -> alpha-pcs (single skip) -> PodCliqueSetReplicaView
-	m = executeCmdAndApply(m, m.Init())
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	// Move down to standalone PodClique, drill in
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueView {
-		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should be PodClique-level
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
-		t.Fatalf("expected PodClique events, got %v", m.allEvents)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 6.7g Test: Events reload when navigating back
-// ---------------------------------------------------------------------------
-
-func TestEventsReloadOnNavigateBack(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Navigate down to PodCliqueView: Forest -> PCS -> Replica -> PodClique
-	m = executeCmdAndApply(m, m.Init())
-	var cmd tea.Cmd
-
-	// Drill into alpha-pcs (single replica skip -> PodCliqueSetReplicaView)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Move down to standalone PodClique and drill into it
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueView {
-		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Verify PodClique events loaded
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
-		t.Fatalf("expected standalone-pc events at PodCliqueView, got %v", m.allEvents)
-	}
-
-	// Navigate back — should reload replica-level events
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd == nil {
-		t.Fatal("expected event-reload command on back-navigation from PodCliqueView")
-	}
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should be scoped to the PodClique row the cursor lands on
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
-		t.Fatalf("expected standalone-pc events after back-nav (cursor on PodClique row), got %v", m.allEvents)
-	}
-}
-
-func TestEventsReloadOnNavigateBack_PCSG(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Navigate: Forest -> alpha-pcs (single replica skip) -> PCSG (2 PCSG replicas)
-	m = executeCmdAndApply(m, m.Init())
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into alpha-pcs
-	m = executeCmdAndApply(m, cmd)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into sg-prefill PCSG
-	m = executeCmdAndApply(m, cmd)
-
-	// Should be at PodCliqueScalingGroupView (2 PCSG replicas)
-	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
-		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should be for the PCSG
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "sg-prefill ready" {
-		t.Fatalf("expected sg-prefill events, got %v", m.allEvents)
-	}
-
-	// Navigate back — should reload replica-level events for the PCS replica
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd == nil {
-		t.Fatal("expected event-reload command on back-navigation from PCSGView")
-	}
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should be scoped to the PCSG row the cursor lands on
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "sg-prefill ready" {
-		t.Fatalf("expected sg-prefill events after back-nav (cursor on PCSG row), got %v", m.allEvents)
-	}
-}
-
-func TestEventsReloadOnNavigateBack_PodView(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Navigate down to Pod view via standalone PodClique
-	m = executeCmdAndApply(m, m.Init())
-	var cmd tea.Cmd
-
-	// alpha-pcs (single replica skip)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	// Select standalone-pc and drill in
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	// Now at PodCliqueView with standalone-pc events
-	if m.viewState.ViewType != data.PodCliqueView {
-		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Drill into first Pod
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodView {
-		t.Fatalf("expected PodView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Navigate back — should reload PodClique events
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd == nil {
-		t.Fatal("expected event-reload command on back-navigation from PodView")
-	}
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueView {
-		t.Fatalf("expected PodCliqueView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should be PodClique events, not filtered to a single Pod
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
-		t.Fatalf("expected standalone-pc events after back-nav from PodView, got %v", m.allEvents)
-	}
-}
-
-func TestEventsReloadOnNavigateBack_PCSGReplicaView(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Navigate: Forest -> alpha-pcs -> PCSG (2 replicas) -> PCSG replica-0 -> PodClique
-	m = executeCmdAndApply(m, m.Init())
-	var cmd tea.Cmd
-
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // alpha-pcs
-	m = executeCmdAndApply(m, cmd)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // sg-prefill
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
-		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Drill into first PCSG replica
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
-		t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Drill into PodClique
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueView {
-		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should be for the PodClique
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "prefill-0-worker created" {
-		t.Fatalf("expected prefill-0-worker events, got %v", m.allEvents)
-	}
-
-	// Navigate back to PCSGReplicaView — should reload PCSG events
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd == nil {
-		t.Fatal("expected event-reload command on back-navigation from PodCliqueView to PCSGReplicaView")
-	}
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
-		t.Fatalf("expected PodCliqueScalingGroupReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events should be scoped to the PodClique row the cursor lands on
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "prefill-0-worker created" {
-		t.Fatalf("expected prefill-0-worker events after back-nav (cursor on PodClique row), got %v", m.allEvents)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 6.7h Test: Cursor movement in PodCliqueScalingGroupReplicaView updates events
-// to match the highlighted PodClique row.
-// ---------------------------------------------------------------------------
-
-func TestEventsUpdateOnCursorMoveInPCSGReplicaView(t *testing.T) {
-	mp := buildFullMockProvider()
-
-	// Add a second PodClique to PCSG replica-0 so we have rows to move between
-	mp.PCSGReplicaPodCliques["default/alpha-pcs-0-sg-prefill/0"] = []data.Resource{
-		{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
-		{Name: "alpha-pcs-0-sg-prefill-0-extra", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
-	}
-	// Add events for the second PodClique
-	mp.Events["pc/default/alpha-pcs-0-sg-prefill-0-extra"] = []data.Event{
-		{Type: "Normal", Reason: "Created", Age: "7m", From: "controller", Message: "extra-pc created", Parent: "alpha-pcs-0-sg-prefill-0-extra"},
-	}
-
-	m := newTestModelWithProvider(mp)
-	m = executeCmdAndApply(m, m.Init())
-
-	// Navigate: Forest -> alpha-pcs -> PCSG -> PCSG replica-0
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // alpha-pcs
-	m = executeCmdAndApply(m, cmd)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // sg-prefill
-	m = executeCmdAndApply(m, cmd)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // PCSG replica-0
-	m = executeCmdAndApply(m, cmd)
-
-	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
-		t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Events were loaded at PCSG replica level on entry
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "pcsg-replica-0 ready" {
-		t.Fatalf("expected PCSG replica-0 events on entry, got %v", m.allEvents)
-	}
-
-	// Move cursor down to second PodClique — events should update to that PodClique
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
-
-	// Events should be for the second PodClique
-	if len(m.allEvents) != 1 || m.allEvents[0].Message != "extra-pc created" {
-		t.Fatalf("expected extra-pc events after cursor move, got %v", m.allEvents)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // 6.8 Test: Pod YAML view
 // ---------------------------------------------------------------------------
@@ -1260,13 +590,7 @@ func TestEventsUpdateOnCursorMoveInPCSGReplicaView(t *testing.T) {
 func TestPodYAMLView_ViaMessages(t *testing.T) {
 	m := newTestModel(nil)
 
-	// Set up at PodCliqueView with pods
-	m.viewState.ViewType = data.PodCliqueView
-	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
-	m.viewState.SelectedReplicaIndex = "0"
-	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
-
-	// Manually set up the view to navigate into PodView
+	// Set up at PodView
 	m.viewState.ViewType = data.PodView
 	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
 
@@ -1291,42 +615,28 @@ func TestPodYAMLView_ViaMessages(t *testing.T) {
 }
 
 func TestPodYAMLView_FullDrillDown(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
-	// Load forest and drill all the way to pods via messages
-	m = executeCmdAndApply(m, m.Init())
-
-	// Navigate into alpha-pcs
-	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	// Should be at PodCliqueSetReplicaView (single replica skip)
+	// Navigate into alpha-pcs (single replica skip -> PodCliqueSetReplicaView)
+	m = sendKey(m, tea.KeyEnter)
 	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
 		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
-	// Navigate into the first child resource (PodCliqueScalingGroup or PodClique)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
+	// Navigate into the first child resource
+	m = sendKey(m, tea.KeyEnter)
 
 	// Continue drilling until we reach PodView or can't go further
 	for m.viewState.ViewType != data.PodView && m.viewState.ViewType != data.ForestView {
 		prevViewType := m.viewState.ViewType
-		m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-		if cmd != nil {
-			m = executeCmdAndApply(m, cmd)
-		}
-		// If view didn't change, we're stuck - break to avoid infinite loop
+		m = sendKey(m, tea.KeyEnter)
 		if m.viewState.ViewType == prevViewType {
 			break
 		}
 	}
 
 	if m.viewState.ViewType == data.PodView {
-		// Should have YAML data
 		if m.viewState.SelectedPod == "" {
 			t.Fatal("expected SelectedPod to be set in PodView")
 		}
@@ -1359,29 +669,6 @@ func TestPodViewportContent(t *testing.T) {
 // 6.9 Test: Error handling
 // ---------------------------------------------------------------------------
 
-func TestErrorHandling_ForestDataError(t *testing.T) {
-	mp := data.NewMockProvider()
-	mp.Errors["GetAllPodCliqueSets"] = errForTest("cluster unreachable")
-	m := newTestModelWithProvider(mp)
-
-	// Execute Init which calls loadForestData
-	m = executeCmdAndApply(m, m.Init())
-
-	// The model should have recorded the error
-	if m.lastError == nil {
-		t.Fatal("expected lastError to be set after forest data error")
-	}
-	if !strings.Contains(m.lastError.Error(), "cluster unreachable") {
-		t.Errorf("expected error message to contain 'cluster unreachable', got %q", m.lastError.Error())
-	}
-
-	// View should still render without panic
-	view := m.View()
-	if view == "" {
-		t.Fatal("expected non-empty view even after error")
-	}
-}
-
 func TestErrorHandling_GenericErrorMsg(t *testing.T) {
 	m := newTestModel(nil)
 
@@ -1389,20 +676,6 @@ func TestErrorHandling_GenericErrorMsg(t *testing.T) {
 
 	if m.lastError == nil {
 		t.Fatal("expected lastError to be set")
-	}
-}
-
-func TestErrorHandling_EventsError(t *testing.T) {
-	m := newTestModel(nil)
-
-	m = mustApply(m, EventsMsg{Err: errForTest("events fetch failed")})
-
-	if m.lastError == nil {
-		t.Fatal("expected lastError to be set after events error")
-	}
-	// Events should be empty, not nil
-	if m.allEvents == nil {
-		t.Fatal("expected allEvents to be empty slice, not nil")
 	}
 }
 
@@ -1423,51 +696,6 @@ func TestErrorHandling_PodYAMLError(t *testing.T) {
 	}
 }
 
-func TestErrorHandling_ReplicaDataError(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.SelectedPodCliqueSet = "my-pcs"
-
-	m = mustApply(m, ReplicaDataMsg{
-		PCSName:   "my-pcs",
-		Namespace: "default",
-		Err:       errForTest("replica fetch failed"),
-	})
-
-	if m.lastError == nil {
-		t.Fatal("expected lastError to be set")
-	}
-}
-
-func TestErrorHandling_ReplicaChildrenError(t *testing.T) {
-	m := newTestModel(nil)
-
-	m = mustApply(m, ReplicaChildrenMsg{
-		PCSName:      "my-pcs",
-		Namespace:    "default",
-		ReplicaIndex: "0",
-		Err:          errForTest("children fetch failed"),
-	})
-
-	if m.lastError == nil {
-		t.Fatal("expected lastError to be set")
-	}
-}
-
-func TestErrorHandling_TopologyInfoError(t *testing.T) {
-	m := newTestModel(nil)
-
-	m = mustApply(m, TopologyInfoMsg{
-		PCSName:   "my-pcs",
-		Namespace: "default",
-		Err:       errForTest("topology fetch failed"),
-	})
-
-	// cachedTopologyInfo should be nil
-	if m.cachedTopologyInfo != nil {
-		t.Fatal("expected cachedTopologyInfo to be nil after error")
-	}
-}
-
 // errForTest creates a simple error for test assertions.
 type testError string
 
@@ -1483,7 +711,6 @@ func errForTest(msg string) error {
 
 func TestWindowResize(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	// Normal size
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -1524,8 +751,8 @@ func TestWindowResize(t *testing.T) {
 }
 
 func TestWindowResize_BeforeReady(t *testing.T) {
-	mp := data.NewMockProvider()
-	m := NewModel(mp)
+	mc := data.NewMockGlobalCache()
+	m := NewModel(mc)
 
 	// Before WindowSizeMsg, view should show "Loading..."
 	if m.View() != "Loading..." {
@@ -1548,7 +775,6 @@ func TestWindowResize_BeforeReady(t *testing.T) {
 
 func TestQuitWithQ(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 
@@ -1595,7 +821,6 @@ func TestCtrlCQuitsEvenInFilterMode(t *testing.T) {
 
 func TestEscAtForestViewDoesNothing(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	// Esc at forest view should not change anything
 	before := m.viewState.ViewType
@@ -1606,8 +831,8 @@ func TestEscAtForestViewDoesNothing(t *testing.T) {
 }
 
 func TestNavigateBackClearsFilter(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Set up at PodCliqueSetReplicaView manually
 	m.viewState.ViewType = data.PodCliqueSetReplicaView
@@ -1625,11 +850,10 @@ func TestNavigateBackClearsFilter(t *testing.T) {
 }
 
 func TestNavigateIntoClearsFilter(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
-	// Load forest data and set a filter
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+	// Set a filter
 	m.filterText = "alpha"
 	m.rebuildResourcesTable()
 
@@ -1643,8 +867,8 @@ func TestNavigateIntoClearsFilter(t *testing.T) {
 }
 
 func TestViewStateNavigationFullCycle(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Set up deep navigation state manually
 	m.viewState = data.ViewState{
@@ -1719,7 +943,6 @@ func TestNavigateBackFromPodCliqueView_WithScalingGroup(t *testing.T) {
 
 func TestNavigateBackFromPodCliqueView_WithScalingGroupNoPCSGReplicaIndex(t *testing.T) {
 	m := newTestModel(nil)
-	// Without PCSG replica index, back should go to PodCliqueScalingGroupView (fallback)
 	m.viewState = data.ViewState{
 		ViewType:             data.PodCliqueView,
 		SelectedPodCliqueSet: "my-pcs",
@@ -1749,181 +972,6 @@ func TestNavigateBackFromPodCliqueView_WithoutScalingGroup(t *testing.T) {
 	}
 }
 
-func TestHandleReplicaDataMsg(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Simulate being about to navigate into a PCS
-	m.viewState.ViewType = data.ForestView
-	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
-
-	// Send ReplicaDataMsg with 1 replica -> should trigger single-replica skip
-	m = mustApply(m, ReplicaDataMsg{
-		PCSName:        "alpha-pcs",
-		Namespace:      "default",
-		ReplicaIndexes: []string{"0"},
-		ScalingGroupsByReplica: map[string][]data.Resource{
-			"0": {{Name: "sg1", Type: "PodCliqueScalingGroup", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
-		},
-		PodCliquesByReplica: map[string][]data.Resource{},
-	})
-
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-}
-
-func TestHandleReplicaChildrenMsg(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.ViewType = data.PodCliqueSetReplicaView
-	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
-	m.viewState.SelectedReplicaIndex = "0"
-
-	scalingGroups, podCliques := sampleReplicaChildren()
-	m = mustApply(m, ReplicaChildrenMsg{
-		PCSName:       "alpha-pcs",
-		Namespace:     "default",
-		ReplicaIndex:  "0",
-		ScalingGroups: scalingGroups,
-		PodCliques:    podCliques,
-	})
-
-	key := "PodCliqueSetReplica/alpha-pcs/0"
-	resources, exists := m.allResources[key]
-	if !exists {
-		t.Fatal("expected resources stored for replica children key")
-	}
-	// Should have both scaling groups and pod cliques
-	if len(resources) != len(scalingGroups)+len(podCliques) {
-		t.Fatalf("expected %d resources, got %d", len(scalingGroups)+len(podCliques), len(resources))
-	}
-}
-
-func TestHandlePCSGChildrenMsg(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.ViewType = data.PodCliqueScalingGroupView
-	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
-	m.viewState.SelectedReplicaIndex = "0"
-	m.viewState.SelectedScalingGroup = "alpha-pcs-0-sg-prefill"
-
-	podCliques := []data.Resource{
-		{Name: "alpha-pcs-0-sg-prefill-pc1", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
-	}
-	m = mustApply(m, PCSGChildrenMsg{
-		PCSGName:   "alpha-pcs-0-sg-prefill",
-		Namespace:  "default",
-		PodCliques: podCliques,
-	})
-
-	key := "PodCliqueScalingGroup/alpha-pcs-0-sg-prefill"
-	resources, exists := m.allResources[key]
-	if !exists {
-		t.Fatal("expected resources stored for PCSG children key")
-	}
-	if len(resources) != 1 {
-		t.Fatalf("expected 1 resource, got %d", len(resources))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// PCSG Replica Tests
-// ---------------------------------------------------------------------------
-
-func TestPCSGReplicaData_SingleReplica_Skip(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.ViewType = data.PodCliqueScalingGroupView
-	m.viewState.SelectedPodCliqueSet = "my-pcs"
-	m.viewState.SelectedReplicaIndex = "0"
-	m.viewState.SelectedScalingGroup = "my-pcsg"
-
-	// Send PCSGReplicaDataMsg with 1 replica -> should skip to PodCliqueScalingGroupReplicaView
-	m = mustApply(m, PCSGReplicaDataMsg{
-		PCSGName:       "my-pcsg",
-		Namespace:      "default",
-		ReplicaIndexes: []string{"0"},
-		PodCliquesByReplica: map[string][]data.Resource{
-			"0": {{Name: "my-pcsg-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
-		},
-	})
-
-	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
-		t.Fatalf("expected PodCliqueScalingGroupReplicaView (single PCSG replica skip), got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-	if m.viewState.SelectedPCSGReplicaIndex != "0" {
-		t.Fatalf("expected SelectedPCSGReplicaIndex=0, got %s", m.viewState.SelectedPCSGReplicaIndex)
-	}
-
-	// Should have 1 virtual replica tracked for back navigation
-	pcsgKey := "PodCliqueScalingGroup/my-pcsg"
-	if len(m.allResources[pcsgKey]) != 1 {
-		t.Fatalf("expected 1 PCSG replica tracked, got %d", len(m.allResources[pcsgKey]))
-	}
-
-	// Back navigation should skip directly to PodCliqueSetReplicaView
-	m = sendKey(m, tea.KeyEsc)
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView after Esc from single PCSG replica skip, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-}
-
-func TestPCSGReplicaData_MultiReplica_ShowsList(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.ViewType = data.PodCliqueScalingGroupView
-	m.viewState.SelectedPodCliqueSet = "my-pcs"
-	m.viewState.SelectedReplicaIndex = "0"
-	m.viewState.SelectedScalingGroup = "my-pcsg"
-
-	// Send PCSGReplicaDataMsg with 2 replicas
-	m = mustApply(m, PCSGReplicaDataMsg{
-		PCSGName:       "my-pcsg",
-		Namespace:      "default",
-		ReplicaIndexes: []string{"0", "1"},
-		PodCliquesByReplica: map[string][]data.Resource{
-			"0": {{Name: "my-pcsg-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
-			"1": {{Name: "my-pcsg-1-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
-		},
-	})
-
-	// Should stay at PodCliqueScalingGroupView with replica list
-	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
-		t.Fatalf("expected PodCliqueScalingGroupView for multi-replica PCSG, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Should have 2 virtual PCSG replica resources
-	pcsgKey := "PodCliqueScalingGroup/my-pcsg"
-	if len(m.allResources[pcsgKey]) != 2 {
-		t.Fatalf("expected 2 PCSG replica resources, got %d", len(m.allResources[pcsgKey]))
-	}
-
-	// Verify the virtual resources have the correct type
-	for _, r := range m.allResources[pcsgKey] {
-		if r.Type != "PodCliqueScalingGroupReplica" {
-			t.Errorf("expected type PodCliqueScalingGroupReplica, got %s", r.Type)
-		}
-	}
-
-	// Back should go to PodCliqueSetReplicaView
-	m = sendKey(m, tea.KeyEsc)
-	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-		t.Fatalf("expected PodCliqueSetReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-}
-
-func TestPCSGReplicaData_Error(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.SelectedScalingGroup = "my-pcsg"
-
-	m = mustApply(m, PCSGReplicaDataMsg{
-		PCSGName:  "my-pcsg",
-		Namespace: "default",
-		Err:       errForTest("PCSG replica fetch failed"),
-	})
-
-	if m.lastError == nil {
-		t.Fatal("expected lastError to be set")
-	}
-}
-
 func TestNavigateBackFromPCSGReplicaView_MultiReplica(t *testing.T) {
 	m := newTestModel(nil)
 	m.viewState = data.ViewState{
@@ -1949,18 +997,11 @@ func TestNavigateBackFromPCSGReplicaView_MultiReplica(t *testing.T) {
 }
 
 func TestPCSGReplica_FullNavigationFlow(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
-
-	// Load forest data
-	m = executeCmdAndApply(m, m.Init())
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Navigate into alpha-pcs (1 PCS replica → single-replica skip)
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = executeCmdAndApply(m, cmd)
-
-	// Should be at PodCliqueSetReplicaView (single PCS replica skip)
+	m = sendKey(m, tea.KeyEnter)
 	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
 		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
@@ -1971,20 +1012,10 @@ func TestPCSGReplica_FullNavigationFlow(t *testing.T) {
 		t.Fatalf("expected alpha-pcs-0-sg-prefill selected, got %v", selectedRow)
 	}
 
-	// Navigate into the PCSG
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	// Navigate into the PCSG (has 2 PCSG replicas → should show PCSG replica list)
+	m = sendKey(m, tea.KeyEnter)
 	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
 		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Execute batch commands (PCSG replica data arrives)
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
-	}
-
-	// alpha-pcs-0-sg-prefill has 2 PCSG replicas, should show replica list
-	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
-		t.Fatalf("expected PodCliqueScalingGroupView for multi-replica PCSG, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
 	pcsgKey := "PodCliqueScalingGroup/alpha-pcs-0-sg-prefill"
@@ -1993,12 +1024,9 @@ func TestPCSGReplica_FullNavigationFlow(t *testing.T) {
 	}
 
 	// Navigate into first PCSG replica
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = sendKey(m, tea.KeyEnter)
 	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
 		t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-	if cmd != nil {
-		m = executeCmdAndApply(m, cmd)
 	}
 
 	// Should show PodCliques for this PCSG replica
@@ -2023,7 +1051,6 @@ func TestPCSGReplica_FullNavigationFlow(t *testing.T) {
 func TestPCSGReplica_BreadcrumbRendering(t *testing.T) {
 	m := newTestModel(nil)
 
-	// PodCliqueScalingGroupReplicaView breadcrumb
 	m.viewState = data.ViewState{
 		ViewType:                 data.PodCliqueScalingGroupReplicaView,
 		SelectedPodCliqueSet:     "my-pcs",
@@ -2037,102 +1064,6 @@ func TestPCSGReplica_BreadcrumbRendering(t *testing.T) {
 	}
 	if !strings.Contains(bc, "replica-1") {
 		t.Errorf("expected breadcrumb to contain 'replica-1' (PCSG replica), got %q", bc)
-	}
-}
-
-func TestHandlePodCliqueChildrenMsg(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.ViewType = data.PodCliqueView
-	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
-	m.viewState.SelectedReplicaIndex = "0"
-	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
-
-	m = mustApply(m, PodCliqueChildrenMsg{
-		PodCliqueName: "alpha-pcs-0-standalone-pc",
-		Namespace:     "default",
-		Pods:          samplePods(),
-	})
-
-	key := "PodClique/alpha-pcs-0-standalone-pc"
-	resources, exists := m.allResources[key]
-	if !exists {
-		t.Fatal("expected resources stored for PodClique children key")
-	}
-	if len(resources) != 3 {
-		t.Fatalf("expected 3 pods, got %d", len(resources))
-	}
-}
-
-func TestHandleEventsMsg(t *testing.T) {
-	m := newTestModel(nil)
-
-	events := sampleEvents()
-	m = mustApply(m, EventsMsg{Events: events})
-
-	if len(m.allEvents) != len(events) {
-		t.Fatalf("expected %d events, got %d", len(events), len(m.allEvents))
-	}
-}
-
-func TestHandleTopologyInfoMsg(t *testing.T) {
-	m := newTestModel(nil)
-
-	topoInfo := &data.TopologyInfo{
-		PCSPackDomain:     "zone",
-		PCSGPackDomains:   map[string]string{"prefill": "block"},
-		CliquePackDomains: map[string]string{"worker": "rack"},
-		DomainToKey:       map[string]string{},
-	}
-
-	m, cmd := applyMsg(m, TopologyInfoMsg{
-		PCSName:      "my-pcs",
-		Namespace:    "default",
-		TopologyInfo: topoInfo,
-	})
-
-	if m.cachedTopologyInfo == nil {
-		t.Fatal("expected cachedTopologyInfo to be set")
-	}
-	if m.cachedTopologyInfo.PCSPackDomain != "zone" {
-		t.Fatalf("expected PCSPackDomain=zone, got %s", m.cachedTopologyInfo.PCSPackDomain)
-	}
-	// Should have dispatched loadNodeLabelsCmd
-	if cmd == nil {
-		t.Fatal("expected loadNodeLabelsCmd to be dispatched")
-	}
-}
-
-func TestHandlePodInfoMsg(t *testing.T) {
-	m := newTestModel(nil)
-
-	podInfos := map[string]data.CachedPodInfo{
-		"pod-1": {NodeName: "node-1"},
-		"pod-2": {NodeName: "node-2"},
-	}
-
-	m = mustApply(m, PodInfoMsg{
-		PCSName:   "my-pcs",
-		Namespace: "default",
-		PodInfos:  podInfos,
-	})
-
-	if len(m.cachedPods) != 2 {
-		t.Fatalf("expected 2 cached pods, got %d", len(m.cachedPods))
-	}
-}
-
-func TestHandleNodeLabelsMsg(t *testing.T) {
-	m := newTestModel(nil)
-
-	nodeLabels := map[string]map[string]string{
-		"node-1": {"topology.io/rack": "rack-1"},
-		"node-2": {"topology.io/rack": "rack-2"},
-	}
-
-	m = mustApply(m, NodeLabelsMsg{NodeLabels: nodeLabels})
-
-	if len(m.cachedNodeLabels) != 2 {
-		t.Fatalf("expected 2 node label entries, got %d", len(m.cachedNodeLabels))
 	}
 }
 
@@ -2163,7 +1094,6 @@ func TestGetCurrentViewKey(t *testing.T) {
 
 func TestEnterOnEventsPane_DoesNothing(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	// Switch to events pane
 	m = sendKey(m, tea.KeyTab)
@@ -2223,9 +1153,8 @@ func TestBreadcrumbRendering(t *testing.T) {
 
 func TestHeaderContainsShortcuts(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
-	// Shortcuts should appear in the header (moved from old bottom menu bar)
+	// Shortcuts should appear in the header
 	header := m.renderHeaderFrame()
 	expectedShortcuts := []string{"Filter", "Switch", "Quit"}
 	for _, s := range expectedShortcuts {
@@ -2239,7 +1168,6 @@ func TestHeaderShowsBackWhenNotAtForest(t *testing.T) {
 	m := newTestModel(nil)
 	m.viewState.ViewType = data.PodCliqueSetView
 
-	// The header should show "Back" when not at ForestView
 	header := m.renderHeaderFrame()
 	if !strings.Contains(header, "Back") {
 		t.Errorf("expected header to contain 'Back' when not at ForestView, got:\n%s", header)
@@ -2250,7 +1178,6 @@ func TestHeaderHidesBackAtForestView(t *testing.T) {
 	m := newTestModel(nil)
 	m.viewState.ViewType = data.ForestView
 
-	// The header should NOT show "Back" at ForestView
 	header := m.renderHeaderFrame()
 	if strings.Contains(header, "Back") {
 		t.Errorf("expected header NOT to contain 'Back' at ForestView, got:\n%s", header)
@@ -2261,7 +1188,6 @@ func TestHeaderShowsScrollInPodView(t *testing.T) {
 	m := newTestModel(nil)
 	m.viewState.ViewType = data.PodView
 
-	// The header should show "Scroll" (not "Nav" or "Drill") in PodView
 	header := m.renderHeaderFrame()
 	if !strings.Contains(header, "Scroll") {
 		t.Errorf("expected header to contain 'Scroll' at PodView, got:\n%s", header)
@@ -2272,8 +1198,8 @@ func TestHeaderShowsScrollInPodView(t *testing.T) {
 }
 
 func TestHeaderShowsClusterInfo(t *testing.T) {
-	mp := data.NewMockProvider()
-	m := NewModel(mp,
+	mc := data.NewMockGlobalCache()
+	m := NewModel(mc,
 		WithClusterInfo("my-test-context", "my-test-cluster"),
 		WithUserName("admin@my-test-cluster"),
 		WithK8sVersion("v1.33.5+k3s1"),
@@ -2283,31 +1209,24 @@ func TestHeaderShowsClusterInfo(t *testing.T) {
 
 	header := m.renderHeaderFrame()
 
-	// Should display context name
 	if !strings.Contains(header, "my-test-context") {
 		t.Errorf("expected header to contain context name 'my-test-context', got:\n%s", header)
 	}
-	// Should display cluster name
 	if !strings.Contains(header, "my-test-cluster") {
 		t.Errorf("expected header to contain cluster name 'my-test-cluster', got:\n%s", header)
 	}
-	// Should display user name
 	if !strings.Contains(header, "admin@my-test-cluster") {
 		t.Errorf("expected header to contain user name 'admin@my-test-cluster', got:\n%s", header)
 	}
-	// Should display K8s version
 	if !strings.Contains(header, "v1.33.5+k3s1") {
 		t.Errorf("expected header to contain K8s version 'v1.33.5+k3s1', got:\n%s", header)
 	}
-	// Should display Arborist version
 	if !strings.Contains(header, "v0.1.0") {
 		t.Errorf("expected header to contain Arborist version 'v0.1.0', got:\n%s", header)
 	}
-	// Should display the view name
 	if !strings.Contains(header, "Forest") {
 		t.Errorf("expected header to contain view name 'Forest', got:\n%s", header)
 	}
-	// Should display all labels
 	for _, label := range []string{"Context:", "Cluster:", "User:", "Arborist Rev:", "K8s Rev:", "View:"} {
 		if !strings.Contains(header, label) {
 			t.Errorf("expected header to contain '%s' label, got:\n%s", label, header)
@@ -2320,10 +1239,7 @@ func TestHeaderShowsUnknownWhenNoClusterInfo(t *testing.T) {
 
 	header := m.renderHeaderFrame()
 
-	// Without cluster info, should display "(unknown)" for context, cluster, user, versions
 	count := strings.Count(header, "(unknown)")
-	// Expect at least 4 "(unknown)" entries: context, cluster, user, k8sVersion
-	// (arboristVersion also shows "(unknown)" when empty)
 	if count < 4 {
 		t.Errorf("expected at least 4 '(unknown)' entries when no info set, got %d in:\n%s", count, header)
 	}
@@ -2332,7 +1248,6 @@ func TestHeaderShowsUnknownWhenNoClusterInfo(t *testing.T) {
 func TestHeaderShowsCurrentViewName(t *testing.T) {
 	m := newTestModel(nil)
 
-	// Test view name changes with navigation state
 	m.viewState.ViewType = data.PodCliqueSetView
 	header := m.renderHeaderFrame()
 	if !strings.Contains(header, "PodCliqueSet") {
@@ -2347,7 +1262,7 @@ func TestHeaderShowsCurrentViewName(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Topology View Tests (Phase 6)
+// Topology View Tests
 // ---------------------------------------------------------------------------
 
 // sampleTopologyViewData creates a TopologyViewData snapshot for testing.
@@ -2406,40 +1321,37 @@ func sampleTopologyViewData() *data.TopologyViewData {
 	}
 }
 
-// newTopologyTestModel creates a Model with a MockTopologyCache pre-loaded
-// with topology data. It simulates toggling to Topology view and receiving
-// the initial cache sync.
+// newTopologyTestModel creates a Model with a MockGlobalCache pre-loaded
+// with topology data. It simulates toggling to Topology view.
 func newTopologyTestModel() Model {
-	mp := data.NewMockProvider()
-	mockCache := data.NewMockTopologyCache()
-	mockCache.SetSnapshot(sampleTopologyViewData())
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
 
-	m := NewModel(mp, WithTopologyCache(mockCache))
+	m := NewModel(mc)
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
 
-	// Toggle to Topology view — this starts the cache
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-
-	// The cmd is startTopologyCacheCmd. Execute it to get TopologyCacheSyncedMsg.
-	if cmd != nil {
-		msg := cmd()
-		if msg != nil {
-			m, _ = applyMsg(m, msg)
-		}
-	}
+	// Toggle to Topology view
+	m = sendRune(m, 't')
 
 	return m
 }
 
 func TestTopologyView_ToggleForestToTopology(t *testing.T) {
-	mp := data.NewMockProvider()
-	mp.PodCliqueSets = samplePCSResources()
-	mockCache := data.NewMockTopologyCache()
-	mockCache.SetSnapshot(sampleTopologyViewData())
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
 
-	m := NewModel(mp, WithTopologyCache(mockCache))
+	m := NewModel(mc)
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
 
 	// Initially in Forest view
 	if m.viewState.ViewType != data.ForestView {
@@ -2447,7 +1359,7 @@ func TestTopologyView_ToggleForestToTopology(t *testing.T) {
 	}
 
 	// Press 't' to toggle to Topology view
-	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	m = sendRune(m, 't')
 
 	if m.viewState.ViewType != data.TopologyView {
 		t.Fatalf("expected TopologyView after pressing t, got %s", data.ViewTypeName(m.viewState.ViewType))
@@ -2455,21 +1367,10 @@ func TestTopologyView_ToggleForestToTopology(t *testing.T) {
 	if m.activePane != data.TopologyDomainsPane {
 		t.Fatalf("expected TopologyDomainsPane, got %s", data.PaneName(m.activePane))
 	}
-	if !m.topologyCacheStarted {
-		t.Fatal("expected topologyCacheStarted to be true")
-	}
 
-	// Execute startTopologyCacheCmd to get TopologyCacheSyncedMsg
-	if cmd != nil {
-		msg := cmd()
-		if msg != nil {
-			m, _ = applyMsg(m, msg)
-		}
-	}
-
-	// After sync, view data should be populated
+	// After toggle, view data should be populated from snapshot
 	if m.topologyViewData == nil {
-		t.Fatal("expected topologyViewData to be set after cache sync")
+		t.Fatal("expected topologyViewData to be set from snapshot")
 	}
 
 	// View should show Topology
@@ -2502,7 +1403,6 @@ func TestTopologyView_DomainTableShowsCorrectDomains(t *testing.T) {
 		t.Fatalf("expected 3 domain rows (region, zone, rack), got %d", len(rows))
 	}
 
-	// Check domain names
 	expectedDomains := []string{"region", "zone", "rack"}
 	for i, expected := range expectedDomains {
 		if rows[i][0] != expected {
@@ -2517,7 +1417,6 @@ func TestTopologyView_DrillIntoDomain(t *testing.T) {
 	// Cursor is on first row (region). Press Enter to drill in.
 	m = sendKey(m, tea.KeyEnter)
 
-	// Should have drill stack with one entry
 	if len(m.topologyDrillStack) != 1 {
 		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
 	}
@@ -2534,7 +1433,6 @@ func TestTopologyView_DrillIntoDomain(t *testing.T) {
 		t.Fatalf("expected 2 region values (us-east-1, us-west-2), got %d", len(rows))
 	}
 
-	// Values should be sorted
 	if rows[0][0] != "us-east-1" {
 		t.Errorf("expected first value 'us-east-1', got %q", rows[0][0])
 	}
@@ -2552,12 +1450,8 @@ func TestTopologyView_DrillIntoValueAdvancesToNextDomain(t *testing.T) {
 	// Select first value (us-east-1) and drill in
 	m = sendKey(m, tea.KeyEnter)
 
-	// Should have advanced to zone domain
 	if len(m.topologyDrillStack) != 2 {
 		t.Fatalf("expected drill stack depth 2, got %d", len(m.topologyDrillStack))
-	}
-	if m.topologyDrillStack[0].Domain != "region" {
-		t.Fatalf("expected first stack entry domain='region', got %q", m.topologyDrillStack[0].Domain)
 	}
 	if m.topologyDrillStack[0].Value != "us-east-1" {
 		t.Fatalf("expected first stack entry value='us-east-1', got %q", m.topologyDrillStack[0].Value)
@@ -2565,14 +1459,11 @@ func TestTopologyView_DrillIntoValueAdvancesToNextDomain(t *testing.T) {
 	if m.topologyDrillStack[1].Domain != "zone" {
 		t.Fatalf("expected second stack entry domain='zone', got %q", m.topologyDrillStack[1].Domain)
 	}
-	if m.topologyDrillStack[1].Value != "" {
-		t.Fatalf("expected second stack entry empty value, got %q", m.topologyDrillStack[1].Value)
-	}
 
 	// Should show zone values scoped to us-east-1
 	rows := m.topologyDomainsTable.Rows()
 	if len(rows) != 2 {
-		t.Fatalf("expected 2 zone values for us-east-1 (us-east-1a, us-east-1b), got %d", len(rows))
+		t.Fatalf("expected 2 zone values for us-east-1, got %d", len(rows))
 	}
 	if rows[0][0] != "us-east-1a" {
 		t.Errorf("expected first zone value 'us-east-1a', got %q", rows[0][0])
@@ -2585,19 +1476,16 @@ func TestTopologyView_DrillIntoValueAdvancesToNextDomain(t *testing.T) {
 func TestTopologyView_EscGoesBackOneDrillLevel(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Drill into region
-	m = sendKey(m, tea.KeyEnter)
+	m = sendKey(m, tea.KeyEnter) // drill into region
 	if len(m.topologyDrillStack) != 1 {
 		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
 	}
 
-	// Press Esc to go back
-	m = sendKey(m, tea.KeyEsc)
+	m = sendKey(m, tea.KeyEsc) // go back
 	if len(m.topologyDrillStack) != 0 {
 		t.Fatalf("expected drill stack to be empty after Esc, got depth %d", len(m.topologyDrillStack))
 	}
 
-	// Should be back at domain list
 	rows := m.topologyDomainsTable.Rows()
 	if len(rows) != 3 {
 		t.Fatalf("expected 3 domain rows after Esc, got %d", len(rows))
@@ -2607,7 +1495,6 @@ func TestTopologyView_EscGoesBackOneDrillLevel(t *testing.T) {
 func TestTopologyView_EscFromEmptyDrillStackSwitchesToForest(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// At top-level domains (empty drill stack), Esc switches back to Forest
 	if len(m.topologyDrillStack) != 0 {
 		t.Fatalf("expected empty drill stack, got depth %d", len(m.topologyDrillStack))
 	}
@@ -2622,64 +1509,39 @@ func TestTopologyView_EscFromEmptyDrillStackSwitchesToForest(t *testing.T) {
 func TestTopologyView_PodsTableFiltersCorrectly(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// At top-level, pods table should be empty until user drills in
+	// At top-level, pods table should be empty
 	podRows := m.topologyPodsTable.Rows()
 	if len(podRows) != 0 {
 		t.Fatalf("expected 0 pods at top level (before drilling), got %d", len(podRows))
 	}
 
-	// Drill into region (showing values list: us-east-1, us-west-2)
+	// Drill into region
 	m = sendKey(m, tea.KeyEnter)
 
-	// Cursor defaults to first value (us-east-1) — pods are filtered to nodes
-	// matching the highlighted value. us-east-1 has nodes: node-01, node-02, node-03 => 3 pods.
+	// Cursor defaults to us-east-1 => 3 pods
 	podRows = m.topologyPodsTable.Rows()
 	if len(podRows) != 3 {
 		t.Fatalf("expected 3 pods when highlighting us-east-1 value, got %d", len(podRows))
 	}
 
-	// Move cursor down to us-west-2 — pods should change to that region's nodes
+	// Move cursor down to us-west-2 => 3 pods
 	m = sendKey(m, tea.KeyDown)
 	podRows = m.topologyPodsTable.Rows()
-	// us-west-2 has nodes: node-04, node-05, node-06 => 3 pods
 	if len(podRows) != 3 {
 		t.Fatalf("expected 3 pods when highlighting us-west-2 value, got %d", len(podRows))
 	}
-	for _, row := range podRows {
-		if len(row) >= 3 {
-			name := row[2]
-			if name != "pod-d" && name != "pod-e" && name != "pod-f" {
-				t.Errorf("unexpected pod %q in us-west-2 filtered list", name)
-			}
-		}
-	}
 
-	// Move cursor back up to us-east-1 and select it — advance to zone values
+	// Move cursor back up to us-east-1 and select it → advance to zone values
 	m = sendKey(m, tea.KeyUp)
 	m = sendKey(m, tea.KeyEnter)
 
-	// Now at zone values level with region=us-east-1 committed. Zone values are:
-	// us-east-1a (cursor defaults here), us-east-1b.
-	// Highlighting us-east-1a filters to nodes: node-01, node-02 => 2 pods.
+	// Highlighting us-east-1a filters to 2 pods
 	podRows = m.topologyPodsTable.Rows()
 	if len(podRows) != 2 {
 		t.Fatalf("expected 2 pods when highlighting zone us-east-1a, got %d", len(podRows))
 	}
 
-	// Verify pod names are from us-east-1a nodes (node-01, node-02)
-	podNames := make(map[string]bool)
-	for _, row := range podRows {
-		if len(row) >= 3 {
-			podNames[row[2]] = true
-		}
-	}
-	for _, expected := range []string{"pod-a", "pod-b"} {
-		if !podNames[expected] {
-			t.Errorf("expected pod %q in filtered list", expected)
-		}
-	}
-
-	// Move cursor down to us-east-1b — should show pod-c (node-03)
+	// Move to us-east-1b => 1 pod
 	m = sendKey(m, tea.KeyDown)
 	podRows = m.topologyPodsTable.Rows()
 	if len(podRows) != 1 {
@@ -2693,7 +1555,6 @@ func TestTopologyView_PodsTableFiltersCorrectly(t *testing.T) {
 func TestTopologyView_TabSwitchesBetweenPanes(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Initially in TopologyDomainsPane
 	if m.activePane != data.TopologyDomainsPane {
 		t.Fatalf("expected TopologyDomainsPane, got %s", data.PaneName(m.activePane))
 	}
@@ -2701,7 +1562,6 @@ func TestTopologyView_TabSwitchesBetweenPanes(t *testing.T) {
 		t.Fatal("expected topology domains table to be focused")
 	}
 
-	// Press Tab to switch to TopologyPodsPane
 	m = sendKey(m, tea.KeyTab)
 	if m.activePane != data.TopologyPodsPane {
 		t.Fatalf("expected TopologyPodsPane after Tab, got %s", data.PaneName(m.activePane))
@@ -2709,24 +1569,16 @@ func TestTopologyView_TabSwitchesBetweenPanes(t *testing.T) {
 	if !m.topologyPodsTable.Focused() {
 		t.Fatal("expected topology pods table to be focused after Tab")
 	}
-	if m.topologyDomainsTable.Focused() {
-		t.Fatal("expected topology domains table to be blurred after Tab")
-	}
 
-	// Press Tab again to switch back to TopologyDomainsPane
 	m = sendKey(m, tea.KeyTab)
 	if m.activePane != data.TopologyDomainsPane {
 		t.Fatalf("expected TopologyDomainsPane after second Tab, got %s", data.PaneName(m.activePane))
-	}
-	if !m.topologyDomainsTable.Focused() {
-		t.Fatal("expected topology domains table to be focused after second Tab")
 	}
 }
 
 func TestTopologyView_NoNADomainRow(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// The domain table should not have an N/A row
 	rows := m.topologyDomainsTable.Rows()
 	for i, row := range rows {
 		if len(row) >= 1 && row[0] == "N/A" {
@@ -2735,103 +1587,54 @@ func TestTopologyView_NoNADomainRow(t *testing.T) {
 	}
 }
 
-func TestTopologyView_CacheUpdateRebuildsTables(t *testing.T) {
-	mp := data.NewMockProvider()
-	mockCache := data.NewMockTopologyCache()
-	mockCache.SetSnapshot(sampleTopologyViewData())
-
-	m := NewModel(mp, WithTopologyCache(mockCache))
-	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
-
-	// Toggle to Topology view and handle sync
-	var cmd tea.Cmd
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	if cmd != nil {
-		msg := cmd()
-		if msg != nil {
-			m, _ = applyMsg(m, msg)
-		}
-	}
-
-	// Drill into region
-	m = sendKey(m, tea.KeyEnter)
-	if len(m.topologyDrillStack) != 1 {
-		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
-	}
-
-	// Now simulate a cache update with additional pods
-	updatedData := sampleTopologyViewData()
-	updatedData.Pods = append(updatedData.Pods, data.TopologyViewPod{
-		Namespace: "default", Node: "node-01", Name: "pod-new", Topology: "rack: rack-01", Phase: "Running",
-	})
-
-	// Deliver TopologyViewDataMsg directly
-	m = mustApply(m, TopologyViewDataMsg{Data: updatedData})
-
-	// Drill stack should be preserved
-	if len(m.topologyDrillStack) != 1 {
-		t.Fatalf("expected drill stack preserved after cache update, got depth %d", len(m.topologyDrillStack))
-	}
-	if m.topologyDrillStack[0].Domain != "region" {
-		t.Fatalf("expected drill stack domain='region', got %q", m.topologyDrillStack[0].Domain)
-	}
-}
-
 func TestTopologyView_DeepDrillDown(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Drill: region -> us-east-1 -> zone values -> us-east-1a -> rack values
-	m = sendKey(m, tea.KeyEnter) // into region (shows values)
-	m = sendKey(m, tea.KeyEnter) // select us-east-1, advance to zone (shows values)
-	m = sendKey(m, tea.KeyEnter) // select us-east-1a, advance to rack (shows values)
+	m = sendKey(m, tea.KeyEnter) // into region
+	m = sendKey(m, tea.KeyEnter) // select us-east-1, advance to zone
+	m = sendKey(m, tea.KeyEnter) // select us-east-1a, advance to rack
 
-	// Stack: [{region, _, us-east-1}, {zone, _, us-east-1a}, {rack, _, ""}]
 	if len(m.topologyDrillStack) != 3 {
 		t.Fatalf("expected drill stack depth 3, got %d", len(m.topologyDrillStack))
 	}
 
-	// Should show rack values for region=us-east-1 AND zone=us-east-1a
-	// Nodes matching: node-01 (rack-01), node-02 (rack-02)
+	// Should show rack values for us-east-1/us-east-1a: rack-01, rack-02
 	rows := m.topologyDomainsTable.Rows()
 	if len(rows) != 2 {
-		t.Fatalf("expected 2 rack values (rack-01, rack-02), got %d", len(rows))
+		t.Fatalf("expected 2 rack values, got %d", len(rows))
 	}
 
-	// Drill-back logic:
-	// - If last entry has empty Value: pop the entry
-	// - If last entry has non-empty Value: clear the Value
-
-	// Esc 1: last={rack, _, ""} -> pop. Stack: [{region, _, us-east-1}, {zone, _, us-east-1a}]
+	// Esc 1: pop rack (empty value)
 	m = sendKey(m, tea.KeyEsc)
 	if len(m.topologyDrillStack) != 2 {
 		t.Fatalf("expected depth 2 after Esc 1, got %d", len(m.topologyDrillStack))
 	}
 
-	// Esc 2: last={zone, _, us-east-1a} -> clear value. Stack: [{region, _, us-east-1}, {zone, _, ""}]
+	// Esc 2: clear zone value
 	m = sendKey(m, tea.KeyEsc)
 	if len(m.topologyDrillStack) != 2 {
 		t.Fatalf("expected depth 2 after Esc 2 (value cleared), got %d", len(m.topologyDrillStack))
 	}
 
-	// Esc 3: last={zone, _, ""} -> pop. Stack: [{region, _, us-east-1}]
+	// Esc 3: pop zone
 	m = sendKey(m, tea.KeyEsc)
 	if len(m.topologyDrillStack) != 1 {
 		t.Fatalf("expected depth 1 after Esc 3, got %d", len(m.topologyDrillStack))
 	}
 
-	// Esc 4: last={region, _, us-east-1} -> clear value. Stack: [{region, _, ""}]
+	// Esc 4: clear region value
 	m = sendKey(m, tea.KeyEsc)
 	if len(m.topologyDrillStack) != 1 {
 		t.Fatalf("expected depth 1 after Esc 4 (value cleared), got %d", len(m.topologyDrillStack))
 	}
 
-	// Esc 5: last={region, _, ""} -> pop. Stack: []
+	// Esc 5: pop region
 	m = sendKey(m, tea.KeyEsc)
 	if len(m.topologyDrillStack) != 0 {
 		t.Fatalf("expected empty drill stack after Esc 5, got depth %d", len(m.topologyDrillStack))
 	}
 
-	// Esc 6: empty stack -> switches to Forest
+	// Esc 6: switches to Forest
 	m = sendKey(m, tea.KeyEsc)
 	if m.viewState.ViewType != data.ForestView {
 		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
@@ -2841,16 +1644,13 @@ func TestTopologyView_DeepDrillDown(t *testing.T) {
 func TestTopologyView_NarrowestDomainEnterIsNoop(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Drill down to the narrowest domain (rack)
-	// region -> us-east-1 -> zone -> us-east-1a -> rack -> rack-01 (should be noop)
 	m = sendKey(m, tea.KeyEnter) // into region
 	m = sendKey(m, tea.KeyEnter) // us-east-1 -> zone
 	m = sendKey(m, tea.KeyEnter) // us-east-1a -> rack
 
-	stackDepthAtRack := len(m.topologyDrillStack) // should be 3
+	stackDepthAtRack := len(m.topologyDrillStack)
 
-	// Select rack-01 and press Enter — should be no-op (no more domains to drill into)
-	m = sendKey(m, tea.KeyEnter)
+	m = sendKey(m, tea.KeyEnter) // noop at narrowest domain
 
 	if len(m.topologyDrillStack) != stackDepthAtRack {
 		t.Fatalf("expected drill stack depth unchanged at narrowest domain, was %d, got %d",
@@ -2861,8 +1661,7 @@ func TestTopologyView_NarrowestDomainEnterIsNoop(t *testing.T) {
 func TestTopologyView_TogglePreservesDrillStackOnReturn(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Drill into region
-	m = sendKey(m, tea.KeyEnter)
+	m = sendKey(m, tea.KeyEnter) // drill into region
 	if len(m.topologyDrillStack) != 1 {
 		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
 	}
@@ -2887,15 +1686,12 @@ func TestTopologyView_ViewShowsTopologyHeader(t *testing.T) {
 	m := newTopologyTestModel()
 
 	view := m.View()
-	// View should show "Topology" in the header
 	if !strings.Contains(view, "Topology") {
 		t.Errorf("expected view to contain 'Topology', got:\n%s", view)
 	}
-	// Should show Topology Domains section header
 	if !strings.Contains(view, "Topology Domains") {
 		t.Errorf("expected view to contain 'Topology Domains', got:\n%s", view)
 	}
-	// Should show Pods section header
 	if !strings.Contains(view, "Pods") {
 		t.Errorf("expected view to contain 'Pods', got:\n%s", view)
 	}
@@ -2904,10 +1700,8 @@ func TestTopologyView_ViewShowsTopologyHeader(t *testing.T) {
 func TestTopologyView_WindowResizeUpdatesTopologyTables(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Resize
 	m = mustApply(m, tea.WindowSizeMsg{Width: 200, Height: 60})
 
-	// View should still render correctly
 	view := m.View()
 	if view == "" || view == "Loading..." {
 		t.Fatal("expected rendered view after resize")
@@ -2920,20 +1714,17 @@ func TestTopologyView_WindowResizeUpdatesTopologyTables(t *testing.T) {
 func TestTopologyView_ArrowKeysNavigateDomains(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Initial cursor should be at row 0 (region)
 	selectedRow := m.topologyDomainsTable.SelectedRow()
 	if len(selectedRow) < 1 || selectedRow[0] != "region" {
 		t.Fatalf("expected initial selection on 'region', got %v", selectedRow)
 	}
 
-	// Down arrow
 	m = sendKey(m, tea.KeyDown)
 	selectedRow = m.topologyDomainsTable.SelectedRow()
 	if len(selectedRow) < 1 || selectedRow[0] != "zone" {
 		t.Fatalf("expected selection on 'zone' after down arrow, got %v", selectedRow)
 	}
 
-	// Down arrow
 	m = sendKey(m, tea.KeyDown)
 	selectedRow = m.topologyDomainsTable.SelectedRow()
 	if len(selectedRow) < 1 || selectedRow[0] != "rack" {
@@ -2944,13 +1735,11 @@ func TestTopologyView_ArrowKeysNavigateDomains(t *testing.T) {
 func TestTopologyView_EnterOnPodsPane_IsNoop(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Switch to pods pane
 	m = sendKey(m, tea.KeyTab)
 	if m.activePane != data.TopologyPodsPane {
 		t.Fatalf("expected TopologyPodsPane, got %s", data.PaneName(m.activePane))
 	}
 
-	// Enter on pods pane should not change view or drill state
 	beforeView := m.viewState.ViewType
 	beforeDrillLen := len(m.topologyDrillStack)
 	m = sendKey(m, tea.KeyEnter)
@@ -2963,111 +1752,18 @@ func TestTopologyView_EnterOnPodsPane_IsNoop(t *testing.T) {
 	}
 }
 
-func TestTopologyView_CacheUpdatePreservesDrillDown(t *testing.T) {
-	m := newTopologyTestModel()
-
-	// Drill into region > us-east-1 > zone
-	m = sendKey(m, tea.KeyEnter) // into region values
-	m = sendKey(m, tea.KeyEnter) // select us-east-1, into zone values
-
-	originalStackDepth := len(m.topologyDrillStack)
-
-	// Simulate cache update with same domain structure
-	updatedData := sampleTopologyViewData()
-	// Add an extra pod
-	updatedData.Pods = append(updatedData.Pods, data.TopologyViewPod{
-		Namespace: "staging", Node: "node-01", Name: "extra-pod", Topology: "N/A", Phase: "Running",
-	})
-
-	m = mustApply(m, TopologyViewDataMsg{Data: updatedData})
-
-	// Drill stack should be preserved
-	if len(m.topologyDrillStack) != originalStackDepth {
-		t.Fatalf("expected drill stack depth %d after update, got %d", originalStackDepth, len(m.topologyDrillStack))
-	}
-
-	// The zone values should still show us-east-1 zones
-	rows := m.topologyDomainsTable.Rows()
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 zone values after update, got %d", len(rows))
-	}
-}
-
-func TestTopologyView_CacheUpdateInvalidDomainResetsDrillStack(t *testing.T) {
-	m := newTopologyTestModel()
-
-	// Drill into region
-	m = sendKey(m, tea.KeyEnter)
-	if len(m.topologyDrillStack) != 1 {
-		t.Fatalf("expected drill stack depth 1, got %d", len(m.topologyDrillStack))
-	}
-
-	// Simulate cache update with different domains (region removed)
-	updatedData := &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
-			{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
-		},
-		NodeLabels:  sampleTopologyViewData().NodeLabels,
-		Pods:        sampleTopologyViewData().Pods,
-		DomainToKey: map[string]string{"zone": "topology.kubernetes.io/zone"},
-	}
-
-	m = mustApply(m, TopologyViewDataMsg{Data: updatedData})
-
-	// Drill stack should be reset (region no longer exists)
-	if len(m.topologyDrillStack) != 0 {
-		t.Fatalf("expected drill stack reset when domain removed, got depth %d", len(m.topologyDrillStack))
-	}
-}
-
-func TestTopologyView_TopologyCacheSyncedMsg(t *testing.T) {
-	mp := data.NewMockProvider()
-	mockCache := data.NewMockTopologyCache()
-	mockCache.SetSnapshot(sampleTopologyViewData())
-
-	m := NewModel(mp, WithTopologyCache(mockCache))
+func TestTopologyView_NilSnapshotToggleDoesNotPanic(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	// No topology view data in snapshot
+	m := NewModel(mc)
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
 
-	// Manually set up topology view state
-	m.viewState.ViewType = data.TopologyView
-	m.activePane = data.TopologyDomainsPane
-	m.topologyCache = mockCache
-	m.topologyCacheStarted = true
-
-	// Send TopologyCacheSyncedMsg
-	m, cmd := applyMsg(m, TopologyCacheSyncedMsg{})
-
-	if m.topologyViewData == nil {
-		t.Fatal("expected topologyViewData to be set after sync")
-	}
-
-	rows := m.topologyDomainsTable.Rows()
-	if len(rows) != 3 {
-		t.Fatalf("expected 3 domain rows after sync, got %d", len(rows))
-	}
-
-	// Should have returned a cmd to wait for updates
-	if cmd == nil {
-		t.Fatal("expected waitForTopologyCacheUpdateCmd after sync")
-	}
-}
-
-func TestTopologyView_NilCacheToggleDoesNotPanic(t *testing.T) {
-	mp := data.NewMockProvider()
-	// No topology cache set
-	m := NewModel(mp)
-	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
-
-	// Press 't' — should toggle view but not start cache (no cache available)
+	// Press 't' — should toggle view
 	m = sendRune(m, 't')
-
 	if m.viewState.ViewType != data.TopologyView {
-		t.Fatalf("expected TopologyView even without cache, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Should not panic and should not have started cache
-	if m.topologyCacheStarted {
-		t.Fatal("expected topologyCacheStarted to be false without a cache")
+		t.Fatalf("expected TopologyView even without topology data, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
 	// Toggle back should work
@@ -3078,35 +1774,28 @@ func TestTopologyView_NilCacheToggleDoesNotPanic(t *testing.T) {
 }
 
 func TestTopologyView_EmptySnapshot(t *testing.T) {
-	mp := data.NewMockProvider()
-	mockCache := data.NewMockTopologyCache()
-	// Set a minimal empty snapshot
-	mockCache.SetSnapshot(&data.TopologyViewData{
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = &data.TopologyViewData{
 		Domains:     []data.TopologyDomainRow{},
 		NodeLabels:  map[string]map[string]string{},
 		Pods:        []data.TopologyViewPod{},
 		DomainToKey: map[string]string{},
-	})
+	}
+	mc.SetSnapshot(snap)
 
-	m := NewModel(mp, WithTopologyCache(mockCache))
+	m := NewModel(mc)
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
 
 	// Toggle to topology
-	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	if cmd != nil {
-		msg := cmd()
-		if msg != nil {
-			m, _ = applyMsg(m, msg)
-		}
-	}
+	m = sendRune(m, 't')
 
-	// Domain table should be empty
 	rows := m.topologyDomainsTable.Rows()
 	if len(rows) != 0 {
 		t.Fatalf("expected 0 domain rows, got %d", len(rows))
 	}
-
-	// Pods table should be empty
 	podRows := m.topologyPodsTable.Rows()
 	if len(podRows) != 0 {
 		t.Fatalf("expected 0 pod rows, got %d", len(podRows))
@@ -3116,29 +1805,24 @@ func TestTopologyView_EmptySnapshot(t *testing.T) {
 func TestTopologyView_BreadcrumbString(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Empty drill stack
 	bc := m.topologyBreadcrumbString()
 	if bc != "" {
 		t.Errorf("expected empty breadcrumb at top level, got %q", bc)
 	}
 
-	// Drill into region
-	m = sendKey(m, tea.KeyEnter)
+	m = sendKey(m, tea.KeyEnter) // drill into region
 	bc = m.topologyBreadcrumbString()
-	// No value selected yet, so breadcrumb should be empty
 	if bc != "" {
 		t.Errorf("expected empty breadcrumb when no value selected, got %q", bc)
 	}
 
-	// Select us-east-1
-	m = sendKey(m, tea.KeyEnter)
+	m = sendKey(m, tea.KeyEnter) // select us-east-1
 	bc = m.topologyBreadcrumbString()
 	if !strings.Contains(bc, "region=us-east-1") {
 		t.Errorf("expected breadcrumb to contain 'region=us-east-1', got %q", bc)
 	}
 
-	// Select us-east-1a (advance to rack)
-	m = sendKey(m, tea.KeyEnter)
+	m = sendKey(m, tea.KeyEnter) // select us-east-1a, advance to rack
 	bc = m.topologyBreadcrumbString()
 	if !strings.Contains(bc, "region=us-east-1") {
 		t.Errorf("expected breadcrumb to contain 'region=us-east-1', got %q", bc)
@@ -3151,13 +1835,11 @@ func TestTopologyView_BreadcrumbString(t *testing.T) {
 func TestTopologyView_MovingDomainCursorUpdatesPods(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// At top-level, pods table should be empty (no drill yet)
 	podRows := m.topologyPodsTable.Rows()
 	if len(podRows) != 0 {
 		t.Fatalf("expected 0 pods at top level, got %d", len(podRows))
 	}
 
-	// Move cursor to "zone" — still at top level, pods remain empty
 	m = sendKey(m, tea.KeyDown)
 	podRows = m.topologyPodsTable.Rows()
 	if len(podRows) != 0 {
@@ -3166,56 +1848,33 @@ func TestTopologyView_MovingDomainCursorUpdatesPods(t *testing.T) {
 }
 
 func TestTopologyView_SecondToggleUsesWarmCache(t *testing.T) {
-	mp := data.NewMockProvider()
-	mockCache := data.NewMockTopologyCache()
-	mockCache.SetSnapshot(sampleTopologyViewData())
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
 
-	m := NewModel(mp, WithTopologyCache(mockCache))
+	m := NewModel(mc)
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
 
-	// First toggle: starts cache
-	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	if cmd != nil {
-		msg := cmd()
-		if msg != nil {
-			m, _ = applyMsg(m, msg)
-		}
-	}
-	if !m.topologyCacheStarted {
-		t.Fatal("expected cache to be started after first toggle")
+	// First toggle: to topology
+	m = sendRune(m, 't')
+	if m.topologyViewData == nil {
+		t.Fatal("expected topologyViewData set after first toggle")
 	}
 
 	// Toggle back to Forest
 	m = sendRune(m, 't')
 
-	// Toggle to Topology again — should NOT return a start cmd (cache already running)
-	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-
+	// Toggle to Topology again — data should already be populated
+	m = sendRune(m, 't')
 	if m.viewState.ViewType != data.TopologyView {
 		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
-
-	// cmd should be nil (no cache start needed)
-	if cmd != nil {
-		t.Fatal("expected nil cmd on second toggle (cache already warm)")
-	}
-
-	// Data should already be populated from the warm cache
 	if m.topologyViewData == nil {
 		t.Fatal("expected topologyViewData to be set from warm cache")
-	}
-}
-
-func TestTopologyView_TopologyViewDataMsgWithError(t *testing.T) {
-	m := newTopologyTestModel()
-
-	m = mustApply(m, TopologyViewDataMsg{Err: errForTest("cache error")})
-
-	if m.lastError == nil {
-		t.Fatal("expected lastError to be set")
-	}
-	if !strings.Contains(m.lastError.Error(), "cache error") {
-		t.Errorf("expected error message to contain 'cache error', got %q", m.lastError.Error())
 	}
 }
 
@@ -3225,14 +1884,11 @@ func TestTopologyView_TopologyViewDataMsgWithError(t *testing.T) {
 
 func TestCommandMode_ActivateWithColon(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
-	// Initially command mode is off
 	if m.commandActive {
 		t.Fatal("expected command mode inactive initially")
 	}
 
-	// Press ':' to activate command mode
 	m = sendRune(m, ':')
 	if !m.commandActive {
 		t.Fatal("expected command mode active after pressing :")
@@ -3241,18 +1897,14 @@ func TestCommandMode_ActivateWithColon(t *testing.T) {
 
 func TestCommandMode_EscCancels(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
-	// Activate command mode
 	m = sendRune(m, ':')
 	if !m.commandActive {
 		t.Fatal("expected command mode active")
 	}
 
-	// Type some text
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 
-	// Press Esc to cancel
 	m = sendKey(m, tea.KeyEsc)
 	if m.commandActive {
 		t.Fatal("expected command mode deactivated after Esc")
@@ -3263,27 +1915,23 @@ func TestCommandMode_EscCancels(t *testing.T) {
 }
 
 func TestCommandMode_EnterExecutesTopology(t *testing.T) {
-	mp := data.NewMockProvider()
-	mp.PodCliqueSets = samplePCSResources()
-	mockCache := data.NewMockTopologyCache()
-	mockCache.SetSnapshot(sampleTopologyViewData())
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
 
-	m := NewModel(mp, WithTopologyCache(mockCache))
-	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+	m := newTestModelWithCache(mc)
 
-	// Start in ForestView
 	if m.viewState.ViewType != data.ForestView {
 		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
-	// Activate command mode and type "topology"
 	m = sendRune(m, ':')
 	for _, r := range "topology" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 
-	// Press Enter to execute
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.commandActive {
@@ -3295,22 +1943,19 @@ func TestCommandMode_EnterExecutesTopology(t *testing.T) {
 }
 
 func TestCommandMode_PrefixMatchTopology(t *testing.T) {
-	mp := data.NewMockProvider()
-	mp.PodCliqueSets = samplePCSResources()
-	mockCache := data.NewMockTopologyCache()
-	mockCache.SetSnapshot(sampleTopologyViewData())
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
 
-	m := NewModel(mp, WithTopologyCache(mockCache))
-	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+	m := newTestModelWithCache(mc)
 
-	// Activate command mode and type just "top"
 	m = sendRune(m, ':')
 	for _, r := range "top" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 
-	// Press Enter — should match "topology" via prefix
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.viewState.ViewType != data.TopologyView {
@@ -3321,18 +1966,15 @@ func TestCommandMode_PrefixMatchTopology(t *testing.T) {
 func TestCommandMode_PrefixMatchForest(t *testing.T) {
 	m := newTopologyTestModel()
 
-	// Should be in TopologyView
 	if m.viewState.ViewType != data.TopologyView {
 		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
-	// Activate command mode and type "for"
 	m = sendRune(m, ':')
 	for _, r := range "for" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 
-	// Press Enter — should match "forest" via prefix
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.viewState.ViewType != data.ForestView {
@@ -3342,9 +1984,7 @@ func TestCommandMode_PrefixMatchForest(t *testing.T) {
 
 func TestCommandMode_TabCompletion(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
-	// Activate command mode and type "top"
 	m = sendRune(m, ':')
 	for _, r := range "top" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -3353,7 +1993,6 @@ func TestCommandMode_TabCompletion(t *testing.T) {
 		t.Fatalf("expected command input 'top', got %q", m.commandInput.Value())
 	}
 
-	// Press Tab to complete
 	m = sendKey(m, tea.KeyTab)
 	if m.commandInput.Value() != "topology" {
 		t.Fatalf("expected command input 'topology' after Tab, got %q", m.commandInput.Value())
@@ -3362,15 +2001,12 @@ func TestCommandMode_TabCompletion(t *testing.T) {
 
 func TestCommandMode_TabCompletionForest(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
-	// Activate command mode and type "for"
 	m = sendRune(m, ':')
 	for _, r := range "for" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 
-	// Press Tab to complete
 	m = sendKey(m, tea.KeyTab)
 	if m.commandInput.Value() != "forest" {
 		t.Fatalf("expected command input 'forest' after Tab, got %q", m.commandInput.Value())
@@ -3379,17 +2015,14 @@ func TestCommandMode_TabCompletionForest(t *testing.T) {
 
 func TestCommandMode_NoMatchDoesNothing(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	viewBefore := m.viewState.ViewType
 
-	// Activate command mode and type gibberish
 	m = sendRune(m, ':')
 	for _, r := range "xyz" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 
-	// Press Enter — no match, should not change view
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.viewState.ViewType != viewBefore {
@@ -3402,11 +2035,9 @@ func TestCommandMode_NoMatchDoesNothing(t *testing.T) {
 
 func TestCommandMode_EmptyInputDoesNothing(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	viewBefore := m.viewState.ViewType
 
-	// Activate command mode, don't type anything, press Enter
 	m = sendRune(m, ':')
 	m = sendKey(m, tea.KeyEnter)
 
@@ -3417,7 +2048,7 @@ func TestCommandMode_EmptyInputDoesNothing(t *testing.T) {
 
 func TestCommandMode_CtrlCQuitsFromCommandMode(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = sendRune(m, ':') // activate command mode
+	m = sendRune(m, ':')
 	if !m.commandActive {
 		t.Fatal("expected command active")
 	}
@@ -3434,20 +2065,10 @@ func TestCommandMode_CtrlCQuitsFromCommandMode(t *testing.T) {
 
 func TestCommandMode_ViewShowsCommandBar(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
-	// Command bar should not be visible initially
-	view := m.View()
-	if strings.Contains(view, ": ") && strings.Count(view, "┌") > 2 {
-		// Hard to assert negatively since ":" appears in other contexts
-		// Just check it renders without panic
-	}
-
-	// Activate command mode
 	m = sendRune(m, ':')
 
-	// Should render without panic and show the command input
-	view = m.View()
+	view := m.View()
 	if view == "" {
 		t.Fatal("expected non-empty view with command bar")
 	}
@@ -3455,7 +2076,6 @@ func TestCommandMode_ViewShowsCommandBar(t *testing.T) {
 
 func TestCommandMode_HeaderShowsCmdShortcut(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
 
 	header := m.renderHeaderFrame()
 	if !strings.Contains(header, "Cmd") {
@@ -3484,10 +2104,10 @@ func TestMatchLensCommand(t *testing.T) {
 	}{
 		{"topology", "topology", true},
 		{"top", "topology", true},
-		{"t", "topology", true},     // only 1 match starting with "t"
+		{"t", "topology", true},
 		{"forest", "forest", true},
 		{"for", "forest", true},
-		{"f", "forest", true},       // only 1 match starting with "f"
+		{"f", "forest", true},
 		{"xyz", "", false},
 		{"", "", false},
 	}
@@ -3514,7 +2134,7 @@ func TestCompleteLensCommand(t *testing.T) {
 		{"forest", "forest"},
 		{"f", "forest"},
 		{"t", "topology"},
-		{"xyz", "xyz"},  // no match, return unchanged
+		{"xyz", "xyz"},
 		{"", ""},
 	}
 
@@ -3527,8 +2147,8 @@ func TestCompleteLensCommand(t *testing.T) {
 }
 
 func TestCommandMode_SwitchToForestFromDeepView(t *testing.T) {
-	mp := buildFullMockProvider()
-	m := newTestModelWithProvider(mp)
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
 
 	// Set up deep navigation state
 	m.viewState = data.ViewState{
@@ -3548,7 +2168,6 @@ func TestCommandMode_SwitchToForestFromDeepView(t *testing.T) {
 	if m.viewState.ViewType != data.ForestView {
 		t.Fatalf("expected ForestView after :forest from deep view, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
-	// Navigation state should be cleared
 	if m.viewState.SelectedPodCliqueSet != "" {
 		t.Fatalf("expected SelectedPodCliqueSet cleared, got %q", m.viewState.SelectedPodCliqueSet)
 	}

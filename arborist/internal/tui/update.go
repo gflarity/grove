@@ -19,45 +19,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyMsg(msg)
 
-	// Data messages
-	case ForestDataMsg:
-		return m.handleForestData(msg)
+	// Cache messages
+	case CacheSyncedMsg:
+		return m.handleCacheSynced(msg)
 
-	case ReplicaDataMsg:
-		return m.handleReplicaData(msg)
-
-	case ReplicaChildrenMsg:
-		return m.handleReplicaChildren(msg)
-
-	case PCSGReplicaDataMsg:
-		return m.handlePCSGReplicaData(msg)
-
-	case PCSGChildrenMsg:
-		return m.handlePCSGChildren(msg)
-
-	case PodCliqueChildrenMsg:
-		return m.handlePodCliqueChildren(msg)
-
-	case EventsMsg:
-		return m.handleEvents(msg)
+	case CacheUpdateMsg:
+		return m.handleCacheUpdate(msg)
 
 	case PodYAMLMsg:
 		return m.handlePodYAML(msg)
-
-	case TopologyInfoMsg:
-		return m.handleTopologyInfo(msg)
-
-	case PodInfoMsg:
-		return m.handlePodInfo(msg)
-
-	case NodeLabelsMsg:
-		return m.handleNodeLabels(msg)
-
-	case TopologyCacheSyncedMsg:
-		return m.handleTopologyCacheSynced(msg)
-
-	case TopologyViewDataMsg:
-		return m.handleTopologyViewData(msg)
 
 	case ErrorMsg:
 		debugLog("ERROR: %s: %v", msg.Operation, msg.Err)
@@ -74,24 +44,12 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.height = msg.Height
 
 	// Calculate table heights.
-	// Layout (lines):
-	//   6  header (left column: Context, Cluster, User, Arborist Rev, K8s Rev, View)
-	//   2  resources frame border (top + bottom)
-	//       (section header is embedded in the top border — no extra line)
-	//   1  resources table column header (NAMESPACE, TYPE, ...)
-	//   2  events frame border (top + bottom)
-	//       (section header is embedded in the top border — no extra line)
-	//   1  events table column header (TYPE, REASON, ...)
-	//  --
-	//  12  total fixed lines
-	//
-	// The remaining height is split equally between the two table data areas.
 	fixedLines := 12
 	if m.filterActive {
-		fixedLines += 3 // filter frame: top border + content + bottom border
+		fixedLines += 3
 	}
 	if m.commandActive {
-		fixedLines += 3 // command frame: top border + content + bottom border
+		fixedLines += 3
 	}
 	availableHeight := m.height - fixedLines
 	paneHeight := availableHeight / 2
@@ -99,21 +57,16 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 		paneHeight = 3
 	}
 
-	// Table dimensions — frame uses .Width(m.width - 2), so the content area
-	// inside the border is m.width - 2. Tables and highlight should match.
 	frameContentWidth := m.width - 2
 	resizeTable(&m.resourcesTable, frameContentWidth, paneHeight)
 	resizeTable(&m.eventsTable, frameContentWidth, paneHeight)
 	resizeTable(&m.topologyDomainsTable, frameContentWidth, paneHeight)
 	resizeTable(&m.topologyPodsTable, frameContentWidth, paneHeight)
 
-	// Update viewport for pod view
 	m.podViewport.Width = frameContentWidth
 	m.podViewport.Height = paneHeight
 
-	// Update filter input width (frame content width minus tree emoji)
 	m.filterInput.Width = m.width - 6
-	// Update command input width (frame content width minus prompt)
 	m.commandInput.Width = m.width - 6
 
 	// Rebuild tables
@@ -127,6 +80,13 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	if !m.ready {
 		m.ready = true
 		debugLogWithContext("window ready: %dx%d", m.width, m.height)
+
+		// Start global cache eagerly after first window size.
+		if !m.cacheStarted && m.cache != nil {
+			m.cacheStarted = true
+			debugLogWithContext("starting global cache")
+			return m, startGlobalCacheCmd(m.cache, m.ctx)
+		}
 	}
 
 	return m, nil
@@ -158,7 +118,6 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleFilterModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
-		// Exit filter mode and clear filter
 		m.filterActive = false
 		m.filterText = ""
 		m.filterInput.SetValue("")
@@ -167,7 +126,6 @@ func (m Model) handleFilterModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyEnter:
-		// Exit filter mode but keep filter applied
 		m.filterActive = false
 		m.filterText = m.filterInput.Value()
 		m.rebuildResourcesTable()
@@ -175,12 +133,10 @@ func (m Model) handleFilterModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyTab:
-		// Allow pane switching while filtering
 		m.switchPane()
 		return m, nil
 
 	default:
-		// Pass other keys to the filter input
 		var cmd tea.Cmd
 		m.filterInput, cmd = m.filterInput.Update(msg)
 		m.filterText = m.filterInput.Value()
@@ -197,7 +153,6 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyEsc:
-		// In Topology view with empty drill stack, switch back to Forest
 		if m.viewState.ViewType == data.TopologyView && len(m.topologyDrillStack) == 0 {
 			m.viewState.ViewType = data.ForestView
 			m.activePane = data.ResourcesPane
@@ -205,7 +160,6 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			debugLogWithContext("switched from TopologyView to ForestView via Esc")
 			return m, nil
 		}
-		// In Topology view with drill stack, pop back
 		if m.viewState.ViewType == data.TopologyView {
 			m.topologyDrillBack()
 			return m, nil
@@ -213,7 +167,6 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.navigateBack()
 
 	case tea.KeyEnter:
-		// Topology view: drill into domains
 		if m.viewState.ViewType == data.TopologyView && m.activePane == data.TopologyDomainsPane {
 			m.topologyDrillInto()
 			return m, nil
@@ -224,12 +177,10 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyUp, tea.KeyDown:
-		// Topology view key handling
 		if m.viewState.ViewType == data.TopologyView {
 			if m.activePane == data.TopologyDomainsPane {
 				var cmd tea.Cmd
 				m.topologyDomainsTable, cmd = m.topologyDomainsTable.Update(msg)
-				// Rebuild pods table based on new domain selection
 				m.rebuildTopologyPodsTable()
 				return m, cmd
 			}
@@ -238,7 +189,6 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		// Forest view key handling
 		if m.activePane == data.ResourcesPane {
 			if m.viewState.ViewType == data.PodView {
 				var cmd tea.Cmd
@@ -247,10 +197,9 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.resourcesTable, cmd = m.resourcesTable.Update(msg)
-			// Load/filter events for newly selected resource
-			if eventsCmd := m.eventsCommandForSelection(); eventsCmd != nil {
-				return m, tea.Batch(cmd, eventsCmd)
-			}
+			// Update events based on new selection (from cache, synchronous)
+			m.updateEventsForSelection()
+			m.rebuildEventsTable()
 			return m, cmd
 		}
 		var cmd tea.Cmd
@@ -286,14 +235,12 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
-		// Exit command mode without executing
 		m.commandActive = false
 		m.commandInput.SetValue("")
 		debugLogWithContext("command mode deactivated (cancelled)")
 		return m, nil
 
 	case tea.KeyEnter:
-		// Execute the command and exit command mode
 		input := m.commandInput.Value()
 		m.commandActive = false
 		m.commandInput.SetValue("")
@@ -301,7 +248,6 @@ func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.executeCommand(input)
 
 	case tea.KeyTab:
-		// Tab-complete the current input
 		current := m.commandInput.Value()
 		completed := completeLensCommand(current)
 		if completed != current {
@@ -312,7 +258,6 @@ func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	default:
-		// Pass other keys to the command input
 		var cmd tea.Cmd
 		m.commandInput, cmd = m.commandInput.Update(msg)
 		return m, cmd
@@ -322,7 +267,6 @@ func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // toggleTopologyView switches between Forest and Topology views.
 func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
 	if m.viewState.ViewType == data.TopologyView {
-		// Switch back to Forest
 		m.viewState.ViewType = data.ForestView
 		m.activePane = data.ResourcesPane
 		m.updateTableFocus()
@@ -330,25 +274,27 @@ func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Switch to Topology view (only from ForestView or any forest sub-view)
 	m.viewState.ViewType = data.TopologyView
 	m.activePane = data.TopologyDomainsPane
-	m.topologyDrillStack = nil // reset drill state
+	m.topologyDrillStack = nil
 	m.updateTableFocus()
 	debugLogWithContext("toggled to TopologyView")
 
-	// Start cache if not already started
-	if !m.topologyCacheStarted && m.topologyCache != nil {
-		m.topologyCacheStarted = true
-		debugLogWithContext("starting topology cache")
-		return m, startTopologyCacheCmd(m.topologyCache, m.ctx)
-	}
-
-	// Cache already running — rebuild from existing snapshot
-	if m.topologyCache != nil {
-		m.topologyViewData = m.topologyCache.Snapshot()
+	// Rebuild from existing snapshot
+	if m.cachedSnapshot != nil {
+		m.topologyViewData = m.cachedSnapshot.TopologyViewData
+		m.gpuSummary = m.cachedSnapshot.GPUSummary
 		m.rebuildTopologyDomainsTable()
 		m.rebuildTopologyPodsTable()
 	}
 	return m, nil
+}
+
+// updateEventsForSelection updates allEvents based on the currently highlighted
+// resource row, reading from the cache snapshot synchronously.
+func (m *Model) updateEventsForSelection() {
+	if m.cachedSnapshot == nil {
+		return
+	}
+	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
 }

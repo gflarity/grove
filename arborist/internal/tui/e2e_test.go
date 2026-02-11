@@ -72,9 +72,9 @@ func stripANSI(b []byte) string {
 // ---------------------------------------------------------------------------
 
 // setupE2E ensures we have a KUBECONFIG pointing at a running cluster and
-// returns a K8sClient (DataProvider) plus a kubernetes.Clientset for
-// workload management. Tests are skipped if no cluster is available.
-func setupE2E(t *testing.T) (data.DataProvider, *kubernetes.Clientset) {
+// returns a GlobalCache plus a kubernetes.Clientset for workload management.
+// Tests are skipped if no cluster is available.
+func setupE2E(t *testing.T) (data.GlobalCache, *kubernetes.Clientset) {
 	t.Helper()
 
 	// The E2E tests expect a pre-existing cluster. Check KUBECONFIG.
@@ -91,11 +91,12 @@ func setupE2E(t *testing.T) (data.DataProvider, *kubernetes.Clientset) {
 		t.Skip("Skipping E2E test: no kubeconfig found. Set KUBECONFIG or ensure ~/.kube/config exists.")
 	}
 
-	// Create the arborist K8sClient (DataProvider)
-	provider, err := k8s.NewK8sClient()
+	// Create the arborist K8sClient and get a GlobalCache from it
+	k8sClient, err := k8s.NewK8sClient()
 	if err != nil {
 		t.Skipf("Skipping E2E test: failed to create K8sClient: %v", err)
 	}
+	cache := k8sClient.NewGlobalCache()
 
 	// Also create a standard kubernetes.Clientset for workload management
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -116,7 +117,7 @@ func setupE2E(t *testing.T) (data.DataProvider, *kubernetes.Clientset) {
 		t.Skipf("Skipping E2E test: cluster not reachable: %v", err)
 	}
 
-	return provider, clientset
+	return cache, clientset
 }
 
 // applyWorkload applies a YAML file to the cluster using kubectl.
@@ -213,10 +214,10 @@ func waitForPCSReady(t *testing.T, clientset *kubernetes.Clientset, pcsName, nam
 	}
 }
 
-// newE2ETestModel creates a headless TUI model backed by a real K8sClient and
+// newE2ETestModel creates a headless TUI model backed by a real GlobalCache and
 // wraps it in teatest.TestModel. Debug logging is enabled to a temp file which
 // is printed to t.Log on failure.
-func newE2ETestModel(t *testing.T, provider data.DataProvider) *teatest.TestModel {
+func newE2ETestModel(t *testing.T, cache data.GlobalCache) *teatest.TestModel {
 	t.Helper()
 
 	debugPath := filepath.Join(t.TempDir(), "arborist-e2e-debug.log")
@@ -233,7 +234,7 @@ func newE2ETestModel(t *testing.T, provider data.DataProvider) *teatest.TestMode
 		}
 	})
 
-	m := NewModel(provider,
+	m := NewModel(cache,
 		WithContext(context.Background()),
 		WithDebug(true),
 	)
@@ -325,7 +326,7 @@ func readFinalOutput(t *testing.T, tm *teatest.TestModel) string {
 // ---------------------------------------------------------------------------
 
 func TestE2E_ForestView(t *testing.T) {
-	provider, clientset := setupE2E(t)
+	cache, clientset := setupE2E(t)
 
 	// Apply workload and wait for it to be ready
 	applyWorkload(t, simplePCSYAML)
@@ -333,7 +334,7 @@ func TestE2E_ForestView(t *testing.T) {
 	waitForPCSReady(t, clientset, "simple-pcs", "default", 3)
 
 	// Start TUI
-	tm := newE2ETestModel(t, provider)
+	tm := newE2ETestModel(t, cache)
 
 	// Wait for simple-pcs to appear in the output
 	output := waitForContains(t, tm, []string{"simple-pcs", "PodCliqueSet"}, e2eWaitTimeout)
@@ -354,13 +355,13 @@ func TestE2E_ForestView(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestE2E_DrillDownNavigation(t *testing.T) {
-	provider, clientset := setupE2E(t)
+	cache, clientset := setupE2E(t)
 
 	applyWorkload(t, simplePCSYAML)
 	t.Cleanup(func() { deleteWorkload(t, clientset, "simple-pcs", "default") })
 	waitForPCSReady(t, clientset, "simple-pcs", "default", 3)
 
-	tm := newE2ETestModel(t, provider)
+	tm := newE2ETestModel(t, cache)
 
 	// Wait for forest view to load
 	waitForContains(t, tm, []string{"simple-pcs"}, e2eWaitTimeout)
@@ -412,13 +413,13 @@ func TestE2E_DrillDownNavigation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestE2E_PodYAMLView(t *testing.T) {
-	provider, clientset := setupE2E(t)
+	cache, clientset := setupE2E(t)
 
 	applyWorkload(t, simplePCSYAML)
 	t.Cleanup(func() { deleteWorkload(t, clientset, "simple-pcs", "default") })
 	waitForPCSReady(t, clientset, "simple-pcs", "default", 3)
 
-	tm := newE2ETestModel(t, provider)
+	tm := newE2ETestModel(t, cache)
 
 	// Wait for forest view
 	waitForContains(t, tm, []string{"simple-pcs"}, e2eWaitTimeout)
@@ -461,14 +462,14 @@ func TestE2E_PodYAMLView(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestE2E_FullHierarchy(t *testing.T) {
-	provider, clientset := setupE2E(t)
+	cache, clientset := setupE2E(t)
 
 	applyWorkload(t, pcsWithPCSGYAML)
 	t.Cleanup(func() { deleteWorkload(t, clientset, "pcs-with-pcsg", "default") })
 	// pcs-with-pcsg creates 2 frontend + 2 backend = 4 pods
 	waitForPCSReady(t, clientset, "pcs-with-pcsg", "default", 4)
 
-	tm := newE2ETestModel(t, provider)
+	tm := newE2ETestModel(t, cache)
 
 	// Wait for forest view to show the PCS
 	waitForContains(t, tm, []string{"pcs-with-pcsg"}, e2eWaitTimeout)
@@ -513,7 +514,7 @@ func TestE2E_FullHierarchy(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestE2E_Filter(t *testing.T) {
-	provider, clientset := setupE2E(t)
+	cache, clientset := setupE2E(t)
 
 	// Apply both workloads
 	applyWorkload(t, simplePCSYAML)
@@ -525,7 +526,7 @@ func TestE2E_Filter(t *testing.T) {
 	waitForPCSReady(t, clientset, "simple-pcs", "default", 3)
 	waitForPCSReady(t, clientset, "pcs-with-pcsg", "default", 4)
 
-	tm := newE2ETestModel(t, provider)
+	tm := newE2ETestModel(t, cache)
 
 	// Wait for both PCSes to appear
 	waitForContains(t, tm, []string{"simple-pcs", "pcs-with-pcsg"}, e2eWaitTimeout)
@@ -565,13 +566,13 @@ func TestE2E_Filter(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestE2E_PaneSwitchingAndEvents(t *testing.T) {
-	provider, clientset := setupE2E(t)
+	cache, clientset := setupE2E(t)
 
 	applyWorkload(t, simplePCSYAML)
 	t.Cleanup(func() { deleteWorkload(t, clientset, "simple-pcs", "default") })
 	waitForPCSReady(t, clientset, "simple-pcs", "default", 3)
 
-	tm := newE2ETestModel(t, provider)
+	tm := newE2ETestModel(t, cache)
 
 	// Wait for forest view
 	waitForContains(t, tm, []string{"simple-pcs", "Resources"}, e2eWaitTimeout)
@@ -604,7 +605,7 @@ func TestE2E_PaneSwitchingAndEvents(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestE2E_DebugLogging(t *testing.T) {
-	provider, clientset := setupE2E(t)
+	cache, clientset := setupE2E(t)
 
 	applyWorkload(t, simplePCSYAML)
 	t.Cleanup(func() { deleteWorkload(t, clientset, "simple-pcs", "default") })
@@ -616,7 +617,7 @@ func TestE2E_DebugLogging(t *testing.T) {
 		t.Fatalf("Failed to init debug log: %v", err)
 	}
 
-	m := NewModel(provider,
+	m := NewModel(cache,
 		WithContext(context.Background()),
 		WithDebug(true),
 	)

@@ -46,16 +46,17 @@ func (c *TUICmd) Run(globals *CLI) error {
 		}
 	}()
 
-	// Initialize Kubernetes client (the real DataProvider)
+	// Initialize Kubernetes client
 	tui.DebugLog("initializing Kubernetes client")
-	var provider data.DataProvider
+	var globalCache data.GlobalCache
 	k8sClient, err := k8s.NewK8sClient()
 	if err != nil {
 		tui.DebugLog("WARNING: failed to initialize Kubernetes client: %v", err)
-		// provider stays nil — the TUI will show empty data
+		// globalCache stays nil — the TUI will show empty data
 	} else {
 		tui.DebugLog("Kubernetes client initialized successfully")
-		provider = k8sClient
+		globalCache = k8sClient.NewGlobalCache()
+		tui.DebugLog("global cache created")
 	}
 
 	// Resolve kubeconfig context/cluster/user for the header display
@@ -74,27 +75,19 @@ func (c *TUICmd) Run(globals *CLI) error {
 	arboristVersion := resolveArboristVersion()
 	tui.DebugLog("arborist version=%s", arboristVersion)
 
-	// Create the topology cache for the Topology view (informer-backed)
-	var topologyCache data.TopologyCache
-	if k8sClient != nil {
-		topologyCache = k8sClient.NewTopologyCache()
-		tui.DebugLog("topology cache created")
-	}
-
 	// Create the Bubble Tea model
-	m := tui.NewModel(provider,
+	m := tui.NewModel(globalCache,
 		tui.WithContext(context.Background()),
 		tui.WithDebug(globals.Debug != ""),
 		tui.WithClusterInfo(contextName, clusterName),
 		tui.WithUserName(userName),
 		tui.WithK8sVersion(k8sVersion),
 		tui.WithArboristVersion(arboristVersion),
-		tui.WithTopologyCache(topologyCache),
 	)
 
-	// Ensure topology cache is cleaned up when the TUI exits
-	if topologyCache != nil {
-		defer topologyCache.Stop()
+	// Ensure global cache is cleaned up when the TUI exits
+	if globalCache != nil {
+		defer globalCache.Stop()
 	}
 
 	// Create and run the Bubble Tea program
@@ -118,7 +111,6 @@ func (c *TUICmd) Run(globals *CLI) error {
 var Version string
 
 // resolveArboristVersion returns the arborist version string.
-// Checks ldflags-injected Version first, then Go build info, then falls back to "dev".
 func resolveArboristVersion() string {
 	if v := strings.TrimSpace(Version); v != "" {
 		return v
@@ -129,12 +121,10 @@ func resolveArboristVersion() string {
 		return "dev"
 	}
 
-	// Use the main module version if it's set (not "(devel)")
 	if info.Main.Version != "" && info.Main.Version != "(devel)" {
 		return info.Main.Version
 	}
 
-	// Fall back to VCS revision from build settings
 	var vcsRev, vcsDirty string
 	for _, s := range info.Settings {
 		switch s.Key {

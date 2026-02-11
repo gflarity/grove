@@ -14,6 +14,10 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
+	if !m.cacheSynced && m.cache != nil {
+		return "Syncing..."
+	}
+
 	var sections []string
 
 	// Header bar

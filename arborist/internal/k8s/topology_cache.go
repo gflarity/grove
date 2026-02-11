@@ -238,8 +238,8 @@ func (c *InformerTopologyCache) rebuildSnapshot() {
 		topologyKeys[level.Key] = true
 	}
 
-	// Read Nodes
-	nodeLabels := c.readNodeLabels(topologyKeys)
+	// Read Nodes (topology labels + GPU product labels)
+	nodeResult := c.readNodeLabels(topologyKeys)
 
 	// Read PCS specs
 	pcsSpecs := c.readPCSSpecs()
@@ -247,8 +247,13 @@ func (c *InformerTopologyCache) rebuildSnapshot() {
 	// Read Pods
 	pods := c.readPods()
 
-	// Build the snapshot
-	snapshot := data.BuildTopologyViewData(levels, pcsSpecs, pods, nodeLabels)
+	// Build the topology view snapshot
+	snapshot := data.BuildTopologyViewData(levels, pcsSpecs, pods, nodeResult.nodeLabels)
+
+	// Build and attach GPU summary
+	gpuSummary := data.BuildGPUSummary(pods, nodeResult.nodeGPUProducts)
+	snapshot.GPUSummary = gpuSummary
+	snapshot.NodeGPUProducts = nodeResult.nodeGPUProducts
 
 	// Store and notify
 	c.mu.Lock()
@@ -285,11 +290,24 @@ func (c *InformerTopologyCache) readClusterTopologyLevels() []corev1alpha1.Topol
 	return nil
 }
 
+// nodeReadResult holds the combined output of readNodeLabels: topology labels and GPU product map.
+type nodeReadResult struct {
+	nodeLabels      map[string]map[string]string // nodeName -> filtered topology labels
+	nodeGPUProducts map[string]string            // nodeName -> short GPU type (e.g. "H200")
+}
+
+// gpuProductLabelKey is the node label that identifies the GPU product type.
+const gpuProductLabelKey = "nvidia.com/gpu.product"
+
 // readNodeLabels reads all node labels from the informer cache,
-// filtering to only topology-relevant keys.
-func (c *InformerTopologyCache) readNodeLabels(topologyKeys map[string]bool) map[string]map[string]string {
+// filtering to only topology-relevant keys. Also captures the GPU product
+// label from each node and parses it into a short GPU type name.
+func (c *InformerTopologyCache) readNodeLabels(topologyKeys map[string]bool) nodeReadResult {
 	items := c.nodeInformer.GetStore().List()
-	result := make(map[string]map[string]string, len(items))
+	result := nodeReadResult{
+		nodeLabels:      make(map[string]map[string]string, len(items)),
+		nodeGPUProducts: make(map[string]string, len(items)),
+	}
 
 	for _, item := range items {
 		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(item)
@@ -308,7 +326,15 @@ func (c *InformerTopologyCache) readNodeLabels(topologyKeys map[string]bool) map
 				filtered[k] = v
 			}
 		}
-		result[name] = filtered
+		result.nodeLabels[name] = filtered
+
+		// Capture GPU product label
+		if gpuProduct, ok := labels[gpuProductLabelKey]; ok && gpuProduct != "" {
+			shortName := data.ParseGPUProductShortName(gpuProduct)
+			if shortName != "" {
+				result.nodeGPUProducts[name] = shortName
+			}
+		}
 	}
 
 	return result
@@ -351,14 +377,59 @@ func (c *InformerTopologyCache) readPods() []data.TopologyPodInput {
 		nodeName, _, _ := unstructured.NestedString(obj, "spec", "nodeName")
 		phase, _, _ := unstructured.NestedString(obj, "status", "phase")
 
+		// Parse GPU requests from all containers
+		gpuRequests := parseGPURequests(obj)
+
 		result = append(result, data.TopologyPodInput{
-			Namespace: namespace,
-			Name:      name,
-			NodeName:  nodeName,
-			Phase:     phase,
-			Labels:    labels,
+			Namespace:   namespace,
+			Name:        name,
+			NodeName:    nodeName,
+			Phase:       phase,
+			Labels:      labels,
+			GPURequests: gpuRequests,
 		})
 	}
 
 	return result
+}
+
+// parseGPURequests sums nvidia.com/gpu resource requests across all containers in a pod.
+func parseGPURequests(obj map[string]interface{}) int64 {
+	containers, found, err := unstructured.NestedSlice(obj, "spec", "containers")
+	if err != nil || !found {
+		return 0
+	}
+
+	var total int64
+	for _, c := range containers {
+		container, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Navigate to resources.requests["nvidia.com/gpu"]
+		gpuVal, found, err := unstructured.NestedFieldNoCopy(container, "resources", "requests", "nvidia.com/gpu")
+		if err != nil || !found || gpuVal == nil {
+			continue
+		}
+		// The value could be a string (quantity) or a number
+		switch v := gpuVal.(type) {
+		case string:
+			// Parse simple integer quantities (e.g. "2", "4")
+			var n int64
+			for _, ch := range v {
+				if ch >= '0' && ch <= '9' {
+					n = n*10 + int64(ch-'0')
+				} else {
+					break
+				}
+			}
+			total += n
+		case int64:
+			total += v
+		case float64:
+			total += int64(v)
+		}
+	}
+
+	return total
 }
