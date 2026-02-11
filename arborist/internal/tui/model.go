@@ -622,12 +622,12 @@ func (m *Model) rebuildTopologyDomainsTable() {
 			m.topologyViewData.RawPods,
 		)
 
-		// Build dynamic column spec: VALUE + <GPU> USAGE columns + GPU PODS + PODS + REG PODS
+		// Build dynamic column spec: VALUE + <GPU>¹ columns + GPU PODS + PODS
 		specs := []ColumnSpec{
 			{Title: "VALUE", Weight: 2},
 		}
 		for _, gpuType := range gpuSummary.GPUTypes {
-			specs = append(specs, ColumnSpec{Title: gpuType + " USAGE", Weight: 1})
+			specs = append(specs, ColumnSpec{Title: gpuType + "¹", Weight: 1})
 		}
 		specs = append(specs,
 			ColumnSpec{Title: "GPU PODS", Weight: 1},
@@ -646,14 +646,14 @@ func (m *Model) rebuildTopologyDomainsTable() {
 		for _, v := range values {
 			pc := podCounts[v]
 			row := table.Row{v}
-			// GPU usage columns first
+			// GPU columns: grove/other/total
 			valueCounts := gpuSummary.ByValue[v]
 			for _, gpuType := range gpuSummary.GPUTypes {
 				if valueCounts != nil {
 					counts := valueCounts[gpuType]
-					row = append(row, data.FormatGPUUsedAvailable(counts.Used, counts.Available))
+					row = append(row, data.FormatGPUGroveOtherTotal(counts.Grove, counts.Other, counts.Total))
 				} else {
-					row = append(row, "0/0")
+					row = append(row, "0/0/0")
 				}
 			}
 			// GPU PODS, PODS

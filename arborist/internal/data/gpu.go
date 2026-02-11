@@ -156,10 +156,14 @@ func addGPUCount(m map[string]GPUCounts, key, gpuType string, count int64) {
 	m[key][gpuType] += count
 }
 
-// DomainGPUCounts holds used/available GPU counts for a single GPU type.
+// DomainGPUCounts holds Grove/Other/Total GPU counts for a single GPU type.
+//   - Grove = GPUs used by PCS-managed pods (pods with app.kubernetes.io/part-of label)
+//   - Other = GPUs used by non-PCS pods (no app.kubernetes.io/part-of label)
+//   - Total = total GPU capacity from node nvidia.com/gpu resource
 type DomainGPUCounts struct {
-	Used      int64
-	Available int64
+	Grove int64
+	Other int64
+	Total int64
 }
 
 // DomainGPUSummary maps domainValue -> gpuType -> DomainGPUCounts.
@@ -168,8 +172,11 @@ type DomainGPUSummary struct {
 	ByValue  map[string]map[string]DomainGPUCounts // value -> gpuType -> counts
 }
 
-// ComputeDomainGPUSummary computes GPU used/available for each distinct value
+// ComputeDomainGPUSummary computes GPU Grove/Other/Total for each distinct value
 // of a topology domain key, scoped to the given set of matching nodes.
+//   - Grove = GPUs used by PCS-managed pods (pods with app.kubernetes.io/part-of label)
+//   - Other = GPUs used by non-PCS pods (no app.kubernetes.io/part-of label)
+//   - Total = total GPU capacity from node nvidia.com/gpu resource
 func ComputeDomainGPUSummary(
 	domainKey string,
 	matchingNodes []string,
@@ -188,7 +195,7 @@ func ComputeDomainGPUSummary(
 		nodeSet[n] = true
 	}
 
-	// 1. Aggregate "available" from matching nodes: for each node, get its domain value,
+	// 1. Aggregate "Total" (capacity) from matching nodes: for each node, get its domain value,
 	// GPU type, and GPU capacity.
 	gpuTypeSet := make(map[string]bool)
 	for _, nodeName := range matchingNodes {
@@ -211,11 +218,13 @@ func ComputeDomainGPUSummary(
 			summary.ByValue[domainValue] = make(map[string]DomainGPUCounts)
 		}
 		counts := summary.ByValue[domainValue][gpuType]
-		counts.Available += capacity
+		counts.Total += capacity
 		summary.ByValue[domainValue][gpuType] = counts
 	}
 
-	// 2. Aggregate "used" from pods on matching nodes.
+	// 2. Aggregate Grove/Other from pods on matching nodes.
+	// Grove = pods with app.kubernetes.io/part-of label (PCS-managed)
+	// Other = pods without that label
 	for _, pod := range pods {
 		if pod.GPURequests <= 0 || pod.NodeName == "" {
 			continue
@@ -240,7 +249,11 @@ func ComputeDomainGPUSummary(
 			summary.ByValue[domainValue] = make(map[string]DomainGPUCounts)
 		}
 		counts := summary.ByValue[domainValue][gpuType]
-		counts.Used += pod.GPURequests
+		if pod.Labels["app.kubernetes.io/part-of"] != "" {
+			counts.Grove += pod.GPURequests
+		} else {
+			counts.Other += pod.GPURequests
+		}
 		summary.ByValue[domainValue][gpuType] = counts
 	}
 
@@ -255,7 +268,7 @@ func ComputeDomainGPUSummary(
 	return summary
 }
 
-// FormatGPUUsedAvailable formats a used/available GPU count as "used/available".
-func FormatGPUUsedAvailable(used, available int64) string {
-	return fmt.Sprintf("%d/%d", used, available)
+// FormatGPUGroveOtherTotal formats GPU counts as "grove/other/total".
+func FormatGPUGroveOtherTotal(grove, other, total int64) string {
+	return fmt.Sprintf("%d/%d/%d", grove, other, total)
 }

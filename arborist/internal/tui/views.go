@@ -44,6 +44,13 @@ func (m Model) View() string {
 	if m.commandActive {
 		fixedLines += 3 // command frame: top border + content + bottom border
 	}
+
+	// Account for footnote line in topology view with GPU columns
+	topologyFootnoteVisible := m.viewState.ViewType == data.TopologyView && m.topologyHasGPUColumns()
+	if topologyFootnoteVisible {
+		fixedLines++ // 1 line for the footnote
+	}
+
 	availableHeight := m.height - fixedLines
 	resourcesHeight := availableHeight / 2
 	eventsHeight := availableHeight - resourcesHeight
@@ -59,6 +66,9 @@ func (m Model) View() string {
 	case data.TopologyView:
 		sections = append(sections, m.renderTopologyDomainsFrame(resourcesHeight))
 		sections = append(sections, m.renderTopologyPodsFrame(eventsHeight))
+		if topologyFootnoteVisible {
+			sections = append(sections, m.renderTopologyFootnote())
+		}
 	default:
 		sections = append(sections, m.renderResourcesFrame(resourcesHeight))
 		sections = append(sections, m.renderEventsFrame(eventsHeight))
@@ -416,6 +426,34 @@ func (m Model) renderTopologyDomainsFrame(height int) string {
 	title := m.renderTopologyDomainsSectionHeader()
 	content := m.topologyDomainsTable.View()
 	return renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
+}
+
+// topologyHasGPUColumns returns true when the topology view is drilled into
+// a domain level that has GPU columns (i.e., there are GPU types discovered).
+func (m Model) topologyHasGPUColumns() bool {
+	if m.topologyViewData == nil || len(m.topologyDrillStack) == 0 {
+		return false
+	}
+	// Check if node GPU products are present
+	if len(m.topologyViewData.NodeGPUProducts) == 0 {
+		return false
+	}
+	// Check if the current drilled-in domain actually produced GPU columns
+	// by looking at the domains table columns — if more than 3 (VALUE + GPU PODS + PODS),
+	// then there are GPU columns present.
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) == 0 {
+		return false
+	}
+	// With GPU columns: VALUE + <gpuType>¹ ... + GPU PODS + PODS (>3)
+	// Without: VALUE + GPU PODS + PODS (3)
+	return len(rows[0]) > 3
+}
+
+// renderTopologyFootnote returns the footnote line explaining GPU column format.
+// Only displayed when GPU columns are visible in the topology view.
+func (m Model) renderTopologyFootnote() string {
+	return FootnoteStyle.Render("¹ GPU: Grove/Other/Total")
 }
 
 // renderTopologyPodsFrame renders the topology pods section in a framed box.

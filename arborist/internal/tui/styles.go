@@ -250,6 +250,15 @@ var BreadcrumbStyles = map[string]lipgloss.Style{
 }
 
 // =============================================================================
+// Footnote Styles (e.g. "¹ GPU: Grove/Other/Total" below topology tables)
+// =============================================================================
+
+var FootnoteStyle = lipgloss.NewStyle().
+	Foreground(ColorCadetBlue).
+	Faint(true).
+	PaddingLeft(1)
+
+// =============================================================================
 // Shared Table Styles
 // =============================================================================
 
