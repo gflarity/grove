@@ -119,6 +119,8 @@ type TopologyViewData struct {
 	DomainToKey     map[string]string           // domain -> node label key (from ClusterTopology)
 	GPUSummary      *GPUSummary                 // pre-aggregated GPU counts by resource hierarchy
 	NodeGPUProducts map[string]string           // nodeName -> short GPU type (e.g. "H200")
+	NodeGPUCapacity map[string]int64            // nodeName -> total GPU count from status.allocatable
+	RawPods         []TopologyPodInput          // raw pod data for GPU aggregation in topology drill-down
 }
 
 // ViewTypeName returns a human-readable name for a ViewType.

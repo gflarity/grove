@@ -254,6 +254,7 @@ func (c *InformerTopologyCache) rebuildSnapshot() {
 	gpuSummary := data.BuildGPUSummary(pods, nodeResult.nodeGPUProducts)
 	snapshot.GPUSummary = gpuSummary
 	snapshot.NodeGPUProducts = nodeResult.nodeGPUProducts
+	snapshot.NodeGPUCapacity = nodeResult.nodeGPUCapacity
 
 	// Store and notify
 	c.mu.Lock()
@@ -290,10 +291,12 @@ func (c *InformerTopologyCache) readClusterTopologyLevels() []corev1alpha1.Topol
 	return nil
 }
 
-// nodeReadResult holds the combined output of readNodeLabels: topology labels and GPU product map.
+// nodeReadResult holds the combined output of readNodeLabels: topology labels, GPU product map,
+// and GPU capacity per node.
 type nodeReadResult struct {
 	nodeLabels      map[string]map[string]string // nodeName -> filtered topology labels
 	nodeGPUProducts map[string]string            // nodeName -> short GPU type (e.g. "H200")
+	nodeGPUCapacity map[string]int64             // nodeName -> total GPU count from status.allocatable
 }
 
 // gpuProductLabelKey is the node label that identifies the GPU product type.
@@ -307,6 +310,7 @@ func (c *InformerTopologyCache) readNodeLabels(topologyKeys map[string]bool) nod
 	result := nodeReadResult{
 		nodeLabels:      make(map[string]map[string]string, len(items)),
 		nodeGPUProducts: make(map[string]string, len(items)),
+		nodeGPUCapacity: make(map[string]int64, len(items)),
 	}
 
 	for _, item := range items {
@@ -335,9 +339,40 @@ func (c *InformerTopologyCache) readNodeLabels(topologyKeys map[string]bool) nod
 				result.nodeGPUProducts[name] = shortName
 			}
 		}
+
+		// Capture GPU capacity from status.allocatable["nvidia.com/gpu"]
+		gpuCap := parseNodeGPUCapacity(obj)
+		if gpuCap > 0 {
+			result.nodeGPUCapacity[name] = gpuCap
+		}
 	}
 
 	return result
+}
+
+// parseNodeGPUCapacity reads status.allocatable["nvidia.com/gpu"] from a node object.
+func parseNodeGPUCapacity(obj map[string]interface{}) int64 {
+	gpuVal, found, err := unstructured.NestedFieldNoCopy(obj, "status", "allocatable", "nvidia.com/gpu")
+	if err != nil || !found || gpuVal == nil {
+		return 0
+	}
+	switch v := gpuVal.(type) {
+	case string:
+		var n int64
+		for _, ch := range v {
+			if ch >= '0' && ch <= '9' {
+				n = n*10 + int64(ch-'0')
+			} else {
+				break
+			}
+		}
+		return n
+	case int64:
+		return v
+	case float64:
+		return int64(v)
+	}
+	return 0
 }
 
 // readPCSSpecs reads all PodCliqueSet specs from the informer cache.

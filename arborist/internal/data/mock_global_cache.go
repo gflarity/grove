@@ -59,6 +59,7 @@ func NewMockGlobalCache() *MockGlobalCache {
 			NodeLabels:             make(map[string]map[string]string),
 			PodInfos:               make(map[string]CachedPodInfo),
 			NodeGPUProducts:        make(map[string]string),
+			NodeGPUCapacity:        make(map[string]int64),
 		},
 	}
 }

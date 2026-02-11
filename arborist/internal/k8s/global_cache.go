@@ -392,6 +392,7 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 	gpuSummary := data.BuildGPUSummary(pods, nodeResult.nodeGPUProducts)
 	topologyViewData.GPUSummary = gpuSummary
 	topologyViewData.NodeGPUProducts = nodeResult.nodeGPUProducts
+	topologyViewData.NodeGPUCapacity = nodeResult.nodeGPUCapacity
 
 	snapshot := &data.CacheSnapshot{
 		PodCliqueSets:       pcsResources,
@@ -415,6 +416,7 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 		NodeGPUProducts:      nodeResult.nodeGPUProducts,
 		NodeLabels:           nodeResult.nodeLabels,
 		PodInfos:             podInfos,
+		NodeGPUCapacity:      nodeResult.nodeGPUCapacity,
 	}
 
 	_ = pcsgObjects // used in convertPCSGsToResources
@@ -458,6 +460,7 @@ func (c *InformerGlobalCache) readNodeLabels(topologyKeys map[string]bool) nodeR
 	result := nodeReadResult{
 		nodeLabels:      make(map[string]map[string]string, len(items)),
 		nodeGPUProducts: make(map[string]string, len(items)),
+		nodeGPUCapacity: make(map[string]int64, len(items)),
 	}
 
 	for _, item := range items {
@@ -484,6 +487,12 @@ func (c *InformerGlobalCache) readNodeLabels(topologyKeys map[string]bool) nodeR
 			if shortName != "" {
 				result.nodeGPUProducts[name] = shortName
 			}
+		}
+
+		// Capture GPU capacity from status.allocatable["nvidia.com/gpu"]
+		gpuCap := parseNodeGPUCapacity(obj)
+		if gpuCap > 0 {
+			result.nodeGPUCapacity[name] = gpuCap
 		}
 	}
 

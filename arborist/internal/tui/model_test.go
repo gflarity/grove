@@ -232,6 +232,7 @@ func buildFullMockCache() *data.MockGlobalCache {
 		NodeLabels:      make(map[string]map[string]string),
 		PodInfos:        make(map[string]data.CachedPodInfo),
 		NodeGPUProducts: make(map[string]string),
+		NodeGPUCapacity: make(map[string]int64),
 	}
 
 	mc.SetSnapshot(snapshot)
@@ -1594,6 +1595,7 @@ func TestTopologyView_DeepDrillDown(t *testing.T) {
 	m = sendKey(m, tea.KeyEnter) // select us-east-1, advance to zone
 	m = sendKey(m, tea.KeyEnter) // select us-east-1a, advance to rack
 
+	// Stack: [{region, "us-east-1"}, {zone, "us-east-1a"}, {rack, ""}]
 	if len(m.topologyDrillStack) != 3 {
 		t.Fatalf("expected drill stack depth 3, got %d", len(m.topologyDrillStack))
 	}
@@ -1604,37 +1606,44 @@ func TestTopologyView_DeepDrillDown(t *testing.T) {
 		t.Fatalf("expected 2 rack values, got %d", len(rows))
 	}
 
-	// Esc 1: pop rack (empty value)
+	// Esc 1: pop rack (empty value), clear zone value
+	// Stack → [{region, "us-east-1"}, {zone, ""}]
+	// Shows zone values for us-east-1
 	m = sendKey(m, tea.KeyEsc)
 	if len(m.topologyDrillStack) != 2 {
 		t.Fatalf("expected depth 2 after Esc 1, got %d", len(m.topologyDrillStack))
 	}
-
-	// Esc 2: clear zone value
-	m = sendKey(m, tea.KeyEsc)
-	if len(m.topologyDrillStack) != 2 {
-		t.Fatalf("expected depth 2 after Esc 2 (value cleared), got %d", len(m.topologyDrillStack))
+	if m.topologyDrillStack[1].Value != "" {
+		t.Fatalf("expected zone value cleared after Esc 1, got %q", m.topologyDrillStack[1].Value)
+	}
+	// Top table should now show zone values (not rack values)
+	rows = m.topologyDomainsTable.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 zone values for us-east-1 after Esc 1, got %d", len(rows))
+	}
+	if rows[0][0] != "us-east-1a" {
+		t.Errorf("expected first zone value 'us-east-1a', got %q", rows[0][0])
 	}
 
-	// Esc 3: pop zone
+	// Esc 2: pop zone (empty value), clear region value
+	// Stack → [{region, ""}]
+	// Shows region values
 	m = sendKey(m, tea.KeyEsc)
 	if len(m.topologyDrillStack) != 1 {
-		t.Fatalf("expected depth 1 after Esc 3, got %d", len(m.topologyDrillStack))
+		t.Fatalf("expected depth 1 after Esc 2, got %d", len(m.topologyDrillStack))
+	}
+	if m.topologyDrillStack[0].Value != "" {
+		t.Fatalf("expected region value cleared after Esc 2, got %q", m.topologyDrillStack[0].Value)
 	}
 
-	// Esc 4: clear region value
-	m = sendKey(m, tea.KeyEsc)
-	if len(m.topologyDrillStack) != 1 {
-		t.Fatalf("expected depth 1 after Esc 4 (value cleared), got %d", len(m.topologyDrillStack))
-	}
-
-	// Esc 5: pop region
+	// Esc 3: pop region (empty value)
+	// Stack → []
 	m = sendKey(m, tea.KeyEsc)
 	if len(m.topologyDrillStack) != 0 {
-		t.Fatalf("expected empty drill stack after Esc 5, got depth %d", len(m.topologyDrillStack))
+		t.Fatalf("expected empty drill stack after Esc 3, got depth %d", len(m.topologyDrillStack))
 	}
 
-	// Esc 6: switches to Forest
+	// Esc 4: switches to Forest
 	m = sendKey(m, tea.KeyEsc)
 	if m.viewState.ViewType != data.ForestView {
 		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
@@ -2143,6 +2152,159 @@ func TestCompleteLensCommand(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("completeLensCommand(%q): got %q, want %q", tt.prefix, got, tt.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Topology GPU Column Tests
+// ---------------------------------------------------------------------------
+
+// sampleTopologyViewDataWithGPU creates topology data with GPU capacity/products.
+func sampleTopologyViewDataWithGPU() *data.TopologyViewData {
+	return &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "block", Key: "topology.io/block", ValuesCount: 2},
+			{Domain: "rack", Key: "topology.io/rack", ValuesCount: 4},
+		},
+		NodeLabels: map[string]map[string]string{
+			"node-1": {"topology.io/block": "block-01", "topology.io/rack": "rack-01"},
+			"node-2": {"topology.io/block": "block-01", "topology.io/rack": "rack-02"},
+			"node-3": {"topology.io/block": "block-02", "topology.io/rack": "rack-03"},
+			"node-4": {"topology.io/block": "block-02", "topology.io/rack": "rack-04"},
+		},
+		Pods: []data.TopologyViewPod{
+			{Namespace: "default", Node: "node-1", Name: "pod-a", Topology: "rack: rack-01", Phase: "Running"},
+			{Namespace: "default", Node: "node-2", Name: "pod-b", Topology: "rack: rack-02", Phase: "Running"},
+			{Namespace: "default", Node: "node-3", Name: "pod-c", Topology: "rack: rack-03", Phase: "Running"},
+		},
+		DomainToKey: map[string]string{
+			"block": "topology.io/block",
+			"rack":  "topology.io/rack",
+		},
+		NodeGPUProducts: map[string]string{
+			"node-1": "H200",
+			"node-2": "H200",
+			"node-3": "B200",
+			"node-4": "B200",
+		},
+		NodeGPUCapacity: map[string]int64{
+			"node-1": 8,
+			"node-2": 8,
+			"node-3": 8,
+			"node-4": 8,
+		},
+		RawPods: []data.TopologyPodInput{
+			{Name: "pod-a", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{}},
+			{Name: "pod-b", NodeName: "node-2", GPURequests: 2, Labels: map[string]string{}},
+			{Name: "pod-c", NodeName: "node-3", GPURequests: 8, Labels: map[string]string{}},
+		},
+	}
+}
+
+func newTopologyGPUTestModel() Model {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewDataWithGPU()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
+
+	m := NewModel(mc)
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
+
+	// Toggle to Topology view
+	m = sendRune(m, 't')
+	return m
+}
+
+func TestTopologyView_GPUColumnsAppearWhenDrilledIn(t *testing.T) {
+	m := newTopologyGPUTestModel()
+
+	// At root level, domains table should have 3 columns (DOMAIN, KEY, VALUES)
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 domain rows, got %d", len(rows))
+	}
+	if len(rows[0]) != 3 {
+		t.Fatalf("expected 3 columns at root level (DOMAIN/KEY/VALUES), got %d", len(rows[0]))
+	}
+
+	// Drill into "block"
+	m = sendKey(m, tea.KeyEnter)
+
+	// Should now show block values with GPU columns
+	rows = m.topologyDomainsTable.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 block values (block-01, block-02), got %d", len(rows))
+	}
+
+	// Should have VALUE + B200 + H200 = 3 columns
+	if len(rows[0]) != 3 {
+		t.Fatalf("expected 3 columns (VALUE + B200 + H200), got %d cols: %v", len(rows[0]), rows[0])
+	}
+
+	// block-01 has H200 nodes: node-1 (8 cap, 4 used), node-2 (8 cap, 2 used)
+	// So H200 = 6/16, B200 = 0/0
+	if rows[0][0] != "block-01" {
+		t.Errorf("expected first value 'block-01', got %q", rows[0][0])
+	}
+	// B200 column is first (alphabetical), H200 second
+	if rows[0][1] != "0/0" {
+		t.Errorf("block-01 B200 = %q, want '0/0'", rows[0][1])
+	}
+	if rows[0][2] != "6/16" {
+		t.Errorf("block-01 H200 = %q, want '6/16'", rows[0][2])
+	}
+
+	// block-02 has B200 nodes: node-3 (8 cap, 8 used), node-4 (8 cap, 0 used)
+	if rows[1][0] != "block-02" {
+		t.Errorf("expected second value 'block-02', got %q", rows[1][0])
+	}
+	if rows[1][1] != "8/16" {
+		t.Errorf("block-02 B200 = %q, want '8/16'", rows[1][1])
+	}
+	if rows[1][2] != "0/0" {
+		t.Errorf("block-02 H200 = %q, want '0/0'", rows[1][2])
+	}
+}
+
+func TestTopologyView_GPUColumnsNotShownAtRootLevel(t *testing.T) {
+	m := newTopologyGPUTestModel()
+
+	// At root level, no GPU columns
+	rows := m.topologyDomainsTable.Rows()
+	for _, row := range rows {
+		if len(row) != 3 {
+			t.Errorf("expected 3 columns at root level, got %d: %v", len(row), row)
+		}
+	}
+}
+
+func TestTopologyView_NoGPUNodes_NoExtraColumns(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	// Topology data without GPU info
+	tvd := sampleTopologyViewData()
+	tvd.NodeGPUProducts = map[string]string{}
+	tvd.NodeGPUCapacity = map[string]int64{}
+	tvd.RawPods = []data.TopologyPodInput{}
+	snap.TopologyViewData = tvd
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
+
+	m := NewModel(mc)
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
+	m = sendRune(m, 't')
+
+	// Drill into region
+	m = sendKey(m, tea.KeyEnter)
+
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) > 0 && len(rows[0]) != 1 {
+		t.Errorf("expected 1 column (VALUE only, no GPU types) when no GPU nodes, got %d: %v", len(rows[0]), rows[0])
 	}
 }
 

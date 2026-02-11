@@ -332,6 +332,11 @@ func (m *Model) topologyDrillInto() {
 }
 
 // topologyDrillBack pops the last entry from the drill stack.
+// When the last entry has no value (showing values for a domain), popping it
+// also clears the previous entry's value so the user sees the parent domain's
+// values list in a single Esc press. Without this, the intermediate state
+// (previous entry still has a value) causes currentTopologyDomain to return
+// the same domain again, making Esc appear to do nothing.
 func (m *Model) topologyDrillBack() {
 	if len(m.topologyDrillStack) == 0 {
 		return
@@ -340,7 +345,15 @@ func (m *Model) topologyDrillBack() {
 	lastEntry := m.topologyDrillStack[len(m.topologyDrillStack)-1]
 
 	if lastEntry.Value == "" {
+		// Pop the empty-value entry (we're leaving this domain level)
 		m.topologyDrillStack = m.topologyDrillStack[:len(m.topologyDrillStack)-1]
+		// Also clear the previous entry's value so we go back to its values list.
+		// Without this, currentTopologyDomain would still point to the same domain
+		// we just popped (because the previous entry has a selected value, so the
+		// "next domain" is the one we just left).
+		if len(m.topologyDrillStack) > 0 {
+			m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = ""
+		}
 	} else {
 		m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = ""
 	}

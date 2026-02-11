@@ -80,8 +80,9 @@ type CacheSnapshot struct {
 	NodeGPUProducts map[string]string
 
 	// Raw caches for topology resolution
-	NodeLabels map[string]map[string]string // nodeName -> filtered topology labels
-	PodInfos   map[string]CachedPodInfo    // all PCS-managed pods: podName -> info
+	NodeLabels      map[string]map[string]string // nodeName -> filtered topology labels
+	PodInfos        map[string]CachedPodInfo     // all PCS-managed pods: podName -> info
+	NodeGPUCapacity map[string]int64             // nodeName -> total GPU count from status.allocatable
 }
 
 // PodCliqueSetInfo holds display-ready info about a PodCliqueSet.
