@@ -601,20 +601,47 @@ func (m *Model) rebuildTopologyDomainsTable() {
 			return
 		}
 
-		// Clear rows, set columns, then set rows to avoid column/row mismatch panics.
-		m.topologyDomainsTable.SetRows([]table.Row{})
-		w := tableContentWidth(m.width, len(topologyDrillValueColumnSpecs))
-		m.topologyDomainsTable.SetColumns(computeWeightedColumns(topologyDrillValueColumnSpecs, w))
-
 		// Get matching nodes based on breadcrumb constraints
 		matchingNodes := data.FilterNodesByBreadcrumb(m.topologyViewData.NodeLabels, m.topologyDrillStack)
+
+		// Compute GPU summary for domain values
+		gpuSummary := data.ComputeDomainGPUSummary(
+			currentKey,
+			matchingNodes,
+			m.topologyViewData.NodeLabels,
+			m.topologyViewData.NodeGPUProducts,
+			m.topologyViewData.NodeGPUCapacity,
+			m.topologyViewData.RawPods,
+		)
+
+		// Build dynamic column spec: VALUE + one column per GPU type
+		specs := []ColumnSpec{{Title: "VALUE", Weight: 2}}
+		for _, gpuType := range gpuSummary.GPUTypes {
+			specs = append(specs, ColumnSpec{Title: gpuType, Weight: 1})
+		}
+
+		// Clear rows, set columns, then set rows to avoid column/row mismatch panics.
+		m.topologyDomainsTable.SetRows([]table.Row{})
+		w := tableContentWidth(m.width, len(specs))
+		m.topologyDomainsTable.SetColumns(computeWeightedColumns(specs, w))
 
 		// Get distinct values for the current domain key
 		values := data.DistinctValuesForDomain(m.topologyViewData.NodeLabels, currentKey, matchingNodes)
 
 		rows := make([]table.Row, 0, len(values))
 		for _, v := range values {
-			rows = append(rows, table.Row{v})
+			row := table.Row{v}
+			// Append GPU used/available for each GPU type
+			valueCounts := gpuSummary.ByValue[v]
+			for _, gpuType := range gpuSummary.GPUTypes {
+				if valueCounts != nil {
+					counts := valueCounts[gpuType]
+					row = append(row, data.FormatGPUUsedAvailable(counts.Used, counts.Available))
+				} else {
+					row = append(row, "0/0")
+				}
+			}
+			rows = append(rows, row)
 		}
 		m.topologyDomainsTable.SetRows(rows)
 

@@ -17,6 +17,7 @@
 package data
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -153,4 +154,108 @@ func addGPUCount(m map[string]GPUCounts, key, gpuType string, count int64) {
 		m[key] = make(GPUCounts)
 	}
 	m[key][gpuType] += count
+}
+
+// DomainGPUCounts holds used/available GPU counts for a single GPU type.
+type DomainGPUCounts struct {
+	Used      int64
+	Available int64
+}
+
+// DomainGPUSummary maps domainValue -> gpuType -> DomainGPUCounts.
+type DomainGPUSummary struct {
+	GPUTypes []string                              // sorted GPU types (column headers)
+	ByValue  map[string]map[string]DomainGPUCounts // value -> gpuType -> counts
+}
+
+// ComputeDomainGPUSummary computes GPU used/available for each distinct value
+// of a topology domain key, scoped to the given set of matching nodes.
+func ComputeDomainGPUSummary(
+	domainKey string,
+	matchingNodes []string,
+	nodeLabels map[string]map[string]string,
+	nodeGPUProducts map[string]string,
+	nodeGPUCapacity map[string]int64,
+	pods []TopologyPodInput,
+) *DomainGPUSummary {
+	summary := &DomainGPUSummary{
+		ByValue: make(map[string]map[string]DomainGPUCounts),
+	}
+
+	// Build a set of matching nodes for fast lookup
+	nodeSet := make(map[string]bool, len(matchingNodes))
+	for _, n := range matchingNodes {
+		nodeSet[n] = true
+	}
+
+	// 1. Aggregate "available" from matching nodes: for each node, get its domain value,
+	// GPU type, and GPU capacity.
+	gpuTypeSet := make(map[string]bool)
+	for _, nodeName := range matchingNodes {
+		labels := nodeLabels[nodeName]
+		if labels == nil {
+			continue
+		}
+		domainValue := labels[domainKey]
+		if domainValue == "" {
+			continue
+		}
+		gpuType := nodeGPUProducts[nodeName]
+		if gpuType == "" {
+			continue
+		}
+		gpuTypeSet[gpuType] = true
+		capacity := nodeGPUCapacity[nodeName]
+
+		if summary.ByValue[domainValue] == nil {
+			summary.ByValue[domainValue] = make(map[string]DomainGPUCounts)
+		}
+		counts := summary.ByValue[domainValue][gpuType]
+		counts.Available += capacity
+		summary.ByValue[domainValue][gpuType] = counts
+	}
+
+	// 2. Aggregate "used" from pods on matching nodes.
+	for _, pod := range pods {
+		if pod.GPURequests <= 0 || pod.NodeName == "" {
+			continue
+		}
+		if !nodeSet[pod.NodeName] {
+			continue
+		}
+		labels := nodeLabels[pod.NodeName]
+		if labels == nil {
+			continue
+		}
+		domainValue := labels[domainKey]
+		if domainValue == "" {
+			continue
+		}
+		gpuType := nodeGPUProducts[pod.NodeName]
+		if gpuType == "" {
+			continue
+		}
+
+		if summary.ByValue[domainValue] == nil {
+			summary.ByValue[domainValue] = make(map[string]DomainGPUCounts)
+		}
+		counts := summary.ByValue[domainValue][gpuType]
+		counts.Used += pod.GPURequests
+		summary.ByValue[domainValue][gpuType] = counts
+	}
+
+	// 3. Build sorted GPU types from matching nodes.
+	gpuTypes := make([]string, 0, len(gpuTypeSet))
+	for t := range gpuTypeSet {
+		gpuTypes = append(gpuTypes, t)
+	}
+	sort.Strings(gpuTypes)
+	summary.GPUTypes = gpuTypes
+
+	return summary
+}
+
+// FormatGPUUsedAvailable formats a used/available GPU count as "used/available".
+func FormatGPUUsedAvailable(used, available int64) string {
+	return fmt.Sprintf("%d/%d", used, available)
 }

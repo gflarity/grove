@@ -436,6 +436,7 @@ func BuildTopologyViewData(
 		NodeLabels:  nodeLabels,
 		Pods:        viewPods,
 		DomainToKey: domainToKey,
+		RawPods:     pods,
 	}
 }
 

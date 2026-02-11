@@ -200,6 +200,189 @@ func TestBuildGPUSummary_NoGPUNodes(t *testing.T) {
 	}
 }
 
+func TestFormatGPUUsedAvailable(t *testing.T) {
+	tests := []struct {
+		used      int64
+		available int64
+		want      string
+	}{
+		{0, 0, "0/0"},
+		{16, 32, "16/32"},
+		{32, 32, "32/32"},
+		{0, 8, "0/8"},
+	}
+	for _, tt := range tests {
+		got := FormatGPUUsedAvailable(tt.used, tt.available)
+		if got != tt.want {
+			t.Errorf("FormatGPUUsedAvailable(%d, %d) = %q, want %q", tt.used, tt.available, got, tt.want)
+		}
+	}
+}
+
+func TestComputeDomainGPUSummary_SingleGPUType(t *testing.T) {
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.io/block": "block-01"},
+		"node-2": {"topology.io/block": "block-01"},
+		"node-3": {"topology.io/block": "block-02"},
+	}
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "H200",
+		"node-3": "H200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+		"node-3": 8,
+	}
+	pods := []TopologyPodInput{
+		{Name: "pod-a", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{}},
+		{Name: "pod-b", NodeName: "node-2", GPURequests: 2, Labels: map[string]string{}},
+		{Name: "pod-c", NodeName: "node-3", GPURequests: 8, Labels: map[string]string{}},
+	}
+	matchingNodes := []string{"node-1", "node-2", "node-3"}
+
+	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+
+	if len(summary.GPUTypes) != 1 || summary.GPUTypes[0] != "H200" {
+		t.Fatalf("GPUTypes = %v, want [H200]", summary.GPUTypes)
+	}
+
+	// block-01: 2 nodes with 8 GPUs each = 16 available, pods use 4+2=6
+	b01 := summary.ByValue["block-01"]["H200"]
+	if b01.Available != 16 {
+		t.Errorf("block-01 H200 Available = %d, want 16", b01.Available)
+	}
+	if b01.Used != 6 {
+		t.Errorf("block-01 H200 Used = %d, want 6", b01.Used)
+	}
+
+	// block-02: 1 node with 8 GPUs, pod uses 8
+	b02 := summary.ByValue["block-02"]["H200"]
+	if b02.Available != 8 {
+		t.Errorf("block-02 H200 Available = %d, want 8", b02.Available)
+	}
+	if b02.Used != 8 {
+		t.Errorf("block-02 H200 Used = %d, want 8", b02.Used)
+	}
+}
+
+func TestComputeDomainGPUSummary_MixedGPUTypes(t *testing.T) {
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.io/block": "block-01"},
+		"node-2": {"topology.io/block": "block-02"},
+	}
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "B200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+	}
+	pods := []TopologyPodInput{
+		{Name: "pod-a", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{}},
+		{Name: "pod-b", NodeName: "node-2", GPURequests: 2, Labels: map[string]string{}},
+	}
+	matchingNodes := []string{"node-1", "node-2"}
+
+	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+
+	if len(summary.GPUTypes) != 2 || summary.GPUTypes[0] != "B200" || summary.GPUTypes[1] != "H200" {
+		t.Fatalf("GPUTypes = %v, want [B200 H200]", summary.GPUTypes)
+	}
+
+	// block-01 has H200 only
+	b01H200 := summary.ByValue["block-01"]["H200"]
+	if b01H200.Available != 8 || b01H200.Used != 4 {
+		t.Errorf("block-01 H200 = %d/%d, want 4/8", b01H200.Used, b01H200.Available)
+	}
+	// block-01 should have no B200
+	b01B200 := summary.ByValue["block-01"]["B200"]
+	if b01B200.Available != 0 || b01B200.Used != 0 {
+		t.Errorf("block-01 B200 = %d/%d, want 0/0", b01B200.Used, b01B200.Available)
+	}
+
+	// block-02 has B200 only
+	b02B200 := summary.ByValue["block-02"]["B200"]
+	if b02B200.Available != 8 || b02B200.Used != 2 {
+		t.Errorf("block-02 B200 = %d/%d, want 2/8", b02B200.Used, b02B200.Available)
+	}
+}
+
+func TestComputeDomainGPUSummary_NoGPUNodes(t *testing.T) {
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.io/block": "block-01"},
+	}
+	nodeGPUProducts := map[string]string{}
+	nodeGPUCapacity := map[string]int64{}
+	pods := []TopologyPodInput{
+		{Name: "pod-a", NodeName: "node-1", GPURequests: 2, Labels: map[string]string{}},
+	}
+	matchingNodes := []string{"node-1"}
+
+	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+
+	if len(summary.GPUTypes) != 0 {
+		t.Errorf("expected no GPU types, got %v", summary.GPUTypes)
+	}
+	if len(summary.ByValue) != 0 {
+		t.Errorf("expected empty ByValue, got %v", summary.ByValue)
+	}
+}
+
+func TestComputeDomainGPUSummary_PendingPods(t *testing.T) {
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.io/block": "block-01"},
+	}
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+	}
+	pods := []TopologyPodInput{
+		{Name: "pending-pod", NodeName: "", GPURequests: 4, Labels: map[string]string{}}, // pending
+		{Name: "running-pod", NodeName: "node-1", GPURequests: 2, Labels: map[string]string{}},
+	}
+	matchingNodes := []string{"node-1"}
+
+	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+
+	b01 := summary.ByValue["block-01"]["H200"]
+	// Only running-pod should be counted (pending has no node)
+	if b01.Used != 2 {
+		t.Errorf("block-01 H200 Used = %d, want 2 (pending pod excluded)", b01.Used)
+	}
+	if b01.Available != 8 {
+		t.Errorf("block-01 H200 Available = %d, want 8", b01.Available)
+	}
+}
+
+func TestComputeDomainGPUSummary_EmptyNodes(t *testing.T) {
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.io/block": "block-01"},
+	}
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+	}
+	pods := []TopologyPodInput{} // no pods
+	matchingNodes := []string{"node-1"}
+
+	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+
+	b01 := summary.ByValue["block-01"]["H200"]
+	if b01.Used != 0 {
+		t.Errorf("block-01 H200 Used = %d, want 0", b01.Used)
+	}
+	if b01.Available != 8 {
+		t.Errorf("block-01 H200 Available = %d, want 8", b01.Available)
+	}
+}
+
 func TestBuildGPUSummary_PCSGAggregation(t *testing.T) {
 	nodeGPUProduct := map[string]string{
 		"node-1": "H200",
