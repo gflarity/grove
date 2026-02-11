@@ -110,6 +110,10 @@ type Model struct {
 	filterActive bool
 	filterText   string
 
+	// Command mode (vim-style ":" lens switching)
+	commandActive bool
+	commandInput  textinput.Model
+
 	// Data
 	allResources       map[string][]data.Resource
 	allEvents          []data.Event
@@ -218,6 +222,14 @@ func NewModel(provider data.DataProvider, opts ...Option) Model {
 	ti.Prompt = "/ "
 	ti.PromptStyle = FilterBarStyle
 
+	// Initialize command input (vim-style ":" prompt)
+	ci := textinput.New()
+	ci.Placeholder = ""
+	ci.CharLimit = 256
+	ci.Width = 40
+	ci.Prompt = ": "
+	ci.PromptStyle = CommandBarStyle
+
 	m := Model{
 		viewState: data.ViewState{
 			ViewType: data.ForestView,
@@ -228,6 +240,7 @@ func NewModel(provider data.DataProvider, opts ...Option) Model {
 		provider:     provider,
 		ctx:          context.Background(),
 		filterInput:  ti,
+		commandInput: ci,
 	}
 
 	// Apply options

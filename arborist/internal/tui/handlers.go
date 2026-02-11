@@ -118,7 +118,14 @@ func (m Model) handleReplicaData(msg ReplicaDataMsg) (tea.Model, tea.Cmd) {
 	m.allResources[key] = resources
 	m.rebuildResourcesTable()
 
-	return m, loadEventsForPCSCmd(m.provider, m.ctx, msg.PCSName, msg.Namespace)
+	// Load events scoped to the first replica (where the cursor starts).
+	// When navigateBack also loads events for a specific replica, both commands
+	// will race; the last EventsMsg to arrive wins, which is acceptable since
+	// the user can always press up/down to re-scope.
+	if len(msg.ReplicaIndexes) > 0 {
+		return m, loadEventsForReplicaCmd(m.provider, m.ctx, msg.PCSName, msg.Namespace, msg.ReplicaIndexes[0])
+	}
+	return m, nil
 }
 
 // handleReplicaChildren handles ReplicaChildrenMsg.
@@ -167,7 +174,85 @@ func (m Model) handleReplicaChildren(msg ReplicaChildrenMsg) (tea.Model, tea.Cmd
 	return m, nil
 }
 
+// handlePCSGReplicaData handles PCSGReplicaDataMsg (mirrors handleReplicaData for PCS replicas).
+func (m Model) handlePCSGReplicaData(msg PCSGReplicaDataMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		debugLogWithContext("ERROR loading PCSG replica data: %v", msg.Err)
+		m.lastError = msg.Err
+		return m, nil
+	}
+
+	debugLogWithContext("loaded %d PCSG replica indexes for %s/%s", len(msg.ReplicaIndexes), msg.Namespace, msg.PCSGName)
+
+	// If there's only 1 replica, skip directly to PodCliqueScalingGroupReplicaView
+	if len(msg.ReplicaIndexes) == 1 {
+		replicaIndex := msg.ReplicaIndexes[0]
+		oldViewType := m.viewState.ViewType
+		m.viewState.ViewType = data.PodCliqueScalingGroupReplicaView
+		m.viewState.SelectedPCSGReplicaIndex = replicaIndex
+
+		debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupReplicaView, fmt.Sprintf("single PCSG replica skip, replica=%q", replicaIndex))
+
+		// Build virtual replica resources for tracking (needed for back navigation)
+		key := "PodCliqueScalingGroup/" + msg.PCSGName
+		m.allResources[key] = []data.Resource{{
+			Name:      msg.PCSGName + "-replica-" + replicaIndex,
+			Type:      "PodCliqueScalingGroupReplica",
+			Namespace: msg.Namespace,
+		}}
+
+		// Load children for this single replica and events scoped to it
+		return m, tea.Batch(
+			loadPCSGReplicaChildrenCmd(m.provider, m.ctx, msg.PCSGName, msg.Namespace, replicaIndex),
+			loadEventsForPCSGReplicaCmd(m.provider, m.ctx, msg.PCSGName, msg.Namespace, replicaIndex),
+		)
+	}
+
+	// Multiple replicas, show PodCliqueScalingGroupView with replica list
+	m.viewState.ViewType = data.PodCliqueScalingGroupView
+
+	// Build virtual PodCliqueScalingGroupReplica resources
+	key := "PodCliqueScalingGroup/" + msg.PCSGName
+	resources := make([]data.Resource, 0, len(msg.ReplicaIndexes))
+
+	for _, replicaIndex := range msg.ReplicaIndexes {
+		// Calculate aggregate ready/scheduled counts from PodCliques in this replica
+		var totalReady, totalScheduled, totalReplicas int
+
+		for _, pc := range msg.PodCliquesByReplica[replicaIndex] {
+			var ready, replicas int
+			fmt.Sscanf(pc.Ready, "%d/%d", &ready, &replicas)
+			totalReady += ready
+			totalReplicas += replicas
+
+			var scheduled, scheduledMax int
+			fmt.Sscanf(pc.Scheduled, "%d/%d", &scheduled, &scheduledMax)
+			totalScheduled += scheduled
+		}
+
+		resources = append(resources, data.Resource{
+			Name:       fmt.Sprintf("%s-replica-%s", msg.PCSGName, replicaIndex),
+			Type:       "PodCliqueScalingGroupReplica",
+			Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
+			Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
+			Namespace:  msg.Namespace,
+			ParentType: "PodCliqueScalingGroup",
+			ParentName: msg.PCSGName,
+		})
+	}
+
+	m.allResources[key] = resources
+	m.rebuildResourcesTable()
+
+	// Load events scoped to the first PCSG replica (where the cursor starts).
+	if len(msg.ReplicaIndexes) > 0 {
+		return m, loadEventsForPCSGReplicaCmd(m.provider, m.ctx, msg.PCSGName, msg.Namespace, msg.ReplicaIndexes[0])
+	}
+	return m, nil
+}
+
 // handlePCSGChildren handles PCSGChildrenMsg.
+// This is used both for the legacy flat PCSG children view and for PCSG replica children.
 func (m Model) handlePCSGChildren(msg PCSGChildrenMsg) (tea.Model, tea.Cmd) {
 	if msg.Err != nil {
 		debugLogWithContext("ERROR loading PCSG children: %v", msg.Err)
@@ -175,8 +260,14 @@ func (m Model) handlePCSGChildren(msg PCSGChildrenMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	key := "PodCliqueScalingGroup/" + msg.PCSGName
-	debugLogWithContext("loaded %d pod cliques for PCSG %s", len(msg.PodCliques), msg.PCSGName)
+	// Determine the storage key based on current view
+	var key string
+	if m.viewState.ViewType == data.PodCliqueScalingGroupReplicaView && m.viewState.SelectedPCSGReplicaIndex != "" {
+		key = "PodCliqueScalingGroupReplica/" + msg.PCSGName + "/" + m.viewState.SelectedPCSGReplicaIndex
+	} else {
+		key = "PodCliqueScalingGroup/" + msg.PCSGName
+	}
+	debugLogWithContext("loaded %d pod cliques for PCSG %s (key=%s)", len(msg.PodCliques), msg.PCSGName, key)
 
 	// Set topology on PodCliques within this PCSG
 	pcsgConfigName := data.ExtractConfigName(msg.PCSGName, m.viewState.SelectedPodCliqueSet, m.viewState.SelectedReplicaIndex)

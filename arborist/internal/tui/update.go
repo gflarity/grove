@@ -29,6 +29,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ReplicaChildrenMsg:
 		return m.handleReplicaChildren(msg)
 
+	case PCSGReplicaDataMsg:
+		return m.handlePCSGReplicaData(msg)
+
 	case PCSGChildrenMsg:
 		return m.handlePCSGChildren(msg)
 
@@ -87,6 +90,9 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	if m.filterActive {
 		fixedLines += 3 // filter frame: top border + content + bottom border
 	}
+	if m.commandActive {
+		fixedLines += 3 // command frame: top border + content + bottom border
+	}
 	availableHeight := m.height - fixedLines
 	paneHeight := availableHeight / 2
 	if paneHeight < 3 {
@@ -107,6 +113,8 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 	// Update filter input width (frame content width minus tree emoji)
 	m.filterInput.Width = m.width - 6
+	// Update command input width (frame content width minus prompt)
+	m.commandInput.Width = m.width - 6
 
 	// Rebuild tables
 	m.rebuildResourcesTable()
@@ -130,6 +138,11 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		debugLogWithContext("quitting (ctrl+c)")
 		return m, tea.Quit
+	}
+
+	// Command mode has different key handling
+	if m.commandActive {
+		return m.handleCommandModeKey(msg)
 	}
 
 	// Filter mode has different key handling
@@ -257,10 +270,53 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filterInput.Focus()
 			debugLogWithContext("filter mode activated")
 			return m, textinput.Blink
+		case ":":
+			m.commandActive = true
+			m.commandInput.SetValue("")
+			m.commandInput.Focus()
+			debugLogWithContext("command mode activated")
+			return m, textinput.Blink
 		}
 	}
 
 	return m, nil
+}
+
+// handleCommandModeKey handles keys when command mode is active.
+func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		// Exit command mode without executing
+		m.commandActive = false
+		m.commandInput.SetValue("")
+		debugLogWithContext("command mode deactivated (cancelled)")
+		return m, nil
+
+	case tea.KeyEnter:
+		// Execute the command and exit command mode
+		input := m.commandInput.Value()
+		m.commandActive = false
+		m.commandInput.SetValue("")
+		debugLogWithContext("command mode executing: %q", input)
+		return m.executeCommand(input)
+
+	case tea.KeyTab:
+		// Tab-complete the current input
+		current := m.commandInput.Value()
+		completed := completeLensCommand(current)
+		if completed != current {
+			m.commandInput.SetValue(completed)
+			m.commandInput.CursorEnd()
+			debugLogWithContext("command mode tab-complete: %q -> %q", current, completed)
+		}
+		return m, nil
+
+	default:
+		// Pass other keys to the command input
+		var cmd tea.Cmd
+		m.commandInput, cmd = m.commandInput.Update(msg)
+		return m, cmd
+	}
 }
 
 // toggleTopologyView switches between Forest and Topology views.

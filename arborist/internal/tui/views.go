@@ -24,6 +24,11 @@ func (m Model) View() string {
 		sections = append(sections, m.renderFilterFrame())
 	}
 
+	// Command bar (if active) - standalone framed box between header and resources
+	if m.commandActive {
+		sections = append(sections, m.renderCommandFrame())
+	}
+
 	// Calculate available height for the main viewport.
 	// Must match handleWindowSize — see that function for the full breakdown.
 	// Fixed: 6(header) + 2*(2 border + 1 table header) = 12
@@ -31,6 +36,9 @@ func (m Model) View() string {
 	fixedLines := 12
 	if m.filterActive {
 		fixedLines += 3 // filter frame: top border + content + bottom border
+	}
+	if m.commandActive {
+		fixedLines += 3 // command frame: top border + content + bottom border
 	}
 	availableHeight := m.height - fixedLines
 	resourcesHeight := availableHeight / 2
@@ -70,6 +78,8 @@ func (m Model) viewDisplayName() string {
 		return "PodCliqueSetReplica"
 	case data.PodCliqueScalingGroupView:
 		return "PodCliqueScalingGroup"
+	case data.PodCliqueScalingGroupReplicaView:
+		return "PodCliqueScalingGroupReplica"
 	case data.PodCliqueView:
 		return "PodClique"
 	case data.PodView:
@@ -109,6 +119,7 @@ func (m Model) renderHeaderFrame() string {
 	}
 
 	items := []menuItem{
+		{":", "Cmd"},
 		{"/", "Filter"},
 		{"tab", "Switch"},
 	}
@@ -206,6 +217,34 @@ func (m Model) renderFilterFrame() string {
 	// Content: tree emoji + filter input.
 	// Clamp to contentWidth so the right border is never pushed off-screen.
 	content := "🌲" + m.filterInput.View()
+	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
+
+	lineWidth := lipgloss.Width(content)
+	pad := contentWidth - lineWidth
+	if pad < 0 {
+		pad = 0
+	}
+
+	topLine := bc.Render(border.TopLeft + strings.Repeat(border.Top, contentWidth) + border.TopRight)
+	contentLine := bc.Render(border.Left) + content + strings.Repeat(" ", pad) + bc.Render(border.Right)
+	bottomLine := bc.Render(border.BottomLeft + strings.Repeat(border.Bottom, contentWidth) + border.BottomRight)
+
+	return topLine + "\n" + contentLine + "\n" + bottomLine
+}
+
+// renderCommandFrame renders the command input as a standalone framed box,
+// vim-style. Uses a normal border and a ":" prefix.
+//
+//	┌──────────────────────────────────────────┐
+//	│ :topology                                │
+//	└──────────────────────────────────────────┘
+func (m Model) renderCommandFrame() string {
+	border := lipgloss.NormalBorder()
+	bc := lipgloss.NewStyle().Foreground(ColorBorderFocused)
+	contentWidth := m.width - 2 // inside left + right border chars
+
+	// Content: command input with ":" prompt (handled by textinput itself).
+	content := m.commandInput.View()
 	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
 
 	lineWidth := lipgloss.Width(content)
@@ -525,11 +564,20 @@ func (m Model) renderBreadcrumb() string {
 			pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
 			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex) + sep +
 			pcsgStyle.Render(m.viewState.SelectedScalingGroup)
+	case data.PodCliqueScalingGroupReplicaView:
+		return forestStyle.Render("Forest") + sep +
+			pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
+			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex) + sep +
+			pcsgStyle.Render(m.viewState.SelectedScalingGroup) + sep +
+			pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
 	case data.PodCliqueView:
 		parent := pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
 			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex)
 		if m.viewState.SelectedScalingGroup != "" {
 			parent += sep + pcsgStyle.Render(m.viewState.SelectedScalingGroup)
+			if m.viewState.SelectedPCSGReplicaIndex != "" {
+				parent += sep + pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
+			}
 		}
 		return forestStyle.Render("Forest") + sep + parent + sep + pcStyle.Render(m.viewState.SelectedPodClique)
 	case data.PodView:
@@ -537,6 +585,9 @@ func (m Model) renderBreadcrumb() string {
 			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex)
 		if m.viewState.SelectedScalingGroup != "" {
 			parent += sep + pcsgStyle.Render(m.viewState.SelectedScalingGroup)
+			if m.viewState.SelectedPCSGReplicaIndex != "" {
+				parent += sep + pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
+			}
 		}
 		return forestStyle.Render("Forest") + sep + parent + sep +
 			pcStyle.Render(m.viewState.SelectedPodClique) + sep +
@@ -553,6 +604,7 @@ func (m Model) renderMenuBar() string {
 	}
 
 	items := []menuItem{
+		{":", "Cmd"},
 		{"/", "Filter"},
 		{"tab", "Switch"},
 	}
@@ -591,6 +643,7 @@ func (m Model) renderStatusBar() string {
 func (m Model) buildShortcutsString() string {
 	var parts []string
 
+	parts = append(parts, "<:>Cmd")
 	parts = append(parts, "</>Filter")
 	parts = append(parts, "<tab>Switch")
 

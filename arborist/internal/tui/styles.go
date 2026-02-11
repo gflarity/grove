@@ -208,6 +208,13 @@ var FilterBarStyle = lipgloss.NewStyle().
 	Foreground(ColorFilter)
 
 // =============================================================================
+// Command Bar Style (vim-style ":" command mode)
+// =============================================================================
+
+var CommandBarStyle = lipgloss.NewStyle().
+	Foreground(ColorAqua)
+
+// =============================================================================
 // Topology Display Styles
 // =============================================================================
 

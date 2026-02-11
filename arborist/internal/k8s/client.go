@@ -613,6 +613,88 @@ func (k *K8sClient) GetPodCliquesForPodCliqueScalingGroup(ctx context.Context, p
 	return resources, nil
 }
 
+// GetReplicaIndexesForPodCliqueScalingGroup discovers unique PCSG replica indexes
+// by examining grove.io/podcliquescalinggroup-replica-index labels on child PodCliques.
+func (k *K8sClient) GetReplicaIndexesForPodCliqueScalingGroup(ctx context.Context, pcsgName, namespace string) ([]string, error) {
+	labelSelector := fmt.Sprintf("grove.io/podcliquescalinggroup=%s", pcsgName)
+
+	gvr := schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "podcliques",
+	}
+
+	unstructuredList, err := k.dynamicClient.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list PodCliques for PCSG replica indexes: %w", err)
+	}
+
+	replicaIndexes := make(map[string]bool)
+	for _, item := range unstructuredList.Items {
+		labels := item.GetLabels()
+		if replicaIndex, ok := labels["grove.io/podcliquescalinggroup-replica-index"]; ok {
+			replicaIndexes[replicaIndex] = true
+		}
+	}
+
+	result := make([]string, 0, len(replicaIndexes))
+	for index := range replicaIndexes {
+		result = append(result, index)
+	}
+	sort.Strings(result)
+
+	return result, nil
+}
+
+// GetPodCliquesForPodCliqueScalingGroupReplica fetches PodCliques belonging to a specific replica of a PCSG.
+func (k *K8sClient) GetPodCliquesForPodCliqueScalingGroupReplica(ctx context.Context, pcsgName, namespace, replicaIndex string) ([]data.Resource, error) {
+	labelSelector := fmt.Sprintf("grove.io/podcliquescalinggroup=%s,grove.io/podcliquescalinggroup-replica-index=%s", pcsgName, replicaIndex)
+
+	gvr := schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "podcliques",
+	}
+
+	unstructuredList, err := k.dynamicClient.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list PodCliques for PCSG replica: %w", err)
+	}
+
+	var resources []data.Resource
+	for _, item := range unstructuredList.Items {
+		var pc corev1alpha1.PodClique
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &pc)
+		if err != nil {
+			continue
+		}
+
+		replicas := pc.Spec.Replicas
+		readyReplicas := pc.Status.ReadyReplicas
+		scheduledReplicas := pc.Status.ScheduledReplicas
+
+		ready := fmt.Sprintf("%d/%d", readyReplicas, replicas)
+		scheduled := fmt.Sprintf("%d/%d", scheduledReplicas, replicas)
+
+		resources = append(resources, data.Resource{
+			Name:       pc.Name,
+			Type:       "PodClique",
+			Ready:      ready,
+			Scheduled:  scheduled,
+			Status:     "",
+			Namespace:  pc.Namespace,
+			ParentType: "PodCliqueScalingGroupReplica",
+			ParentName: fmt.Sprintf("%s-replica-%s", pcsgName, replicaIndex),
+		})
+	}
+
+	return resources, nil
+}
+
 // GetEventsForPodCliqueScalingGroup fetches events for resources related to a PodCliqueScalingGroup
 func (k *K8sClient) GetEventsForPodCliqueScalingGroup(ctx context.Context, pcsgName, namespace string) ([]data.Event, error) {
 	// Get PodCliques with the label grove.io/podcliquescalinggroup=<pcsgName>
@@ -626,6 +708,69 @@ func (k *K8sClient) GetEventsForPodCliqueScalingGroup(ctx context.Context, pcsgN
 
 	// Add the PodCliqueScalingGroup itself
 	resourceNamesByKind["PodCliqueScalingGroup"][pcsgName] = true
+
+	// Query PodCliques
+	pcGVR := schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "podcliques",
+	}
+	pcList, err := k.dynamicClient.Resource(pcGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err == nil {
+		for _, item := range pcList.Items {
+			resourceNamesByKind["PodClique"][item.GetName()] = true
+		}
+	}
+
+	// Query Pods with the same label
+	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err == nil {
+		for _, pod := range pods.Items {
+			resourceNamesByKind["Pod"][pod.Name] = true
+		}
+	}
+
+	// Fetch all events in the namespace
+	events, err := k.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list events: %w", err)
+	}
+
+	// Filter events that are related to the resources we found
+	var filteredEvents []data.Event
+	for _, event := range events.Items {
+		kind := event.InvolvedObject.Kind
+		name := event.InvolvedObject.Name
+
+		// Check if this event belongs to one of our resources
+		if namesMap, ok := resourceNamesByKind[kind]; ok {
+			if namesMap[name] {
+				filteredEvents = append(filteredEvents, convertK8sEventToEvent(event))
+			}
+		}
+	}
+
+	// Sort events by timestamp (newest first)
+	sort.Slice(filteredEvents, func(i, j int) bool {
+		return filteredEvents[i].Timestamp.After(filteredEvents[j].Timestamp)
+	})
+
+	return filteredEvents, nil
+}
+
+// GetEventsForPodCliqueScalingGroupReplica fetches events for resources related to a specific replica of a PodCliqueScalingGroup
+func (k *K8sClient) GetEventsForPodCliqueScalingGroupReplica(ctx context.Context, pcsgName, namespace, replicaIndex string) ([]data.Event, error) {
+	// Get PodCliques with the labels grove.io/podcliquescalinggroup=<pcsgName> and grove.io/podcliquescalinggroup-replica-index=<replicaIndex>
+	labelSelector := fmt.Sprintf("grove.io/podcliquescalinggroup=%s,grove.io/podcliquescalinggroup-replica-index=%s", pcsgName, replicaIndex)
+
+	// Collect all resource names by kind
+	resourceNamesByKind := make(map[string]map[string]bool)
+	resourceNamesByKind["PodClique"] = make(map[string]bool)
+	resourceNamesByKind["Pod"] = make(map[string]bool)
 
 	// Query PodCliques
 	pcGVR := schema.GroupVersionResource{

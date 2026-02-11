@@ -41,6 +41,10 @@ type MockProvider struct {
 	ReplicaPodCliques map[string][]Resource
 	// PCSGPodCliques maps "namespace/pcsgName" to PodClique resources within a PCSG.
 	PCSGPodCliques map[string][]Resource
+	// PCSGReplicaIndexes maps "namespace/pcsgName" to PCSG replica index list.
+	PCSGReplicaIndexes map[string][]string
+	// PCSGReplicaPodCliques maps "namespace/pcsgName/replicaIndex" to PodClique resources within a PCSG replica.
+	PCSGReplicaPodCliques map[string][]Resource
 	// PodCliquePods maps "namespace/podCliqueName" to Pod resources.
 	PodCliquePods map[string][]Resource
 	// PodYAMLs maps "namespace/podName" to YAML strings.
@@ -66,17 +70,19 @@ type MockProvider struct {
 // NewMockProvider creates a MockProvider with all maps initialized.
 func NewMockProvider() *MockProvider {
 	return &MockProvider{
-		PodCliqueSetSpecs: make(map[string]*corev1alpha1.PodCliqueSet),
-		ReplicaIndexes:    make(map[string][]string),
-		ScalingGroups:     make(map[string][]Resource),
-		ReplicaPodCliques: make(map[string][]Resource),
-		PCSGPodCliques:    make(map[string][]Resource),
-		PodCliquePods:     make(map[string][]Resource),
-		PodYAMLs:          make(map[string]string),
-		Events:            make(map[string][]Event),
-		PodInfos:          make(map[string]map[string]CachedPodInfo),
-		NodeLabels:        make(map[string]map[string]string),
-		Errors:            make(map[string]error),
+		PodCliqueSetSpecs:     make(map[string]*corev1alpha1.PodCliqueSet),
+		ReplicaIndexes:        make(map[string][]string),
+		ScalingGroups:         make(map[string][]Resource),
+		ReplicaPodCliques:     make(map[string][]Resource),
+		PCSGPodCliques:        make(map[string][]Resource),
+		PCSGReplicaIndexes:    make(map[string][]string),
+		PCSGReplicaPodCliques: make(map[string][]Resource),
+		PodCliquePods:         make(map[string][]Resource),
+		PodYAMLs:              make(map[string]string),
+		Events:                make(map[string][]Event),
+		PodInfos:              make(map[string]map[string]CachedPodInfo),
+		NodeLabels:            make(map[string]map[string]string),
+		Errors:                make(map[string]error),
 	}
 }
 
@@ -143,6 +149,24 @@ func (m *MockProvider) GetPodCliquesForPodCliqueScalingGroup(_ context.Context, 
 	return m.PCSGPodCliques[key], nil
 }
 
+func (m *MockProvider) GetReplicaIndexesForPodCliqueScalingGroup(_ context.Context, pcsgName, namespace string) ([]string, error) {
+	m.maybeDelay()
+	if err, ok := m.Errors["GetReplicaIndexesForPodCliqueScalingGroup"]; ok {
+		return nil, err
+	}
+	key := namespace + "/" + pcsgName
+	return m.PCSGReplicaIndexes[key], nil
+}
+
+func (m *MockProvider) GetPodCliquesForPodCliqueScalingGroupReplica(_ context.Context, pcsgName, namespace, replicaIndex string) ([]Resource, error) {
+	m.maybeDelay()
+	if err, ok := m.Errors["GetPodCliquesForPodCliqueScalingGroupReplica"]; ok {
+		return nil, err
+	}
+	key := namespace + "/" + pcsgName + "/" + replicaIndex
+	return m.PCSGReplicaPodCliques[key], nil
+}
+
 func (m *MockProvider) GetPodsForPodClique(_ context.Context, podCliqueName, namespace string) ([]Resource, error) {
 	m.maybeDelay()
 	if err, ok := m.Errors["GetPodsForPodClique"]; ok {
@@ -189,6 +213,15 @@ func (m *MockProvider) GetEventsForPodCliqueScalingGroup(_ context.Context, pcsg
 		return nil, err
 	}
 	key := "pcsg/" + namespace + "/" + pcsgName
+	return m.Events[key], nil
+}
+
+func (m *MockProvider) GetEventsForPodCliqueScalingGroupReplica(_ context.Context, pcsgName, namespace, replicaIndex string) ([]Event, error) {
+	m.maybeDelay()
+	if err, ok := m.Errors["GetEventsForPodCliqueScalingGroupReplica"]; ok {
+		return nil, err
+	}
+	key := "pcsg-replica/" + namespace + "/" + pcsgName + "/" + replicaIndex
 	return m.Events[key], nil
 }
 
