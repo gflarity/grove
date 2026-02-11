@@ -241,6 +241,22 @@ func buildFullMockCache() *data.MockGlobalCache {
 	return mc
 }
 
+// buildMockCacheWithEvents creates a MockGlobalCache identical to buildFullMockCache
+// but with the provided events map merged into EventsByObject. This makes it easy to
+// test event-related behavior without duplicating all the hierarchy setup.
+func buildMockCacheWithEvents(events map[string][]data.Event) *data.MockGlobalCache {
+	mc := buildFullMockCache()
+	snap := mc.Snapshot()
+	if snap.EventsByObject == nil {
+		snap.EventsByObject = make(map[string][]data.Event)
+	}
+	for k, v := range events {
+		snap.EventsByObject[k] = v
+	}
+	mc.SetSnapshot(snap)
+	return mc
+}
+
 // ---------------------------------------------------------------------------
 // 6.1 Test: Test infrastructure itself
 // ---------------------------------------------------------------------------

@@ -1311,3 +1311,278 @@ func TestResolveCliqueTemplateName(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ResolveTopologyValueByReplicaIndex
+// ---------------------------------------------------------------------------
+
+func TestResolveTopologyValueByReplicaIndex(t *testing.T) {
+	topoInfo := &TopologyInfo{
+		DomainToKey: map[string]string{
+			"zone": "topology.kubernetes.io/zone",
+			"rack": "topology.io/rack",
+		},
+	}
+
+	cachedPods := map[string]CachedPodInfo{
+		"pod-a-0": {
+			NodeName: "node-1",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":           "my-pcs",
+				"grove.io/podcliqueset-replica-index": "0",
+			},
+		},
+		"pod-a-1": {
+			NodeName: "node-2",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":           "my-pcs",
+				"grove.io/podcliqueset-replica-index": "1",
+			},
+		},
+		"pod-b-0": {
+			NodeName: "node-1",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":           "other-pcs",
+				"grove.io/podcliqueset-replica-index": "0",
+			},
+		},
+		"pod-unscheduled": {
+			NodeName: "", // not yet scheduled
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":           "my-pcs",
+				"grove.io/podcliqueset-replica-index": "0",
+			},
+		},
+	}
+
+	cachedNodeLabels := map[string]map[string]string{
+		"node-1": {
+			"topology.kubernetes.io/zone": "us-east-1a",
+			"topology.io/rack":            "rack-0",
+		},
+		"node-2": {
+			"topology.kubernetes.io/zone": "us-east-1b",
+			"topology.io/rack":            "rack-1",
+		},
+	}
+
+	t.Run("single pod in replica", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("zone", "my-pcs", "0", topoInfo, cachedPods, cachedNodeLabels)
+		if got != "us-east-1a" {
+			t.Errorf("got %q, want %q", got, "us-east-1a")
+		}
+	})
+
+	t.Run("different replica", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("zone", "my-pcs", "1", topoInfo, cachedPods, cachedNodeLabels)
+		if got != "us-east-1b" {
+			t.Errorf("got %q, want %q", got, "us-east-1b")
+		}
+	})
+
+	t.Run("rack domain", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("rack", "my-pcs", "0", topoInfo, cachedPods, cachedNodeLabels)
+		if got != "rack-0" {
+			t.Errorf("got %q, want %q", got, "rack-0")
+		}
+	})
+
+	t.Run("nonexistent PCS", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("zone", "nonexistent", "0", topoInfo, cachedPods, cachedNodeLabels)
+		if got != "" {
+			t.Errorf("got %q, want empty string", got)
+		}
+	})
+
+	t.Run("nonexistent replica index", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("zone", "my-pcs", "99", topoInfo, cachedPods, cachedNodeLabels)
+		if got != "" {
+			t.Errorf("got %q, want empty string", got)
+		}
+	})
+
+	t.Run("unknown domain", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("block", "my-pcs", "0", topoInfo, cachedPods, cachedNodeLabels)
+		if got != "" {
+			t.Errorf("got %q, want empty string for unknown domain", got)
+		}
+	})
+
+	t.Run("nil topoInfo returns empty", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("zone", "my-pcs", "0", nil, cachedPods, cachedNodeLabels)
+		if got != "" {
+			t.Errorf("got %q, want empty string for nil topoInfo", got)
+		}
+	})
+
+	t.Run("nil cachedPods returns empty", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("zone", "my-pcs", "0", topoInfo, nil, cachedNodeLabels)
+		if got != "" {
+			t.Errorf("got %q, want empty string for nil cachedPods", got)
+		}
+	})
+
+	t.Run("nil cachedNodeLabels returns empty", func(t *testing.T) {
+		got := ResolveTopologyValueByReplicaIndex("zone", "my-pcs", "0", topoInfo, cachedPods, nil)
+		if got != "" {
+			t.Errorf("got %q, want empty string for nil cachedNodeLabels", got)
+		}
+	})
+
+	t.Run("unscheduled pods are skipped", func(t *testing.T) {
+		// Only "pod-unscheduled" matches my-pcs/0, but it has no node.
+		podsOnlyUnscheduled := map[string]CachedPodInfo{
+			"pod-unscheduled": {
+				NodeName: "",
+				Labels: map[string]string{
+					"app.kubernetes.io/part-of":           "my-pcs",
+					"grove.io/podcliqueset-replica-index": "0",
+				},
+			},
+		}
+		got := ResolveTopologyValueByReplicaIndex("zone", "my-pcs", "0", topoInfo, podsOnlyUnscheduled, cachedNodeLabels)
+		if got != "" {
+			t.Errorf("got %q, want empty string for unscheduled-only pod", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// BuildTopologyViewData — additional edge cases
+// ---------------------------------------------------------------------------
+
+func TestBuildTopologyViewData_PendingPodShowsCorrectNode(t *testing.T) {
+	levels := []corev1alpha1.TopologyLevel{
+		{Domain: corev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
+	}
+
+	pods := []TopologyPodInput{
+		{
+			Name:      "pending-pod",
+			Namespace: "default",
+			NodeName:  "", // pending
+			Phase:     "Pending",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of": "my-pcs",
+			},
+		},
+	}
+
+	pcsSpecs := map[string]*corev1alpha1.PodCliqueSet{
+		"my-pcs": {
+			ObjectMeta: metav1.ObjectMeta{Name: "my-pcs"},
+			Spec: corev1alpha1.PodCliqueSetSpec{
+				Template: corev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*corev1alpha1.PodCliqueTemplateSpec{
+						{Name: "worker"},
+					},
+				},
+			},
+		},
+	}
+
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.kubernetes.io/zone": "us-east-1a"},
+	}
+
+	result := BuildTopologyViewData(levels, pcsSpecs, pods, nodeLabels)
+	if result == nil {
+		t.Fatal("BuildTopologyViewData returned nil")
+	}
+	if len(result.Pods) != 1 {
+		t.Fatalf("expected 1 pod, got %d", len(result.Pods))
+	}
+	if result.Pods[0].Node != "<pending>" {
+		t.Errorf("pending pod node = %q, want %q", result.Pods[0].Node, "<pending>")
+	}
+}
+
+func TestBuildTopologyViewData_PodWithoutPCSLabel(t *testing.T) {
+	levels := []corev1alpha1.TopologyLevel{
+		{Domain: corev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
+	}
+
+	pods := []TopologyPodInput{
+		{
+			Name:      "orphan-pod",
+			Namespace: "default",
+			NodeName:  "node-1",
+			Phase:     "Running",
+			Labels:    map[string]string{}, // no PCS label
+		},
+	}
+
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.kubernetes.io/zone": "us-east-1a"},
+	}
+
+	result := BuildTopologyViewData(levels, nil, pods, nodeLabels)
+	if result == nil {
+		t.Fatal("BuildTopologyViewData returned nil")
+	}
+	if len(result.Pods) != 1 {
+		t.Fatalf("expected 1 pod, got %d", len(result.Pods))
+	}
+	if result.Pods[0].Topology != "N/A" {
+		t.Errorf("pod without PCS label topology = %q, want %q", result.Pods[0].Topology, "N/A")
+	}
+}
+
+func TestBuildTopologyViewData_EmptyPods(t *testing.T) {
+	levels := []corev1alpha1.TopologyLevel{
+		{Domain: corev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
+	}
+
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.kubernetes.io/zone": "us-east-1a"},
+	}
+
+	result := BuildTopologyViewData(levels, nil, nil, nodeLabels)
+	if result == nil {
+		t.Fatal("BuildTopologyViewData returned nil")
+	}
+	if len(result.Pods) != 0 {
+		t.Errorf("expected 0 pods, got %d", len(result.Pods))
+	}
+	if len(result.Domains) != 1 {
+		t.Errorf("expected 1 domain, got %d", len(result.Domains))
+	}
+}
+
+func TestBuildTopologyViewData_MultiplePodsMultipleValues(t *testing.T) {
+	levels := []corev1alpha1.TopologyLevel{
+		{Domain: corev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
+		{Domain: corev1alpha1.TopologyDomainRack, Key: "topology.io/rack"},
+	}
+
+	nodeLabels := map[string]map[string]string{
+		"node-1": {
+			"topology.kubernetes.io/zone": "us-east-1a",
+			"topology.io/rack":            "rack-0",
+		},
+		"node-2": {
+			"topology.kubernetes.io/zone": "us-east-1b",
+			"topology.io/rack":            "rack-1",
+		},
+		"node-3": {
+			"topology.kubernetes.io/zone": "us-east-1a",
+			"topology.io/rack":            "rack-2",
+		},
+	}
+
+	result := BuildTopologyViewData(levels, nil, nil, nodeLabels)
+	if result == nil {
+		t.Fatal("BuildTopologyViewData returned nil")
+	}
+	if len(result.Domains) != 2 {
+		t.Fatalf("expected 2 domains, got %d", len(result.Domains))
+	}
+	// Zone should have 2 values: us-east-1a, us-east-1b
+	if result.Domains[0].ValuesCount != 2 {
+		t.Errorf("zone values count = %d, want 2", result.Domains[0].ValuesCount)
+	}
+	// Rack should have 3 values: rack-0, rack-1, rack-2
+	if result.Domains[1].ValuesCount != 3 {
+		t.Errorf("rack values count = %d, want 3", result.Domains[1].ValuesCount)
+	}
+}

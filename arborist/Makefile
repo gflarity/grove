@@ -1,4 +1,4 @@
-.PHONY: run build clean help test test-e2e lint vet deps
+.PHONY: run build clean help test test-cover test-e2e lint vet deps
 
 # Default target
 help:
@@ -6,6 +6,7 @@ help:
 	@echo "  make run          - Run the Arborist TUI"
 	@echo "  make build        - Build the Arborist binary"
 	@echo "  make test         - Run unit tests"
+	@echo "  make test-cover   - Run unit tests with coverage report"
 	@echo "  make test-e2e     - Run E2E tests (requires KUBECONFIG)"
 	@echo "  make lint         - Run go vet"
 	@echo "  make vet          - Run go vet"
@@ -29,6 +30,13 @@ build:
 test:
 	@echo "Running unit tests..."
 	@go test -count=1 -timeout 60s ./internal/... 2>&1 | tee /tmp/arborist-test-output.txt
+
+# Run unit tests with coverage report
+test-cover:
+	@echo "Running unit tests with coverage..."
+	@go test -count=1 -timeout 60s -coverprofile=/tmp/arborist-coverage.out ./internal/... 2>&1 | tee /tmp/arborist-test-output.txt
+	@go tool cover -func=/tmp/arborist-coverage.out | tail -1
+	@echo "Full coverage report: go tool cover -html=/tmp/arborist-coverage.out"
 
 # Run E2E tests against a real cluster.
 # Requires KUBECONFIG to point at a running cluster with Grove operator deployed.
