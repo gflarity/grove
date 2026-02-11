@@ -27,19 +27,19 @@ import (
 
 	"github.com/ai-dynamo/grove/arborist/internal/data"
 	"github.com/ai-dynamo/grove/arborist/internal/k8s"
-	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 )
 
-// TopologyCmd shows pods for a PodCliqueSet grouped by topology domain.
+// TopologyCmd shows pods grouped by topology domain for all (or a specific) PodCliqueSet(s).
 type TopologyCmd struct {
-	PodCliqueSet string `arg:"" help:"Name of the PodCliqueSet."`
-	Domain       string `arg:"" help:"Topology domain (e.g. rack, zone, block, host)."`
-	Namespace    string `short:"n" help:"Kubernetes namespace (defaults to current kubeconfig context namespace)."`
+	Domain        string `arg:"" help:"Topology domain (e.g. rack, zone, block, host)."`
+	PCS           string `arg:"" optional:"" help:"PodCliqueSet name (default: all PCS)."`
+	Namespace     string `short:"n" help:"Kubernetes namespace (defaults to current kubeconfig context namespace)."`
+	AllNamespaces bool   `short:"A" help:"Show pods across all namespaces."`
 }
 
 // Run executes the topology command.
 func (c *TopologyCmd) Run(globals *CLI) error {
-	return runTopology(c.PodCliqueSet, c.Domain, c.Namespace)
+	return runTopology(c.Domain, c.Namespace, c.AllNamespaces, c.PCS)
 }
 
 // topologyGroup holds the pods grouped under a single topology value.
@@ -48,11 +48,16 @@ type topologyGroup struct {
 	Pods  []string // Pod names sorted alphabetically
 }
 
-// runTopology implements the "arborist topology <podcliqueset> <domain>" CLI command.
-func runTopology(pcsName, domain, namespace string) error {
+// runTopology implements the "arborist topology <domain> [--pcs <name>]" CLI command.
+// When pcsFilter is empty, pods from all PCS in the namespace are shown.
+// When pcsFilter is set, only pods from that specific PCS are shown.
+// When allNamespaces is true, pods from all namespaces are included.
+func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string) error {
 	// Resolve namespace from kubeconfig if not specified
 	ns := namespace
-	if ns == "" {
+	if allNamespaces {
+		ns = ""
+	} else if ns == "" {
 		resolved, err := k8s.ResolveCurrentNamespace()
 		if err != nil {
 			return fmt.Errorf("failed to resolve namespace: %w", err)
@@ -112,38 +117,84 @@ func runTopology(pcsName, domain, namespace string) error {
 			domain, strings.Join(availDomains, ", "))
 	}
 
-	// Filter pod info for this PCS
+	// Determine which PCS names to include
+	pcsDisplay := "all"
+	nsDisplay := ns
+	if allNamespaces {
+		nsDisplay = "all"
+	}
+	var pcsNames map[string]bool
+
+	if pcsFilter != "" {
+		// Validate the specific PCS exists
+		if _, ok := snapshot.PodCliqueSetSpecs[pcsFilter]; !ok {
+			return fmt.Errorf("PodCliqueSet %q not found in cluster", pcsFilter)
+		}
+		pcsDisplay = pcsFilter
+		pcsNames = map[string]bool{pcsFilter: true}
+	} else {
+		// Collect PCS names, optionally filtered by namespace
+		pcsNames = make(map[string]bool)
+		for _, pcs := range snapshot.PodCliqueSets {
+			if allNamespaces || pcs.Namespace == ns {
+				pcsNames[pcs.Name] = true
+			}
+		}
+		if len(pcsNames) == 0 {
+			if allNamespaces {
+				return fmt.Errorf("no PodCliqueSets found in cluster")
+			}
+			return fmt.Errorf("no PodCliqueSets found in namespace %q", ns)
+		}
+	}
+
+	// Filter pod info to matching PCS names
 	podInfo := make(map[string]data.CachedPodInfo)
 	for podName, info := range snapshot.PodInfos {
-		if info.Labels["app.kubernetes.io/part-of"] == pcsName {
+		if pcsNames[info.Labels["app.kubernetes.io/part-of"]] {
 			podInfo[podName] = info
 		}
 	}
 	if len(podInfo) == 0 {
-		return fmt.Errorf("no pods found for PodCliqueSet %q in namespace %q", pcsName, ns)
+		if pcsFilter != "" {
+			return fmt.Errorf("no pods found for PodCliqueSet %q", pcsFilter)
+		}
+		if allNamespaces {
+			return fmt.Errorf("no pods found for any PodCliqueSet in cluster")
+		}
+		return fmt.Errorf("no pods found for any PodCliqueSet in namespace %q", ns)
 	}
 
-	// Group pods by topology value
-	groups, unscheduled := groupPodsByTopology(podInfo, snapshot.NodeLabels, labelKey)
+	// Group pods by topology value (unscheduled pods are silently omitted)
+	groups := groupPodsByTopology(podInfo, snapshot.NodeLabels, labelKey)
 
 	// Print the tree
-	printTopologyTree(os.Stdout, resolvedDomain, labelKey, pcsName, ns, groups, unscheduled)
+	printTopologyTree(os.Stdout, resolvedDomain, labelKey, pcsDisplay, nsDisplay, groups)
 
 	return nil
 }
 
 // groupPodsByTopology groups pods by their node's topology label value.
+// All distinct values for the label key across all nodes are included, even
+// if no matching pods are scheduled there (empty groups).
+// Pods that are unscheduled or on nodes missing the topology label are omitted.
 func groupPodsByTopology(
 	podInfo map[string]data.CachedPodInfo,
 	nodeLabels map[string]map[string]string,
 	labelKey string,
-) ([]topologyGroup, []string) {
+) []topologyGroup {
+	// Seed with all known domain values from node labels so empty values appear
 	groupMap := make(map[string][]string)
-	var unscheduled []string
+	for _, labels := range nodeLabels {
+		if v, ok := labels[labelKey]; ok && v != "" {
+			if _, exists := groupMap[v]; !exists {
+				groupMap[v] = nil
+			}
+		}
+	}
 
 	for podName, info := range podInfo {
 		if info.NodeName == "" {
-			unscheduled = append(unscheduled, podName)
 			continue
 		}
 
@@ -153,7 +204,6 @@ func groupPodsByTopology(
 		}
 
 		if value == "" {
-			unscheduled = append(unscheduled, podName)
 			continue
 		}
 
@@ -163,7 +213,6 @@ func groupPodsByTopology(
 	for _, pods := range groupMap {
 		sort.Strings(pods)
 	}
-	sort.Strings(unscheduled)
 
 	groups := make([]topologyGroup, 0, len(groupMap))
 	for value, pods := range groupMap {
@@ -173,29 +222,27 @@ func groupPodsByTopology(
 		return groups[i].Value < groups[j].Value
 	})
 
-	return groups, unscheduled
+	return groups
 }
 
 // printTopologyTree renders the topology tree to the given writer.
 func printTopologyTree(
 	w io.Writer,
-	domain, labelKey, pcsName, namespace string,
+	domain, labelKey, pcsDisplay, namespace string,
 	groups []topologyGroup,
-	unscheduled []string,
 ) {
 	fmt.Fprintf(w, "Topology: %s (%s)\n", domain, labelKey)
-	fmt.Fprintf(w, "PodCliqueSet: %s (namespace: %s)\n", pcsName, namespace)
+	fmt.Fprintf(w, "Namespace: %s\n", namespace)
+	fmt.Fprintf(w, "PodCliqueSets: %s\n", pcsDisplay)
 
 	for _, group := range groups {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "┌ %s: %s\n", domain, group.Value)
-		printPodList(w, group.Pods)
-	}
-
-	if len(unscheduled) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "┌ <unscheduled>\n")
-		printPodList(w, unscheduled)
+		if len(group.Pods) == 0 {
+			fmt.Fprintf(w, "─ %s: %s\n", domain, group.Value)
+		} else {
+			fmt.Fprintf(w, "┌ %s: %s\n", domain, group.Value)
+			printPodList(w, group.Pods)
+		}
 	}
 }
 
@@ -208,13 +255,4 @@ func printPodList(w io.Writer, pods []string) {
 			fmt.Fprintf(w, "├─ %s\n", pod)
 		}
 	}
-}
-
-// availableDomains returns a comma-separated list of domains from the ClusterTopology.
-func availableDomains(ct *corev1alpha1.ClusterTopology) string {
-	domains := make([]string, 0, len(ct.Spec.Levels))
-	for _, level := range ct.Spec.Levels {
-		domains = append(domains, string(level.Domain))
-	}
-	return strings.Join(domains, ", ")
 }

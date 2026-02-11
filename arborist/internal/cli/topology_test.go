@@ -26,13 +26,12 @@ import (
 
 func TestGroupPodsByTopology(t *testing.T) {
 	tests := []struct {
-		name            string
-		podInfo         map[string]data.CachedPodInfo
-		nodeLabels      map[string]map[string]string
-		labelKey        string
-		wantGroupCount  int
-		wantGroups      map[string][]string // value -> pod names
-		wantUnscheduled []string
+		name           string
+		podInfo        map[string]data.CachedPodInfo
+		nodeLabels     map[string]map[string]string
+		labelKey       string
+		wantGroupCount int
+		wantGroups     map[string][]string // value -> pod names
 	}{
 		{
 			name: "pods across two racks",
@@ -52,10 +51,9 @@ func TestGroupPodsByTopology(t *testing.T) {
 				"rack-0": {"foo-0-worker-0", "foo-0-worker-1"},
 				"rack-1": {"foo-0-worker-2"},
 			},
-			wantUnscheduled: nil,
 		},
 		{
-			name: "some pods unscheduled",
+			name: "unscheduled pods are omitted",
 			podInfo: map[string]data.CachedPodInfo{
 				"foo-0-worker-0": {NodeName: "node-1", Labels: map[string]string{}},
 				"foo-0-worker-1": {NodeName: "", Labels: map[string]string{}},
@@ -68,47 +66,59 @@ func TestGroupPodsByTopology(t *testing.T) {
 			wantGroups: map[string][]string{
 				"rack-0": {"foo-0-worker-0"},
 			},
-			wantUnscheduled: []string{"foo-0-worker-1"},
 		},
 		{
-			name: "all pods unscheduled",
+			name: "all pods unscheduled yields no groups",
 			podInfo: map[string]data.CachedPodInfo{
 				"foo-0-worker-0": {NodeName: "", Labels: map[string]string{}},
 				"foo-0-worker-1": {NodeName: "", Labels: map[string]string{}},
 			},
-			nodeLabels:      map[string]map[string]string{},
-			labelKey:        "topology.io/rack",
-			wantGroupCount:  0,
-			wantGroups:      map[string][]string{},
-			wantUnscheduled: []string{"foo-0-worker-0", "foo-0-worker-1"},
+			nodeLabels:     map[string]map[string]string{},
+			labelKey:       "topology.io/rack",
+			wantGroupCount: 0,
+			wantGroups:     map[string][]string{},
 		},
 		{
-			name: "node missing topology label treated as unscheduled",
+			name: "node missing topology label omits pod",
 			podInfo: map[string]data.CachedPodInfo{
 				"foo-0-worker-0": {NodeName: "node-1", Labels: map[string]string{}},
 			},
 			nodeLabels: map[string]map[string]string{
 				"node-1": {}, // no rack label
 			},
-			labelKey:        "topology.io/rack",
-			wantGroupCount:  0,
-			wantGroups:      map[string][]string{},
-			wantUnscheduled: []string{"foo-0-worker-0"},
+			labelKey:       "topology.io/rack",
+			wantGroupCount: 0,
+			wantGroups:     map[string][]string{},
 		},
 		{
-			name:            "no pods",
-			podInfo:         map[string]data.CachedPodInfo{},
-			nodeLabels:      map[string]map[string]string{},
-			labelKey:        "topology.io/rack",
-			wantGroupCount:  0,
-			wantGroups:      map[string][]string{},
-			wantUnscheduled: nil,
+			name:           "no pods",
+			podInfo:        map[string]data.CachedPodInfo{},
+			nodeLabels:     map[string]map[string]string{},
+			labelKey:       "topology.io/rack",
+			wantGroupCount: 0,
+			wantGroups:     map[string][]string{},
+		},
+		{
+			name: "empty domain values shown from node labels",
+			podInfo: map[string]data.CachedPodInfo{
+				"foo-0-worker-0": {NodeName: "node-1", Labels: map[string]string{}},
+			},
+			nodeLabels: map[string]map[string]string{
+				"node-1": {"topology.io/rack": "rack-0"},
+				"node-2": {"topology.io/rack": "rack-1"}, // no pods here
+			},
+			labelKey:       "topology.io/rack",
+			wantGroupCount: 2,
+			wantGroups: map[string][]string{
+				"rack-0": {"foo-0-worker-0"},
+				"rack-1": nil, // empty group
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			groups, unscheduled := groupPodsByTopology(tt.podInfo, tt.nodeLabels, tt.labelKey)
+			groups := groupPodsByTopology(tt.podInfo, tt.nodeLabels, tt.labelKey)
 
 			if len(groups) != tt.wantGroupCount {
 				t.Errorf("got %d groups, want %d", len(groups), tt.wantGroupCount)
@@ -131,13 +141,17 @@ func TestGroupPodsByTopology(t *testing.T) {
 				}
 			}
 
-			if len(unscheduled) != len(tt.wantUnscheduled) {
-				t.Errorf("got %d unscheduled, want %d", len(unscheduled), len(tt.wantUnscheduled))
-			} else {
-				for i, pod := range unscheduled {
-					if pod != tt.wantUnscheduled[i] {
-						t.Errorf("unscheduled[%d]: got %q, want %q", i, pod, tt.wantUnscheduled[i])
+			// Verify all expected groups are present
+			for value := range tt.wantGroups {
+				found := false
+				for _, group := range groups {
+					if group.Value == value {
+						found = true
+						break
 					}
+				}
+				if !found {
+					t.Errorf("expected group %q not found", value)
 				}
 			}
 		})
@@ -155,7 +169,7 @@ func TestGroupPodsByTopology_SortOrder(t *testing.T) {
 		"node-2": {"topology.io/rack": "rack-0"},
 	}
 
-	groups, _ := groupPodsByTopology(podInfo, nodeLabels, "topology.io/rack")
+	groups := groupPodsByTopology(podInfo, nodeLabels, "topology.io/rack")
 
 	// Groups should be sorted alphabetically by value
 	if len(groups) != 2 {
@@ -179,29 +193,28 @@ func TestGroupPodsByTopology_SortOrder(t *testing.T) {
 
 func TestPrintTopologyTree(t *testing.T) {
 	tests := []struct {
-		name        string
-		domain      string
-		labelKey    string
-		pcsName     string
-		namespace   string
-		groups      []topologyGroup
-		unscheduled []string
-		wantLines   []string
+		name       string
+		domain     string
+		labelKey   string
+		pcsDisplay string
+		namespace  string
+		groups     []topologyGroup
+		wantLines  []string
 	}{
 		{
-			name:      "basic tree with two groups",
-			domain:    "rack",
-			labelKey:  "topology.io/rack",
-			pcsName:   "foo",
-			namespace: "default",
+			name:       "single PCS with two groups",
+			domain:     "rack",
+			labelKey:   "topology.io/rack",
+			pcsDisplay: "foo",
+			namespace:  "default",
 			groups: []topologyGroup{
 				{Value: "rack-0", Pods: []string{"foo-0-worker-0", "foo-0-worker-1"}},
 				{Value: "rack-1", Pods: []string{"foo-0-worker-2"}},
 			},
-			unscheduled: nil,
 			wantLines: []string{
 				"Topology: rack (topology.io/rack)",
-				"PodCliqueSet: foo (namespace: default)",
+				"Namespace: default",
+				"PodCliqueSets: foo",
 				"",
 				"┌ rack: rack-0",
 				"├─ foo-0-worker-0",
@@ -212,59 +225,115 @@ func TestPrintTopologyTree(t *testing.T) {
 			},
 		},
 		{
-			name:      "tree with unscheduled pods",
-			domain:    "rack",
-			labelKey:  "topology.io/rack",
-			pcsName:   "bar",
-			namespace: "prod",
+			name:       "all PCS with mixed pods",
+			domain:     "rack",
+			labelKey:   "topology.io/rack",
+			pcsDisplay: "all",
+			namespace:  "default",
 			groups: []topologyGroup{
-				{Value: "rack-0", Pods: []string{"bar-0-worker-0"}},
+				{Value: "rack-0", Pods: []string{"bar-0-worker-0", "foo-0-worker-0"}},
+				{Value: "rack-1", Pods: []string{"foo-0-worker-1"}},
 			},
-			unscheduled: []string{"bar-0-worker-1"},
 			wantLines: []string{
 				"Topology: rack (topology.io/rack)",
-				"PodCliqueSet: bar (namespace: prod)",
+				"Namespace: default",
+				"PodCliqueSets: all",
 				"",
 				"┌ rack: rack-0",
-				"└─ bar-0-worker-0",
+				"├─ bar-0-worker-0",
+				"└─ foo-0-worker-0",
 				"",
-				"┌ <unscheduled>",
-				"└─ bar-0-worker-1",
+				"┌ rack: rack-1",
+				"└─ foo-0-worker-1",
 			},
 		},
 		{
-			name:        "only unscheduled pods",
-			domain:      "zone",
-			labelKey:    "topology.kubernetes.io/zone",
-			pcsName:     "baz",
-			namespace:   "default",
-			groups:      []topologyGroup{},
-			unscheduled: []string{"baz-0-worker-0", "baz-0-worker-1"},
+			name:       "no groups yields header only",
+			domain:     "zone",
+			labelKey:   "topology.kubernetes.io/zone",
+			pcsDisplay: "baz",
+			namespace:  "default",
+			groups:     []topologyGroup{},
 			wantLines: []string{
 				"Topology: zone (topology.kubernetes.io/zone)",
-				"PodCliqueSet: baz (namespace: default)",
-				"",
-				"┌ <unscheduled>",
-				"├─ baz-0-worker-0",
-				"└─ baz-0-worker-1",
+				"Namespace: default",
+				"PodCliqueSets: baz",
 			},
 		},
 		{
-			name:      "single pod per group",
-			domain:    "rack",
-			labelKey:  "topology.io/rack",
-			pcsName:   "solo",
-			namespace: "default",
+			name:       "single pod per group",
+			domain:     "rack",
+			labelKey:   "topology.io/rack",
+			pcsDisplay: "solo",
+			namespace:  "default",
 			groups: []topologyGroup{
 				{Value: "rack-0", Pods: []string{"solo-0-worker-0"}},
 			},
-			unscheduled: nil,
 			wantLines: []string{
 				"Topology: rack (topology.io/rack)",
-				"PodCliqueSet: solo (namespace: default)",
+				"Namespace: default",
+				"PodCliqueSets: solo",
 				"",
 				"┌ rack: rack-0",
 				"└─ solo-0-worker-0",
+			},
+		},
+		{
+			name:       "different namespace",
+			domain:     "rack",
+			labelKey:   "topology.io/rack",
+			pcsDisplay: "bar",
+			namespace:  "prod",
+			groups: []topologyGroup{
+				{Value: "rack-0", Pods: []string{"bar-0-worker-0"}},
+			},
+			wantLines: []string{
+				"Topology: rack (topology.io/rack)",
+				"Namespace: prod",
+				"PodCliqueSets: bar",
+				"",
+				"┌ rack: rack-0",
+				"└─ bar-0-worker-0",
+			},
+		},
+		{
+			name:       "empty domain value shown",
+			domain:     "block",
+			labelKey:   "kubernetes.io/block",
+			pcsDisplay: "all",
+			namespace:  "default",
+			groups: []topologyGroup{
+				{Value: "block-0", Pods: []string{"foo-0-worker-0"}},
+				{Value: "block-1", Pods: nil},
+			},
+			wantLines: []string{
+				"Topology: block (kubernetes.io/block)",
+				"Namespace: default",
+				"PodCliqueSets: all",
+				"",
+				"┌ block: block-0",
+				"└─ foo-0-worker-0",
+				"",
+				"─ block: block-1",
+			},
+		},
+		{
+			name:       "all namespaces",
+			domain:     "rack",
+			labelKey:   "topology.io/rack",
+			pcsDisplay: "all",
+			namespace:  "all",
+			groups: []topologyGroup{
+				{Value: "rack-0", Pods: []string{"bar-0-worker-0", "foo-0-worker-0"}},
+			},
+			wantLines: []string{
+				"Topology: rack (topology.io/rack)",
+				"Namespace: all",
+				"PodCliqueSets: all",
+				"",
+				"┌ rack: rack-0",
+				"├─ bar-0-worker-0",
+				"└─ foo-0-worker-0",
 			},
 		},
 	}
@@ -272,7 +341,7 @@ func TestPrintTopologyTree(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			printTopologyTree(&buf, tt.domain, tt.labelKey, tt.pcsName, tt.namespace, tt.groups, tt.unscheduled)
+			printTopologyTree(&buf, tt.domain, tt.labelKey, tt.pcsDisplay, tt.namespace, tt.groups)
 
 			got := buf.String()
 			gotLines := strings.Split(strings.TrimRight(got, "\n"), "\n")
