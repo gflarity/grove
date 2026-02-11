@@ -113,10 +113,12 @@ type TopologyViewPod struct {
 
 // TopologyViewData holds a point-in-time snapshot of all topology-relevant cluster state.
 type TopologyViewData struct {
-	Domains     []TopologyDomainRow         // sorted broadest to narrowest, N/A last
-	NodeLabels  map[string]map[string]string // nodeName -> labelKey -> labelValue
-	Pods        []TopologyViewPod           // all pods with topology info
-	DomainToKey map[string]string           // domain -> node label key (from ClusterTopology)
+	Domains         []TopologyDomainRow         // sorted broadest to narrowest, N/A last
+	NodeLabels      map[string]map[string]string // nodeName -> labelKey -> labelValue
+	Pods            []TopologyViewPod           // all pods with topology info
+	DomainToKey     map[string]string           // domain -> node label key (from ClusterTopology)
+	GPUSummary      *GPUSummary                 // pre-aggregated GPU counts by resource hierarchy
+	NodeGPUProducts map[string]string           // nodeName -> short GPU type (e.g. "H200")
 }
 
 // ViewTypeName returns a human-readable name for a ViewType.

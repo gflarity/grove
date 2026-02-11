@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/ai-dynamo/grove/arborist/internal/data"
@@ -115,13 +116,12 @@ type Model struct {
 	commandActive bool
 	commandInput  textinput.Model
 
-	// Data
+	// Data — all derived from the cache snapshot
 	allResources       map[string][]data.Resource
 	allEvents          []data.Event
 	podYAMLData        map[string]string
 	cachedTopologyInfo *data.TopologyInfo
-	cachedPods         map[string]data.CachedPodInfo
-	cachedNodeLabels   map[string]map[string]string
+	cachedSnapshot     *data.CacheSnapshot // latest snapshot from the global cache
 
 	// Sub-models (bubbles components)
 	resourcesTable       table.Model
@@ -132,14 +132,17 @@ type Model struct {
 	podViewport          viewport.Model
 
 	// Topology view state
-	topologyViewData     *data.TopologyViewData
-	topologyDrillStack   []data.TopologyDrillSelection
-	topologyCache        data.TopologyCache
-	topologyCacheStarted bool
+	topologyViewData   *data.TopologyViewData
+	topologyDrillStack []data.TopologyDrillSelection
+
+	// GPU data (from cache, used in Forest view for GPU columns)
+	gpuSummary *data.GPUSummary
 
 	// Dependencies (injected)
-	provider data.DataProvider
-	ctx      context.Context
+	cache        data.GlobalCache
+	cacheStarted bool
+	cacheSynced  bool
+	ctx          context.Context
 
 	// Layout
 	width  int
@@ -206,15 +209,15 @@ func WithArboristVersion(version string) Option {
 	}
 }
 
-// WithTopologyCache sets the topology cache for the Topology view.
-func WithTopologyCache(cache data.TopologyCache) Option {
+// WithGlobalCache sets the global cache for the model.
+func WithGlobalCache(cache data.GlobalCache) Option {
 	return func(m *Model) {
-		m.topologyCache = cache
+		m.cache = cache
 	}
 }
 
-// NewModel creates a new Model with the given DataProvider and options.
-func NewModel(provider data.DataProvider, opts ...Option) Model {
+// NewModel creates a new Model with the given GlobalCache and options.
+func NewModel(cache data.GlobalCache, opts ...Option) Model {
 	// Initialize filter input
 	ti := textinput.New()
 	ti.Placeholder = ""
@@ -238,7 +241,7 @@ func NewModel(provider data.DataProvider, opts ...Option) Model {
 		activePane:   data.ResourcesPane,
 		allResources: make(map[string][]data.Resource),
 		podYAMLData:  make(map[string]string),
-		provider:     provider,
+		cache:        cache,
 		ctx:          context.Background(),
 		filterInput:  ti,
 		commandInput: ci,
@@ -284,12 +287,21 @@ func createTableModel(specs []ColumnSpec, focused bool) table.Model {
 // Init initializes the model and returns the initial command.
 func (m Model) Init() tea.Cmd {
 	debugLog("starting arborist TUI (bubbletea)")
-	// Load forest data on startup
-	return loadForestDataCmd(m.provider, m.ctx)
+	// The cache will be started after the first WindowSizeMsg (when we know the terminal is ready).
+	// Return nil — no data loading needed until the cache is synced.
+	return nil
 }
 
 // rebuildResourcesTable rebuilds the resources table from current data with color-coded cells.
 func (m *Model) rebuildResourcesTable() {
+	// Remember the currently selected row's name so we can restore it after rebuild.
+	// The NAME column is at index 2 (NAMESPACE=0, TYPE=1, NAME=2).
+	prevSelectedName := ""
+	if selectedRow := m.resourcesTable.SelectedRow(); len(selectedRow) > 2 {
+		prevSelectedName = selectedRow[2]
+	}
+	prevCursor := m.resourcesTable.Cursor()
+
 	viewKey := m.getCurrentViewKey()
 	resources, exists := m.allResources[viewKey]
 	if !exists {
@@ -311,21 +323,10 @@ func (m *Model) rebuildResourcesTable() {
 		resources = filtered
 	}
 
-	// Build rows with plain text cells
-	rows := make([]table.Row, 0, len(resources))
-	for _, r := range resources {
-		styledCells := colorizeResourceRow(r)
-		rows = append(rows, table.Row(styledCells))
-	}
-
-	m.resourcesTable.SetRows(rows)
-
-	// Ensure cursor is valid after setting rows.
-	if len(rows) > 0 {
-		cursor := m.resourcesTable.Cursor()
-		if cursor < 0 || cursor >= len(rows) {
-			m.resourcesTable.SetCursor(0)
-		}
+	// Determine GPU types for dynamic columns
+	var gpuTypes []string
+	if m.gpuSummary != nil && len(m.gpuSummary.GPUTypes) > 0 {
+		gpuTypes = m.gpuSummary.GPUTypes
 	}
 
 	// Update column header based on view type
@@ -334,13 +335,164 @@ func (m *Model) rebuildResourcesTable() {
 		lastColHeader = "PHASE"
 	}
 
-	// Build column spec, overriding last column title if needed
-	specs := make([]ColumnSpec, len(resourceColumnSpecs))
-	copy(specs, resourceColumnSpecs)
-	specs[len(specs)-1].Title = lastColHeader
+	// Build dynamic column spec — must set columns BEFORE rows to avoid
+	// column/row count mismatch panics (SetRows triggers UpdateViewport
+	// which renders rows against the current column definitions).
+	specs := m.buildResourceColumnSpecs(gpuTypes, lastColHeader)
 
+	// Clear rows, set columns, then set new rows (same pattern as rebuildTopologyDomainsTable).
+	m.resourcesTable.SetRows([]table.Row{})
 	w := tableContentWidth(m.width, len(specs))
 	m.resourcesTable.SetColumns(computeWeightedColumns(specs, w))
+
+	// Build rows with plain text cells including GPU columns
+	rows := make([]table.Row, 0, len(resources))
+	for _, r := range resources {
+		styledCells := m.colorizeResourceRowWithGPU(r, gpuTypes)
+		rows = append(rows, table.Row(styledCells))
+	}
+
+	m.resourcesTable.SetRows(rows)
+
+	// Restore cursor position: try to find the previously selected row by name,
+	// otherwise fall back to the same numeric position (clamped to valid range).
+	if len(rows) > 0 {
+		restored := false
+		if prevSelectedName != "" {
+			for i, row := range rows {
+				if len(row) > 2 && row[2] == prevSelectedName {
+					m.resourcesTable.SetCursor(i)
+					restored = true
+					break
+				}
+			}
+		}
+		if !restored {
+			// Fall back to previous cursor index, clamped to valid range
+			if prevCursor >= len(rows) {
+				m.resourcesTable.SetCursor(len(rows) - 1)
+			} else if prevCursor >= 0 {
+				m.resourcesTable.SetCursor(prevCursor)
+			} else {
+				m.resourcesTable.SetCursor(0)
+			}
+		}
+	}
+}
+
+// buildResourceColumnSpecs builds the column spec for the resources table,
+// inserting dynamic GPU columns between READY and SCHEDULED/PHASE.
+func (m *Model) buildResourceColumnSpecs(gpuTypes []string, lastColTitle string) []ColumnSpec {
+	// Base columns: NAMESPACE, TYPE, NAME, TOPOLOGY, READY
+	specs := []ColumnSpec{
+		{Title: "NAMESPACE", Weight: 2},
+		{Title: "TYPE", Weight: 3},
+		{Title: "NAME", Weight: 5},
+		{Title: "TOPOLOGY", Weight: 3},
+		{Title: "READY", Weight: 2},
+	}
+
+	// GPU type columns (one per discovered GPU type)
+	for _, gpuType := range gpuTypes {
+		specs = append(specs, ColumnSpec{Title: gpuType, Weight: 1})
+	}
+
+	// Final column: SCHEDULED or PHASE
+	specs = append(specs, ColumnSpec{Title: lastColTitle, Weight: 2})
+
+	return specs
+}
+
+// colorizeResourceRowWithGPU returns plain text for each column value including GPU columns.
+// The row format is: [Namespace, Type, Name, Topology, Ready, <gpu1>, <gpu2>, ..., Scheduled]
+func (m *Model) colorizeResourceRowWithGPU(r data.Resource, gpuTypes []string) []string {
+	row := []string{r.Namespace, r.Type, r.Name, r.Topology, r.Ready}
+
+	// Add GPU count values
+	if len(gpuTypes) > 0 {
+		counts := m.gpuCountsForResource(r)
+		isPending := m.isResourcePending(r)
+
+		for _, gpuType := range gpuTypes {
+			if isPending {
+				row = append(row, "?")
+			} else if counts != nil {
+				count := counts[gpuType]
+				if count > 0 {
+					row = append(row, fmt.Sprintf("%d", count))
+				} else {
+					row = append(row, "0")
+				}
+			} else {
+				row = append(row, "0")
+			}
+		}
+	}
+
+	row = append(row, r.Scheduled)
+	return row
+}
+
+// gpuCountsForResource returns the GPU counts for a given resource based on its type and name.
+func (m *Model) gpuCountsForResource(r data.Resource) data.GPUCounts {
+	if m.gpuSummary == nil {
+		return nil
+	}
+
+	switch r.Type {
+	case "PodCliqueSet":
+		return m.gpuSummary.ByPCS[r.Name]
+	case "PodCliqueSetReplica":
+		// Name format: "pcsName-replica-INDEX" — extract pcsName and index
+		pcsName := m.viewState.SelectedPodCliqueSet
+		replicaIndex := extractReplicaIndex(r.Name)
+		if pcsName != "" && replicaIndex != "" {
+			return m.gpuSummary.ByReplica[pcsName+"/"+replicaIndex]
+		}
+	case "PodCliqueScalingGroup":
+		return m.gpuSummary.ByPCSG[r.Name]
+	case "PodCliqueScalingGroupReplica":
+		// For PCSG replicas, aggregate from PodCliques within the replica
+		// The PCSG name is the parent
+		pcsgName := m.viewState.SelectedScalingGroup
+		replicaIndex := extractReplicaIndex(r.Name)
+		if pcsgName != "" && replicaIndex != "" {
+			return m.gpuSummary.ByPCSG[r.Name]
+		}
+		// Fall back to PCSG-level if we can't decompose
+		return m.gpuSummary.ByPCSG[r.Name]
+	case "PodClique":
+		return m.gpuSummary.ByPodClique[r.Name]
+	case "Pod":
+		return m.gpuSummary.ByPod[r.Name]
+	}
+
+	return nil
+}
+
+// isResourcePending returns true if the resource (or any of its descendant pods) is pending
+// with GPU requests that can't be attributed to a GPU type yet.
+func (m *Model) isResourcePending(r data.Resource) bool {
+	if m.gpuSummary == nil || len(m.gpuSummary.PendingGPUPods) == 0 {
+		return false
+	}
+
+	// For pods, check directly
+	if r.Type == "Pod" {
+		_, isPending := m.gpuSummary.PendingGPUPods[r.Name]
+		return isPending
+	}
+
+	return false
+}
+
+// extractReplicaIndex extracts the replica index from a name like "foo-replica-0".
+func extractReplicaIndex(name string) string {
+	parts := strings.Split(name, "-replica-")
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return ""
 }
 
 // rebuildEventsTable rebuilds the events table from current data with color-coded TYPE column.
@@ -537,6 +689,11 @@ func (m *Model) rebuildTopologyPodsTable() {
 
 	// Filter pods by matching nodes
 	filteredPods := data.FilterPodsByNodes(m.topologyViewData.Pods, matchingNodes)
+
+	// Sort pods by name for stable, predictable display order
+	sort.Slice(filteredPods, func(i, j int) bool {
+		return filteredPods[i].Name < filteredPods[j].Name
+	})
 
 	rows := make([]table.Row, 0, len(filteredPods))
 	for _, p := range filteredPods {

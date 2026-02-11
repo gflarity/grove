@@ -63,52 +63,68 @@ func runTopology(pcsName, domain, namespace string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Initialize K8s client
+	// Initialize K8s client and global cache
 	k8sClient, err := k8s.NewK8sClient()
 	if err != nil {
 		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
-	// Fetch ClusterTopology to resolve domain -> label key
-	ct, err := k8sClient.GetClusterTopology(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to fetch ClusterTopology: %w", err)
+	cache := k8sClient.NewGlobalCache()
+	if err := cache.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start cache: %w", err)
 	}
-	if ct == nil {
+	defer cache.Stop()
+
+	syncCtx, syncCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer syncCancel()
+	if !cache.WaitForSync(syncCtx) {
+		return fmt.Errorf("timed out waiting for cache to sync")
+	}
+
+	snapshot := cache.Snapshot()
+	if snapshot == nil {
+		return fmt.Errorf("no data available from cache")
+	}
+
+	// Find ClusterTopology levels from topology view data
+	if snapshot.TopologyViewData == nil {
 		return fmt.Errorf("no ClusterTopology resource found in cluster (TAS not configured?)")
 	}
 
 	labelKey := ""
 	resolvedDomain := ""
-	for _, level := range ct.Spec.Levels {
-		if string(level.Domain) == domain {
-			labelKey = level.Key
-			resolvedDomain = string(level.Domain)
+	domainToKey := snapshot.TopologyViewData.DomainToKey
+	for d, k := range domainToKey {
+		if d == domain {
+			labelKey = k
+			resolvedDomain = d
 			break
 		}
 	}
 	if labelKey == "" {
+		// Build available domains string
+		var availDomains []string
+		for d := range domainToKey {
+			availDomains = append(availDomains, d)
+		}
+		sort.Strings(availDomains)
 		return fmt.Errorf("topology domain %q not found in ClusterTopology; available domains: %s",
-			domain, availableDomains(ct))
+			domain, strings.Join(availDomains, ", "))
 	}
 
-	// Fetch all pods for this PCS
-	podInfo, err := k8sClient.GetPodInfoForPCS(ctx, pcsName, ns)
-	if err != nil {
-		return fmt.Errorf("failed to fetch pods for PodCliqueSet %s/%s: %w", ns, pcsName, err)
+	// Filter pod info for this PCS
+	podInfo := make(map[string]data.CachedPodInfo)
+	for podName, info := range snapshot.PodInfos {
+		if info.Labels["app.kubernetes.io/part-of"] == pcsName {
+			podInfo[podName] = info
+		}
 	}
 	if len(podInfo) == 0 {
 		return fmt.Errorf("no pods found for PodCliqueSet %q in namespace %q", pcsName, ns)
 	}
 
-	// Fetch node labels for the topology key
-	nodeLabels, err := k8sClient.GetAllNodeLabels(ctx, []string{labelKey})
-	if err != nil {
-		return fmt.Errorf("failed to fetch node labels: %w", err)
-	}
-
 	// Group pods by topology value
-	groups, unscheduled := groupPodsByTopology(podInfo, nodeLabels, labelKey)
+	groups, unscheduled := groupPodsByTopology(podInfo, snapshot.NodeLabels, labelKey)
 
 	// Print the tree
 	printTopologyTree(os.Stdout, resolvedDomain, labelKey, pcsName, ns, groups, unscheduled)
@@ -117,7 +133,6 @@ func runTopology(pcsName, domain, namespace string) error {
 }
 
 // groupPodsByTopology groups pods by their node's topology label value.
-// Pods without a node assignment are returned in the unscheduled slice.
 func groupPodsByTopology(
 	podInfo map[string]data.CachedPodInfo,
 	nodeLabels map[string]map[string]string,
@@ -138,7 +153,6 @@ func groupPodsByTopology(
 		}
 
 		if value == "" {
-			// Node exists but doesn't have the topology label
 			unscheduled = append(unscheduled, podName)
 			continue
 		}
@@ -146,13 +160,11 @@ func groupPodsByTopology(
 		groupMap[value] = append(groupMap[value], podName)
 	}
 
-	// Sort pods within each group
 	for _, pods := range groupMap {
 		sort.Strings(pods)
 	}
 	sort.Strings(unscheduled)
 
-	// Convert to sorted slice of groups
 	groups := make([]topologyGroup, 0, len(groupMap))
 	for value, pods := range groupMap {
 		groups = append(groups, topologyGroup{Value: value, Pods: pods})

@@ -1,0 +1,133 @@
+# Topology-Aware PodCliqueSet with Mixed GPU Types per Block
+# Demonstrates topology-aware scheduling where a PCS targets a single block
+# (packDomain: block) containing two GPU types. Each clique is packed into
+# its own rack (packDomain: rack) — one rack of H200s and one rack of B200s.
+#
+# CLUSTER LAYOUT (after fake-gpu-operator install):
+#   block-0: rack-0 (H200) + rack-1 (B200)
+#   block-1: rack-2 (H200) + rack-3 (B200)
+#
+# The scheduler picks one block, then places:
+#   worker-h200 pods → the H200 rack in that block
+#   worker-b200 pods → the B200 rack in that block
+#
+# PREREQUISITES:
+# - fake-gpu-operator installed with h200/b200 node pools (see fake-gpu-operator_plan.md)
+# - Cluster created via setup-cluster with topology enabled
+# - kai-scheduler deployed
+#
+# QUICK START:
+# 1. Apply this example:
+#    kubectl apply -f topology-gpu-pcs.yaml
+#
+# 2. Check pods are running (6 total: 3 worker-h200 + 3 worker-b200):
+#    kubectl get pods -l app.kubernetes.io/part-of=topology-gpu-pcs -o wide
+#
+# 3. Verify all pods are in the same block, with each clique on its own rack:
+#    kubectl get pods -l app.kubernetes.io/part-of=topology-gpu-pcs \
+#      -o jsonpath='{range .items[*]}{.metadata.labels.grove\.io/role-name}{"\t"}{.spec.nodeName}{"\n"}{end}' | \
+#      while read role node; do \
+#        echo "$role -> $node (block=$(kubectl get node $node -o jsonpath='{.metadata.labels.kubernetes\.io/block}'), rack=$(kubectl get node $node -o jsonpath='{.metadata.labels.kubernetes\.io/rack}'), gpu=$(kubectl get node $node -o jsonpath='{.metadata.labels.nvidia\.com/gpu\.product}'))"; \
+#      done
+#
+# 4. Clean up:
+#    kubectl delete pcs topology-gpu-pcs
+#
+# EXPECTED BEHAVIOR:
+# - 6 total pods: 3 worker-h200 + 3 worker-b200
+# - All 6 pods land in the SAME block (PCS-level packDomain: block)
+# - worker-h200 pods are on the H200 rack within that block (e.g. rack-0 in block-0)
+# - worker-b200 pods are on the B200 rack within that block (e.g. rack-1 in block-0)
+# - Each clique is rack-packed independently (per-clique packDomain: rack)
+# - PCS status.operationalSummary.phase will be "Healthy"
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: topology-gpu-pcs
+  namespace: default
+  labels:
+    app: topology-gpu-pcs
+    demo: topology-gpu
+spec:
+  replicas: 1
+  template:
+    topologyConstraint:
+      packDomain: block  # All cliques land in the same block
+    cliques:
+      - name: worker-h200
+        labels:
+          kai.scheduler/queue: test
+        topologyConstraint:
+          packDomain: rack  # Pack H200 pods onto one rack within the block
+        spec:
+          roleName: worker-h200
+          replicas: 3
+          minAvailable: 3
+          podSpec:
+            schedulerName: kai-scheduler
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+                        - key: nvidia.com/gpu.product
+                          operator: In
+                          values:
+                            - NVIDIA-H200-141GB-HBM3e
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: worker-h200
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 80Mi
+                    nvidia.com/gpu: "1"
+                  limits:
+                    nvidia.com/gpu: "1"
+      - name: worker-b200
+        labels:
+          kai.scheduler/queue: test
+        topologyConstraint:
+          packDomain: rack  # Pack B200 pods onto one rack within the block
+        spec:
+          roleName: worker-b200
+          replicas: 3
+          minAvailable: 3
+          podSpec:
+            schedulerName: kai-scheduler
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+                        - key: nvidia.com/gpu.product
+                          operator: In
+                          values:
+                            - NVIDIA-B200-192GB-HBM3e
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: worker-b200
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 80Mi
+                    nvidia.com/gpu: "1"
+                  limits:
+                    nvidia.com/gpu: "1"
