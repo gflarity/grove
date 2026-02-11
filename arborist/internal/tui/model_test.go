@@ -2233,26 +2233,27 @@ func TestTopologyView_GPUColumnsAppearWhenDrilledIn(t *testing.T) {
 	// Drill into "block"
 	m = sendKey(m, tea.KeyEnter)
 
-	// Should now show block values with GPU USAGE + GPU PODS + PODS + REG PODS
+	// Should now show block values with GPU¹ + GPU PODS + PODS
 	rows = m.topologyDomainsTable.Rows()
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 block values (block-01, block-02), got %d", len(rows))
 	}
 
-	// Column order: VALUE + B200 USAGE + H200 USAGE + GPU PODS + PODS = 5 columns
+	// Column order: VALUE + B200¹ + H200¹ + GPU PODS + PODS = 5 columns
 	if len(rows[0]) != 5 {
-		t.Fatalf("expected 5 columns (VALUE + B200 USAGE + H200 USAGE + GPU PODS + PODS), got %d cols: %v", len(rows[0]), rows[0])
+		t.Fatalf("expected 5 columns (VALUE + B200¹ + H200¹ + GPU PODS + PODS), got %d cols: %v", len(rows[0]), rows[0])
 	}
 
 	// block-01 has H200 nodes: node-1 (pod-a GPU=4), node-2 (pod-b GPU=2)
+	// All pods have empty Labels → Other (no part-of label)
 	if rows[0][0] != "block-01" {
 		t.Errorf("expected first value 'block-01', got %q", rows[0][0])
 	}
-	if rows[0][1] != "0/0" {
-		t.Errorf("block-01 B200 USAGE = %q, want '0/0'", rows[0][1])
+	if rows[0][1] != "0/0/0" {
+		t.Errorf("block-01 B200¹ = %q, want '0/0/0'", rows[0][1])
 	}
-	if rows[0][2] != "6/16" {
-		t.Errorf("block-01 H200 USAGE = %q, want '6/16'", rows[0][2])
+	if rows[0][2] != "0/6/16" {
+		t.Errorf("block-01 H200¹ = %q, want '0/6/16'", rows[0][2])
 	}
 	if rows[0][3] != "2" {
 		t.Errorf("block-01 GPU PODS = %q, want '2'", rows[0][3])
@@ -2262,14 +2263,15 @@ func TestTopologyView_GPUColumnsAppearWhenDrilledIn(t *testing.T) {
 	}
 
 	// block-02 has B200 nodes: node-3 (pod-c GPU=8), node-4 (no pods)
+	// pod-c has empty Labels → Other
 	if rows[1][0] != "block-02" {
 		t.Errorf("expected second value 'block-02', got %q", rows[1][0])
 	}
-	if rows[1][1] != "8/16" {
-		t.Errorf("block-02 B200 USAGE = %q, want '8/16'", rows[1][1])
+	if rows[1][1] != "0/8/16" {
+		t.Errorf("block-02 B200¹ = %q, want '0/8/16'", rows[1][1])
 	}
-	if rows[1][2] != "0/0" {
-		t.Errorf("block-02 H200 USAGE = %q, want '0/0'", rows[1][2])
+	if rows[1][2] != "0/0/0" {
+		t.Errorf("block-02 H200¹ = %q, want '0/0/0'", rows[1][2])
 	}
 	if rows[1][3] != "1" {
 		t.Errorf("block-02 GPU PODS = %q, want '1'", rows[1][3])
@@ -2413,6 +2415,118 @@ func TestTopologyView_PodCountColumnsNotAtRootLevel(t *testing.T) {
 		if len(row) != 3 {
 			t.Errorf("expected 3 columns at root level, got %d: %v", len(row), row)
 		}
+	}
+}
+
+func TestTopologyView_FootnoteAppearsWithGPUColumns(t *testing.T) {
+	m := newTopologyGPUTestModel()
+
+	// Drill into "block" so GPU columns are visible
+	m = sendKey(m, tea.KeyEnter)
+
+	view := m.View()
+	if !strings.Contains(view, "¹ GPU: Grove/Other/Total") {
+		t.Errorf("expected footnote '¹ GPU: Grove/Other/Total' in view when GPU columns are present.\nview:\n%s", view)
+	}
+}
+
+func TestTopologyView_FootnoteHiddenWithoutGPU(t *testing.T) {
+	// Topology data without GPU info
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	tvd := sampleTopologyViewData()
+	tvd.NodeGPUProducts = map[string]string{}
+	tvd.NodeGPUCapacity = map[string]int64{}
+	tvd.RawPods = []data.TopologyPodInput{}
+	snap.TopologyViewData = tvd
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
+
+	m := NewModel(mc)
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
+	m = sendRune(m, 't')
+
+	// At top level, no footnote
+	view := m.View()
+	if strings.Contains(view, "Grove/Other/Total") {
+		t.Errorf("expected no footnote at top level without GPU data.\nview:\n%s", view)
+	}
+
+	// Drill into region — still no GPU columns
+	m = sendKey(m, tea.KeyEnter)
+	view = m.View()
+	if strings.Contains(view, "Grove/Other/Total") {
+		t.Errorf("expected no footnote when drilled in without GPU data.\nview:\n%s", view)
+	}
+}
+
+func TestTopologyView_ThreeWaySplit_MixedWorkloads(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "block", Key: "topology.io/block", ValuesCount: 1},
+		},
+		NodeLabels: map[string]map[string]string{
+			"node-1": {"topology.io/block": "block-01"},
+			"node-2": {"topology.io/block": "block-01"},
+		},
+		Pods: []data.TopologyViewPod{
+			{Namespace: "default", Node: "node-1", Name: "grove-pod", Phase: "Running"},
+			{Namespace: "default", Node: "node-1", Name: "other-pod", Phase: "Running"},
+			{Namespace: "default", Node: "node-2", Name: "grove-pod-2", Phase: "Running"},
+		},
+		DomainToKey: map[string]string{"block": "topology.io/block"},
+		NodeGPUProducts: map[string]string{
+			"node-1": "H200",
+			"node-2": "H200",
+		},
+		NodeGPUCapacity: map[string]int64{
+			"node-1": 8,
+			"node-2": 8,
+		},
+		RawPods: []data.TopologyPodInput{
+			// PCS-managed pod → Grove
+			{Name: "grove-pod", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{
+				"app.kubernetes.io/part-of": "my-pcs",
+			}},
+			// Non-PCS pod → Other
+			{Name: "other-pod", NodeName: "node-1", GPURequests: 2, Labels: map[string]string{}},
+			// PCS-managed pod → Grove
+			{Name: "grove-pod-2", NodeName: "node-2", GPURequests: 3, Labels: map[string]string{
+				"app.kubernetes.io/part-of": "other-pcs",
+			}},
+		},
+	}
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
+
+	m := NewModel(mc)
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
+	m = sendRune(m, 't')
+
+	// Drill into "block"
+	m = sendKey(m, tea.KeyEnter)
+
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 block value, got %d", len(rows))
+	}
+
+	// block-01: Grove=4+3=7, Other=2, Total=8+8=16
+	// Column order: VALUE + H200¹ + GPU PODS + PODS = 4 columns
+	if len(rows[0]) != 4 {
+		t.Fatalf("expected 4 columns, got %d: %v", len(rows[0]), rows[0])
+	}
+	if rows[0][0] != "block-01" {
+		t.Errorf("value = %q, want 'block-01'", rows[0][0])
+	}
+	if rows[0][1] != "7/2/16" {
+		t.Errorf("block-01 H200¹ = %q, want '7/2/16'", rows[0][1])
 	}
 }
 

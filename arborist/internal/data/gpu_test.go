@@ -200,21 +200,23 @@ func TestBuildGPUSummary_NoGPUNodes(t *testing.T) {
 	}
 }
 
-func TestFormatGPUUsedAvailable(t *testing.T) {
+func TestFormatGPUGroveOtherTotal(t *testing.T) {
 	tests := []struct {
-		used      int64
-		available int64
-		want      string
+		grove int64
+		other int64
+		total int64
+		want  string
 	}{
-		{0, 0, "0/0"},
-		{16, 32, "16/32"},
-		{32, 32, "32/32"},
-		{0, 8, "0/8"},
+		{0, 0, 0, "0/0/0"},
+		{16, 0, 32, "16/0/32"},
+		{16, 16, 32, "16/16/32"},
+		{0, 0, 8, "0/0/8"},
+		{4, 2, 16, "4/2/16"},
 	}
 	for _, tt := range tests {
-		got := FormatGPUUsedAvailable(tt.used, tt.available)
+		got := FormatGPUGroveOtherTotal(tt.grove, tt.other, tt.total)
 		if got != tt.want {
-			t.Errorf("FormatGPUUsedAvailable(%d, %d) = %q, want %q", tt.used, tt.available, got, tt.want)
+			t.Errorf("FormatGPUGroveOtherTotal(%d, %d, %d) = %q, want %q", tt.grove, tt.other, tt.total, got, tt.want)
 		}
 	}
 }
@@ -248,22 +250,28 @@ func TestComputeDomainGPUSummary_SingleGPUType(t *testing.T) {
 		t.Fatalf("GPUTypes = %v, want [H200]", summary.GPUTypes)
 	}
 
-	// block-01: 2 nodes with 8 GPUs each = 16 available, pods use 4+2=6
+	// block-01: 2 nodes with 8 GPUs each = 16 total, pods use 4+2=6 (all Other, no part-of label)
 	b01 := summary.ByValue["block-01"]["H200"]
-	if b01.Available != 16 {
-		t.Errorf("block-01 H200 Available = %d, want 16", b01.Available)
+	if b01.Total != 16 {
+		t.Errorf("block-01 H200 Total = %d, want 16", b01.Total)
 	}
-	if b01.Used != 6 {
-		t.Errorf("block-01 H200 Used = %d, want 6", b01.Used)
+	if b01.Other != 6 {
+		t.Errorf("block-01 H200 Other = %d, want 6", b01.Other)
+	}
+	if b01.Grove != 0 {
+		t.Errorf("block-01 H200 Grove = %d, want 0", b01.Grove)
 	}
 
-	// block-02: 1 node with 8 GPUs, pod uses 8
+	// block-02: 1 node with 8 GPUs, pod uses 8 (Other)
 	b02 := summary.ByValue["block-02"]["H200"]
-	if b02.Available != 8 {
-		t.Errorf("block-02 H200 Available = %d, want 8", b02.Available)
+	if b02.Total != 8 {
+		t.Errorf("block-02 H200 Total = %d, want 8", b02.Total)
 	}
-	if b02.Used != 8 {
-		t.Errorf("block-02 H200 Used = %d, want 8", b02.Used)
+	if b02.Other != 8 {
+		t.Errorf("block-02 H200 Other = %d, want 8", b02.Other)
+	}
+	if b02.Grove != 0 {
+		t.Errorf("block-02 H200 Grove = %d, want 0", b02.Grove)
 	}
 }
 
@@ -292,21 +300,21 @@ func TestComputeDomainGPUSummary_MixedGPUTypes(t *testing.T) {
 		t.Fatalf("GPUTypes = %v, want [B200 H200]", summary.GPUTypes)
 	}
 
-	// block-01 has H200 only
+	// block-01 has H200 only (pod-a has no part-of label → Other)
 	b01H200 := summary.ByValue["block-01"]["H200"]
-	if b01H200.Available != 8 || b01H200.Used != 4 {
-		t.Errorf("block-01 H200 = %d/%d, want 4/8", b01H200.Used, b01H200.Available)
+	if b01H200.Total != 8 || b01H200.Other != 4 || b01H200.Grove != 0 {
+		t.Errorf("block-01 H200 = Grove=%d/Other=%d/Total=%d, want 0/4/8", b01H200.Grove, b01H200.Other, b01H200.Total)
 	}
 	// block-01 should have no B200
 	b01B200 := summary.ByValue["block-01"]["B200"]
-	if b01B200.Available != 0 || b01B200.Used != 0 {
-		t.Errorf("block-01 B200 = %d/%d, want 0/0", b01B200.Used, b01B200.Available)
+	if b01B200.Total != 0 || b01B200.Other != 0 || b01B200.Grove != 0 {
+		t.Errorf("block-01 B200 = Grove=%d/Other=%d/Total=%d, want 0/0/0", b01B200.Grove, b01B200.Other, b01B200.Total)
 	}
 
-	// block-02 has B200 only
+	// block-02 has B200 only (pod-b has no part-of label → Other)
 	b02B200 := summary.ByValue["block-02"]["B200"]
-	if b02B200.Available != 8 || b02B200.Used != 2 {
-		t.Errorf("block-02 B200 = %d/%d, want 2/8", b02B200.Used, b02B200.Available)
+	if b02B200.Total != 8 || b02B200.Other != 2 || b02B200.Grove != 0 {
+		t.Errorf("block-02 B200 = Grove=%d/Other=%d/Total=%d, want 0/2/8", b02B200.Grove, b02B200.Other, b02B200.Total)
 	}
 }
 
@@ -350,12 +358,15 @@ func TestComputeDomainGPUSummary_PendingPods(t *testing.T) {
 	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
 
 	b01 := summary.ByValue["block-01"]["H200"]
-	// Only running-pod should be counted (pending has no node)
-	if b01.Used != 2 {
-		t.Errorf("block-01 H200 Used = %d, want 2 (pending pod excluded)", b01.Used)
+	// Only running-pod should be counted (pending has no node); no part-of label → Other
+	if b01.Other != 2 {
+		t.Errorf("block-01 H200 Other = %d, want 2 (pending pod excluded)", b01.Other)
 	}
-	if b01.Available != 8 {
-		t.Errorf("block-01 H200 Available = %d, want 8", b01.Available)
+	if b01.Grove != 0 {
+		t.Errorf("block-01 H200 Grove = %d, want 0", b01.Grove)
+	}
+	if b01.Total != 8 {
+		t.Errorf("block-01 H200 Total = %d, want 8", b01.Total)
 	}
 }
 
@@ -375,11 +386,62 @@ func TestComputeDomainGPUSummary_EmptyNodes(t *testing.T) {
 	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
 
 	b01 := summary.ByValue["block-01"]["H200"]
-	if b01.Used != 0 {
-		t.Errorf("block-01 H200 Used = %d, want 0", b01.Used)
+	if b01.Grove != 0 {
+		t.Errorf("block-01 H200 Grove = %d, want 0", b01.Grove)
 	}
-	if b01.Available != 8 {
-		t.Errorf("block-01 H200 Available = %d, want 8", b01.Available)
+	if b01.Other != 0 {
+		t.Errorf("block-01 H200 Other = %d, want 0", b01.Other)
+	}
+	if b01.Total != 8 {
+		t.Errorf("block-01 H200 Total = %d, want 8", b01.Total)
+	}
+}
+
+func TestComputeDomainGPUSummary_ThreeWaySplit(t *testing.T) {
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.io/block": "block-01"},
+		"node-2": {"topology.io/block": "block-01"},
+	}
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "H200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+	}
+	pods := []TopologyPodInput{
+		// PCS-managed pod (has app.kubernetes.io/part-of label) → Grove
+		{Name: "grove-pod-1", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+		// PCS-managed pod → Grove
+		{Name: "grove-pod-2", NodeName: "node-2", GPURequests: 3, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "other-pcs",
+		}},
+		// Non-PCS pod (no part-of label) → Other
+		{Name: "other-pod-1", NodeName: "node-1", GPURequests: 2, Labels: map[string]string{}},
+		// Non-PCS pod → Other
+		{Name: "other-pod-2", NodeName: "node-2", GPURequests: 1, Labels: map[string]string{
+			"some-other-label": "value",
+		}},
+	}
+	matchingNodes := []string{"node-1", "node-2"}
+
+	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+
+	b01 := summary.ByValue["block-01"]["H200"]
+	// Grove: 4 + 3 = 7
+	if b01.Grove != 7 {
+		t.Errorf("block-01 H200 Grove = %d, want 7", b01.Grove)
+	}
+	// Other: 2 + 1 = 3
+	if b01.Other != 3 {
+		t.Errorf("block-01 H200 Other = %d, want 3", b01.Other)
+	}
+	// Total: 8 + 8 = 16
+	if b01.Total != 16 {
+		t.Errorf("block-01 H200 Total = %d, want 16", b01.Total)
 	}
 }
 
