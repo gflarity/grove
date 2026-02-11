@@ -25,12 +25,12 @@ import (
 
 // CLI defines the top-level Kong command structure for arborist.
 type CLI struct {
-	Debug string `help:"Path to debug log file (e.g. ~/tmp/arborist.log)." short:"d" type:"path"`
+	Debug string `help:"Write arborist CLI debug logs to the given file path." short:"d" type:"path"`
 
 	// Subcommands
 	TUI         TUICmd         `cmd:"" default:"withargs" help:"Launch the interactive TUI (default)."`
 	Topology    TopologyCmd    `cmd:"" help:"Show pods grouped by topology domain."`
-	Diagnostics DiagnosticsCmd `cmd:"" help:"Collect cluster diagnostics for a PodCliqueSet."`
+	Diagnostics DiagnosticsCmd `cmd:"" aliases:"diag" help:"Collect cluster diagnostics for a PodCliqueSet."`
 }
 
 // AfterApply is called by Kong after CLI flags are parsed but before a

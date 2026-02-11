@@ -73,6 +73,16 @@ func NewK8sClient() (*K8sClient, error) {
 	}, nil
 }
 
+// Clientset returns the underlying kubernetes.Interface clientset.
+func (k *K8sClient) Clientset() kubernetes.Interface {
+	return k.clientset
+}
+
+// DynamicClient returns the underlying dynamic.Interface client.
+func (k *K8sClient) DynamicClient() dynamic.Interface {
+	return k.dynamicClient
+}
+
 // NewGlobalCache creates a new InformerGlobalCache using this client's
 // clientset and dynamic client. The caller is responsible for calling Start()
 // and Stop() on the returned cache.
