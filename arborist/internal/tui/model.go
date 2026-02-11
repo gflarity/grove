@@ -614,11 +614,25 @@ func (m *Model) rebuildTopologyDomainsTable() {
 			m.topologyViewData.RawPods,
 		)
 
-		// Build dynamic column spec: VALUE + one column per GPU type
-		specs := []ColumnSpec{{Title: "VALUE", Weight: 2}}
-		for _, gpuType := range gpuSummary.GPUTypes {
-			specs = append(specs, ColumnSpec{Title: gpuType, Weight: 1})
+		// Compute pod counts per domain value
+		podCounts := data.ComputeDomainPodCounts(
+			currentKey,
+			matchingNodes,
+			m.topologyViewData.NodeLabels,
+			m.topologyViewData.RawPods,
+		)
+
+		// Build dynamic column spec: VALUE + <GPU> USAGE columns + GPU PODS + PODS + REG PODS
+		specs := []ColumnSpec{
+			{Title: "VALUE", Weight: 2},
 		}
+		for _, gpuType := range gpuSummary.GPUTypes {
+			specs = append(specs, ColumnSpec{Title: gpuType + " USAGE", Weight: 1})
+		}
+		specs = append(specs,
+			ColumnSpec{Title: "GPU PODS", Weight: 1},
+			ColumnSpec{Title: "PODS", Weight: 1},
+		)
 
 		// Clear rows, set columns, then set rows to avoid column/row mismatch panics.
 		m.topologyDomainsTable.SetRows([]table.Row{})
@@ -630,8 +644,9 @@ func (m *Model) rebuildTopologyDomainsTable() {
 
 		rows := make([]table.Row, 0, len(values))
 		for _, v := range values {
+			pc := podCounts[v]
 			row := table.Row{v}
-			// Append GPU used/available for each GPU type
+			// GPU usage columns first
 			valueCounts := gpuSummary.ByValue[v]
 			for _, gpuType := range gpuSummary.GPUTypes {
 				if valueCounts != nil {
@@ -641,6 +656,11 @@ func (m *Model) rebuildTopologyDomainsTable() {
 					row = append(row, "0/0")
 				}
 			}
+			// GPU PODS, PODS
+			row = append(row,
+				fmt.Sprintf("%d", pc.GPU),
+				fmt.Sprintf("%d", pc.Total),
+			)
 			rows = append(rows, row)
 		}
 		m.topologyDomainsTable.SetRows(rows)

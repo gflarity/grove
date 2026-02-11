@@ -538,6 +538,64 @@ func DistinctValuesForDomain(nodeLabels map[string]map[string]string, domainKey 
 	return result
 }
 
+// DomainPodCounts holds pod counts for a single topology domain value.
+type DomainPodCounts struct {
+	Total   int
+	GPU     int
+	Regular int
+}
+
+// ComputeDomainPodCounts counts pods per distinct domain value, scoped to matching nodes.
+// A pod is a "GPU pod" if GPURequests > 0, and a "regular pod" if GPURequests == 0.
+// Pods without a NodeName (pending) are not counted.
+func ComputeDomainPodCounts(
+	domainKey string,
+	matchingNodes []string,
+	nodeLabels map[string]map[string]string,
+	pods []TopologyPodInput,
+) map[string]DomainPodCounts {
+	// Build a set of matching nodes for fast lookup
+	nodeSet := make(map[string]bool, len(matchingNodes))
+	for _, n := range matchingNodes {
+		nodeSet[n] = true
+	}
+
+	// Build a map from node -> domain value for matching nodes
+	nodeToDomainValue := make(map[string]string, len(matchingNodes))
+	for _, nodeName := range matchingNodes {
+		labels := nodeLabels[nodeName]
+		if labels == nil {
+			continue
+		}
+		if v := labels[domainKey]; v != "" {
+			nodeToDomainValue[nodeName] = v
+		}
+	}
+
+	result := make(map[string]DomainPodCounts)
+	for _, pod := range pods {
+		if pod.NodeName == "" {
+			continue // pending pods are not counted
+		}
+		if !nodeSet[pod.NodeName] {
+			continue
+		}
+		domainValue, ok := nodeToDomainValue[pod.NodeName]
+		if !ok {
+			continue
+		}
+		counts := result[domainValue]
+		counts.Total++
+		if pod.GPURequests > 0 {
+			counts.GPU++
+		} else {
+			counts.Regular++
+		}
+		result[domainValue] = counts
+	}
+	return result
+}
+
 // FilterPodsByNodes returns pods scheduled on nodes in the given set.
 // Pods with Node == "<pending>" will not be matched unless "<pending>" is in nodeNames.
 func FilterPodsByNodes(pods []TopologyViewPod, nodeNames []string) []TopologyViewPod {

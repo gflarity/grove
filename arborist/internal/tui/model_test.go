@@ -2233,39 +2233,49 @@ func TestTopologyView_GPUColumnsAppearWhenDrilledIn(t *testing.T) {
 	// Drill into "block"
 	m = sendKey(m, tea.KeyEnter)
 
-	// Should now show block values with GPU columns
+	// Should now show block values with GPU USAGE + GPU PODS + PODS + REG PODS
 	rows = m.topologyDomainsTable.Rows()
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 block values (block-01, block-02), got %d", len(rows))
 	}
 
-	// Should have VALUE + B200 + H200 = 3 columns
-	if len(rows[0]) != 3 {
-		t.Fatalf("expected 3 columns (VALUE + B200 + H200), got %d cols: %v", len(rows[0]), rows[0])
+	// Column order: VALUE + B200 USAGE + H200 USAGE + GPU PODS + PODS = 5 columns
+	if len(rows[0]) != 5 {
+		t.Fatalf("expected 5 columns (VALUE + B200 USAGE + H200 USAGE + GPU PODS + PODS), got %d cols: %v", len(rows[0]), rows[0])
 	}
 
-	// block-01 has H200 nodes: node-1 (8 cap, 4 used), node-2 (8 cap, 2 used)
-	// So H200 = 6/16, B200 = 0/0
+	// block-01 has H200 nodes: node-1 (pod-a GPU=4), node-2 (pod-b GPU=2)
 	if rows[0][0] != "block-01" {
 		t.Errorf("expected first value 'block-01', got %q", rows[0][0])
 	}
-	// B200 column is first (alphabetical), H200 second
 	if rows[0][1] != "0/0" {
-		t.Errorf("block-01 B200 = %q, want '0/0'", rows[0][1])
+		t.Errorf("block-01 B200 USAGE = %q, want '0/0'", rows[0][1])
 	}
 	if rows[0][2] != "6/16" {
-		t.Errorf("block-01 H200 = %q, want '6/16'", rows[0][2])
+		t.Errorf("block-01 H200 USAGE = %q, want '6/16'", rows[0][2])
+	}
+	if rows[0][3] != "2" {
+		t.Errorf("block-01 GPU PODS = %q, want '2'", rows[0][3])
+	}
+	if rows[0][4] != "2" {
+		t.Errorf("block-01 PODS = %q, want '2'", rows[0][4])
 	}
 
-	// block-02 has B200 nodes: node-3 (8 cap, 8 used), node-4 (8 cap, 0 used)
+	// block-02 has B200 nodes: node-3 (pod-c GPU=8), node-4 (no pods)
 	if rows[1][0] != "block-02" {
 		t.Errorf("expected second value 'block-02', got %q", rows[1][0])
 	}
 	if rows[1][1] != "8/16" {
-		t.Errorf("block-02 B200 = %q, want '8/16'", rows[1][1])
+		t.Errorf("block-02 B200 USAGE = %q, want '8/16'", rows[1][1])
 	}
 	if rows[1][2] != "0/0" {
-		t.Errorf("block-02 H200 = %q, want '0/0'", rows[1][2])
+		t.Errorf("block-02 H200 USAGE = %q, want '0/0'", rows[1][2])
+	}
+	if rows[1][3] != "1" {
+		t.Errorf("block-02 GPU PODS = %q, want '1'", rows[1][3])
+	}
+	if rows[1][4] != "1" {
+		t.Errorf("block-02 PODS = %q, want '1'", rows[1][4])
 	}
 }
 
@@ -2281,7 +2291,7 @@ func TestTopologyView_GPUColumnsNotShownAtRootLevel(t *testing.T) {
 	}
 }
 
-func TestTopologyView_NoGPUNodes_NoExtraColumns(t *testing.T) {
+func TestTopologyView_NoGPUNodes_HasPodColumnsOnly(t *testing.T) {
 	mc := data.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	// Topology data without GPU info
@@ -2302,9 +2312,107 @@ func TestTopologyView_NoGPUNodes_NoExtraColumns(t *testing.T) {
 	// Drill into region
 	m = sendKey(m, tea.KeyEnter)
 
+	// Should have VALUE + GPU PODS + PODS = 3 columns (no GPU USAGE columns)
 	rows := m.topologyDomainsTable.Rows()
-	if len(rows) > 0 && len(rows[0]) != 1 {
-		t.Errorf("expected 1 column (VALUE only, no GPU types) when no GPU nodes, got %d: %v", len(rows[0]), rows[0])
+	if len(rows) > 0 && len(rows[0]) != 3 {
+		t.Errorf("expected 3 columns (VALUE + GPU PODS + PODS) when no GPU nodes, got %d: %v", len(rows[0]), rows[0])
+	}
+}
+
+func TestTopologyView_PodCountColumnsAppearWhenDrilledIn(t *testing.T) {
+	// Build topology data with a mix of GPU and regular pods
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "block", Key: "topology.io/block", ValuesCount: 2},
+		},
+		NodeLabels: map[string]map[string]string{
+			"node-1": {"topology.io/block": "block-01"},
+			"node-2": {"topology.io/block": "block-01"},
+			"node-3": {"topology.io/block": "block-02"},
+		},
+		Pods: []data.TopologyViewPod{
+			{Namespace: "default", Node: "node-1", Name: "gpu-pod-1", Phase: "Running"},
+			{Namespace: "default", Node: "node-1", Name: "reg-pod-1", Phase: "Running"},
+			{Namespace: "default", Node: "node-2", Name: "gpu-pod-2", Phase: "Running"},
+			{Namespace: "default", Node: "node-3", Name: "reg-pod-2", Phase: "Running"},
+			{Namespace: "default", Node: "node-3", Name: "reg-pod-3", Phase: "Running"},
+		},
+		DomainToKey: map[string]string{"block": "topology.io/block"},
+		RawPods: []data.TopologyPodInput{
+			{Name: "gpu-pod-1", NodeName: "node-1", GPURequests: 4},
+			{Name: "reg-pod-1", NodeName: "node-1", GPURequests: 0},
+			{Name: "gpu-pod-2", NodeName: "node-2", GPURequests: 2},
+			{Name: "reg-pod-2", NodeName: "node-3", GPURequests: 0},
+			{Name: "reg-pod-3", NodeName: "node-3", GPURequests: 0},
+		},
+		NodeGPUProducts: map[string]string{},
+		NodeGPUCapacity: map[string]int64{},
+	}
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
+
+	m := NewModel(mc)
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
+	m = sendRune(m, 't')
+
+	// At root level, no pod count columns
+	rows := m.topologyDomainsTable.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 domain row, got %d", len(rows))
+	}
+	if len(rows[0]) != 3 {
+		t.Fatalf("expected 3 columns at root (DOMAIN/KEY/VALUES), got %d", len(rows[0]))
+	}
+
+	// Drill into "block"
+	m = sendKey(m, tea.KeyEnter)
+
+	rows = m.topologyDomainsTable.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 block values, got %d", len(rows))
+	}
+
+	// Column order: VALUE + GPU PODS + PODS = 3 columns (no GPU USAGE since no GPU products)
+	if len(rows[0]) != 3 {
+		t.Fatalf("expected 3 columns, got %d: %v", len(rows[0]), rows[0])
+	}
+
+	// block-01: gpu-pod-1, reg-pod-1, gpu-pod-2 → GPU=2, Total=3
+	if rows[0][0] != "block-01" {
+		t.Errorf("first value = %q, want 'block-01'", rows[0][0])
+	}
+	if rows[0][1] != "2" {
+		t.Errorf("block-01 GPU PODS = %q, want '2'", rows[0][1])
+	}
+	if rows[0][2] != "3" {
+		t.Errorf("block-01 PODS = %q, want '3'", rows[0][2])
+	}
+
+	// block-02: reg-pod-2, reg-pod-3 → GPU=0, Total=2
+	if rows[1][0] != "block-02" {
+		t.Errorf("second value = %q, want 'block-02'", rows[1][0])
+	}
+	if rows[1][1] != "0" {
+		t.Errorf("block-02 GPU PODS = %q, want '0'", rows[1][1])
+	}
+	if rows[1][2] != "2" {
+		t.Errorf("block-02 PODS = %q, want '2'", rows[1][2])
+	}
+}
+
+func TestTopologyView_PodCountColumnsNotAtRootLevel(t *testing.T) {
+	m := newTopologyGPUTestModel()
+
+	// At root level, columns are DOMAIN, KEY, VALUES — no PODS columns
+	rows := m.topologyDomainsTable.Rows()
+	for _, row := range rows {
+		if len(row) != 3 {
+			t.Errorf("expected 3 columns at root level, got %d: %v", len(row), row)
+		}
 	}
 }
 

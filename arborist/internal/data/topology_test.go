@@ -1144,6 +1144,115 @@ func TestFilterPodsByNodes(t *testing.T) {
 	}
 }
 
+func TestComputeDomainPodCounts(t *testing.T) {
+	nodeLabels := map[string]map[string]string{
+		"node-1": {"topology.io/block": "block-01"},
+		"node-2": {"topology.io/block": "block-01"},
+		"node-3": {"topology.io/block": "block-02"},
+		"node-4": {"topology.io/block": "block-02"},
+	}
+	allNodes := []string{"node-1", "node-2", "node-3", "node-4"}
+
+	t.Run("basic multi-value scenario with mix of GPU and non-GPU pods", func(t *testing.T) {
+		pods := []TopologyPodInput{
+			{Name: "gpu-pod-1", NodeName: "node-1", GPURequests: 4},
+			{Name: "gpu-pod-2", NodeName: "node-2", GPURequests: 2},
+			{Name: "reg-pod-1", NodeName: "node-1", GPURequests: 0},
+			{Name: "gpu-pod-3", NodeName: "node-3", GPURequests: 8},
+			{Name: "reg-pod-2", NodeName: "node-3", GPURequests: 0},
+			{Name: "reg-pod-3", NodeName: "node-4", GPURequests: 0},
+		}
+
+		result := ComputeDomainPodCounts("topology.io/block", allNodes, nodeLabels, pods)
+
+		// block-01: node-1 (gpu-pod-1 + reg-pod-1), node-2 (gpu-pod-2) = 3 total, 2 GPU, 1 reg
+		b1 := result["block-01"]
+		if b1.Total != 3 {
+			t.Errorf("block-01 Total = %d, want 3", b1.Total)
+		}
+		if b1.GPU != 2 {
+			t.Errorf("block-01 GPU = %d, want 2", b1.GPU)
+		}
+		if b1.Regular != 1 {
+			t.Errorf("block-01 Regular = %d, want 1", b1.Regular)
+		}
+
+		// block-02: node-3 (gpu-pod-3 + reg-pod-2), node-4 (reg-pod-3) = 3 total, 1 GPU, 2 reg
+		b2 := result["block-02"]
+		if b2.Total != 3 {
+			t.Errorf("block-02 Total = %d, want 3", b2.Total)
+		}
+		if b2.GPU != 1 {
+			t.Errorf("block-02 GPU = %d, want 1", b2.GPU)
+		}
+		if b2.Regular != 2 {
+			t.Errorf("block-02 Regular = %d, want 2", b2.Regular)
+		}
+	})
+
+	t.Run("no pods returns empty map", func(t *testing.T) {
+		result := ComputeDomainPodCounts("topology.io/block", allNodes, nodeLabels, nil)
+		if len(result) != 0 {
+			t.Errorf("expected empty result, got %v", result)
+		}
+	})
+
+	t.Run("all GPU pods means Regular is 0", func(t *testing.T) {
+		pods := []TopologyPodInput{
+			{Name: "gpu-1", NodeName: "node-1", GPURequests: 1},
+			{Name: "gpu-2", NodeName: "node-1", GPURequests: 4},
+		}
+		result := ComputeDomainPodCounts("topology.io/block", allNodes, nodeLabels, pods)
+		b1 := result["block-01"]
+		if b1.Total != 2 || b1.GPU != 2 || b1.Regular != 0 {
+			t.Errorf("block-01 = %+v, want {Total:2 GPU:2 Regular:0}", b1)
+		}
+	})
+
+	t.Run("all regular pods means GPU is 0", func(t *testing.T) {
+		pods := []TopologyPodInput{
+			{Name: "reg-1", NodeName: "node-1", GPURequests: 0},
+			{Name: "reg-2", NodeName: "node-2", GPURequests: 0},
+		}
+		result := ComputeDomainPodCounts("topology.io/block", allNodes, nodeLabels, pods)
+		b1 := result["block-01"]
+		if b1.Total != 2 || b1.GPU != 0 || b1.Regular != 2 {
+			t.Errorf("block-01 = %+v, want {Total:2 GPU:0 Regular:2}", b1)
+		}
+	})
+
+	t.Run("scoped to matching nodes only", func(t *testing.T) {
+		pods := []TopologyPodInput{
+			{Name: "pod-on-1", NodeName: "node-1", GPURequests: 1},
+			{Name: "pod-on-3", NodeName: "node-3", GPURequests: 2},
+		}
+		// Only include node-1 and node-2 (block-01)
+		result := ComputeDomainPodCounts("topology.io/block", []string{"node-1", "node-2"}, nodeLabels, pods)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 domain value, got %d: %v", len(result), result)
+		}
+		b1 := result["block-01"]
+		if b1.Total != 1 || b1.GPU != 1 {
+			t.Errorf("block-01 = %+v, want {Total:1 GPU:1 Regular:0}", b1)
+		}
+		if _, ok := result["block-02"]; ok {
+			t.Error("expected block-02 to be absent (node-3 not in matching nodes)")
+		}
+	})
+
+	t.Run("pending pods (no NodeName) are not counted", func(t *testing.T) {
+		pods := []TopologyPodInput{
+			{Name: "scheduled", NodeName: "node-1", GPURequests: 1},
+			{Name: "pending", NodeName: "", GPURequests: 4},
+		}
+		result := ComputeDomainPodCounts("topology.io/block", allNodes, nodeLabels, pods)
+		b1 := result["block-01"]
+		if b1.Total != 1 {
+			t.Errorf("block-01 Total = %d, want 1 (pending pod should not be counted)", b1.Total)
+		}
+	})
+}
+
 func TestResolveCliqueTemplateName(t *testing.T) {
 	tests := []struct {
 		name   string
