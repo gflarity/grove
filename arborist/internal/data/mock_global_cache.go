@@ -109,6 +109,23 @@ func (m *MockGlobalCache) GetPodYAML(_ context.Context, podName, namespace strin
 	return yaml, nil
 }
 
+// GetResourceYAML returns pre-configured YAML for a resource.
+func (m *MockGlobalCache) GetResourceYAML(_ context.Context, resourceType, name, namespace string) (string, error) {
+	if err, ok := m.Errors["GetResourceYAML"]; ok {
+		return "", err
+	}
+	// For Pods, delegate to GetPodYAML for backwards compatibility
+	if resourceType == "Pod" {
+		return m.GetPodYAML(nil, name, namespace)
+	}
+	key := namespace + "/" + resourceType + "/" + name
+	yaml, ok := m.PodYAMLs[key]
+	if !ok {
+		return "", fmt.Errorf("Resource YAML for %s not found", key)
+	}
+	return yaml, nil
+}
+
 // SetSnapshot sets the current snapshot. Thread-safe.
 func (m *MockGlobalCache) SetSnapshot(s *CacheSnapshot) {
 	m.mu.Lock()

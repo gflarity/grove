@@ -268,6 +268,45 @@ func (c *InformerGlobalCache) GetPodYAML(ctx context.Context, podName, namespace
 	return string(yamlData), nil
 }
 
+// GetResourceYAML fetches any resource's YAML by type and name.
+// For CRDs it uses the dynamic client; for Pods it delegates to GetPodYAML.
+func (c *InformerGlobalCache) GetResourceYAML(ctx context.Context, resourceType, name, namespace string) (string, error) {
+	switch resourceType {
+	case "Pod":
+		return c.GetPodYAML(ctx, name, namespace)
+	case "PodCliqueSet":
+		return c.getDynamicResourceYAML(ctx, globalPcsGVR, name, namespace)
+	case "PodCliqueScalingGroup":
+		return c.getDynamicResourceYAML(ctx, globalPcsgGVR, name, namespace)
+	case "PodClique":
+		return c.getDynamicResourceYAML(ctx, globalPcGVR, name, namespace)
+	default:
+		return "", fmt.Errorf("unsupported resource type: %s", resourceType)
+	}
+}
+
+// getDynamicResourceYAML fetches a CRD resource via the dynamic client and returns YAML.
+func (c *InformerGlobalCache) getDynamicResourceYAML(ctx context.Context, gvr schema.GroupVersionResource, name, namespace string) (string, error) {
+	var obj *unstructured.Unstructured
+	var err error
+
+	if namespace != "" {
+		obj, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	} else {
+		obj, err = c.dynamicClient.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get %s/%s: %w", gvr.Resource, name, err)
+	}
+
+	yamlData, err := yaml.Marshal(obj.Object)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal %s/%s to YAML: %w", gvr.Resource, name, err)
+	}
+
+	return string(yamlData), nil
+}
+
 // onChange is called by informer event handlers whenever any watched resource changes.
 func (c *InformerGlobalCache) onChange() {
 	c.debounceMu.Lock()

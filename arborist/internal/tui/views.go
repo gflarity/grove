@@ -18,6 +18,11 @@ func (m Model) View() string {
 		return "Syncing..."
 	}
 
+	// YAML overlay takes over the full screen
+	if m.yamlOverlayActive {
+		return m.renderYAMLOverlay()
+	}
+
 	var sections []string
 
 	// Header bar
@@ -145,6 +150,7 @@ func (m Model) renderHeaderFrame() string {
 		items = append(items, menuItem{"enter", "Drill"})
 	}
 
+	items = append(items, menuItem{"y", "YAML"})
 	items = append(items, menuItem{"t", "Toggle"})
 
 	if m.viewState.ViewType != data.ForestView {
@@ -583,6 +589,92 @@ func (m Model) renderPodViewport() string {
 	return m.podViewport.View()
 }
 
+// renderYAMLOverlay renders the full-screen YAML overlay with framed viewport.
+func (m Model) renderYAMLOverlay() string {
+	var sections []string
+
+	// Title: "YAML: PodCliqueSet/my-resource"
+	title := SectionHeaderActiveStyle.Render("YAML") + " " +
+		SectionCountStyle.Render(m.yamlResourceType+"/"+m.yamlResourceName)
+
+	// Scroll position indicator
+	scrollPct := ""
+	if m.yamlViewport.TotalLineCount() > 0 {
+		pct := int(m.yamlViewport.ScrollPercent() * 100)
+		scrollPct = fmt.Sprintf(" %d%%", pct)
+	}
+
+	// Key hints for the overlay
+	hints := MenuKeyStyle.Render("<esc>") + MenuActionStyle.Render("Close") + "  " +
+		MenuKeyStyle.Render("<↑↓>") + MenuActionStyle.Render("Scroll") + "  " +
+		MenuKeyStyle.Render("</>") + MenuActionStyle.Render("Search")
+	if m.yamlSearchText != "" {
+		hints += "  " + MenuKeyStyle.Render("<n/N>") + MenuActionStyle.Render("Next/Prev")
+	}
+	hints += "  " + SectionCountStyle.Render(scrollPct)
+
+	// Add search bar if active
+	if m.yamlSearchActive {
+		searchFrame := m.renderYAMLSearchFrame()
+		sections = append(sections, searchFrame)
+	} else if m.yamlSearchText != "" {
+		// Show persistent search indicator
+		searchIndicator := FilterBarStyle.Render("search: "+m.yamlSearchText)
+		sections = append(sections, searchIndicator)
+	}
+
+	// Calculate content height: total height minus header, footer, frame borders, search
+	fixedLines := 4 // frame top + bottom + title line + hints line
+	if m.yamlSearchActive {
+		fixedLines += 3 // search frame
+	} else if m.yamlSearchText != "" {
+		fixedLines += 1 // search indicator
+	}
+
+	contentHeight := m.height - fixedLines
+	if contentHeight < 3 {
+		contentHeight = 3
+	}
+
+	// Ensure viewport height matches
+	m.yamlViewport.Height = contentHeight
+
+	// Render the YAML viewport content inside a frame
+	content := m.yamlViewport.View()
+	frame := renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
+
+	// Build output: search (if any) + frame + hints
+	result := ""
+	if len(sections) > 0 {
+		result = lipgloss.JoinVertical(lipgloss.Left, sections...) + "\n"
+	}
+	result += frame + "\n" + hints
+
+	return result
+}
+
+// renderYAMLSearchFrame renders the search input as a framed box in the YAML overlay.
+func (m Model) renderYAMLSearchFrame() string {
+	border := lipgloss.NormalBorder()
+	bc := lipgloss.NewStyle().Foreground(ColorBorderFocused)
+	contentWidth := m.width - 2
+
+	content := "🔍" + m.yamlSearchInput.View()
+	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
+
+	lineWidth := lipgloss.Width(content)
+	pad := contentWidth - lineWidth
+	if pad < 0 {
+		pad = 0
+	}
+
+	topLine := bc.Render(border.TopLeft + strings.Repeat(border.Top, contentWidth) + border.TopRight)
+	contentLine := bc.Render(border.Left) + content + strings.Repeat(" ", pad) + bc.Render(border.Right)
+	bottomLine := bc.Render(border.BottomLeft + strings.Repeat(border.Bottom, contentWidth) + border.BottomRight)
+
+	return topLine + "\n" + contentLine + "\n" + bottomLine
+}
+
 // renderBreadcrumb returns the breadcrumb title for the current view with lipgloss styling.
 func (m Model) renderBreadcrumb() string {
 	forestStyle := BreadcrumbStyles["Forest"]
@@ -658,6 +750,7 @@ func (m Model) renderMenuBar() string {
 		items = append(items, menuItem{"enter", "Drill"})
 	}
 
+	items = append(items, menuItem{"y", "YAML"})
 	items = append(items, menuItem{"t", "Toggle"})
 
 	if m.viewState.ViewType != data.ForestView {
@@ -696,6 +789,7 @@ func (m Model) buildShortcutsString() string {
 		parts = append(parts, "<enter>Drill")
 	}
 
+	parts = append(parts, "<y>YAML")
 	parts = append(parts, "<t>Toggle")
 
 	if m.viewState.ViewType != data.ForestView {

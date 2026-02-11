@@ -131,6 +131,16 @@ type Model struct {
 	filterInput          textinput.Model
 	podViewport          viewport.Model
 
+	// YAML overlay (shown when user presses 'y' on any resource)
+	yamlOverlayActive bool
+	yamlViewport      viewport.Model
+	yamlContent       string // raw YAML content
+	yamlResourceName  string // name of the resource being viewed
+	yamlResourceType  string // type of the resource being viewed
+	yamlSearchActive  bool
+	yamlSearchInput   textinput.Model
+	yamlSearchText    string
+
 	// Topology view state
 	topologyViewData   *data.TopologyViewData
 	topologyDrillStack []data.TopologyDrillSelection
@@ -234,17 +244,26 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 	ci.Prompt = ": "
 	ci.PromptStyle = CommandBarStyle
 
+	// Initialize YAML search input
+	yi := textinput.New()
+	yi.Placeholder = ""
+	yi.CharLimit = 256
+	yi.Width = 40
+	yi.Prompt = "/ "
+	yi.PromptStyle = FilterBarStyle
+
 	m := Model{
 		viewState: data.ViewState{
 			ViewType: data.ForestView,
 		},
-		activePane:   data.ResourcesPane,
-		allResources: make(map[string][]data.Resource),
-		podYAMLData:  make(map[string]string),
-		cache:        cache,
-		ctx:          context.Background(),
-		filterInput:  ti,
-		commandInput: ci,
+		activePane:    data.ResourcesPane,
+		allResources:  make(map[string][]data.Resource),
+		podYAMLData:   make(map[string]string),
+		cache:         cache,
+		ctx:           context.Background(),
+		filterInput:   ti,
+		commandInput:  ci,
+		yamlSearchInput: yi,
 	}
 
 	// Apply options

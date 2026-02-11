@@ -34,6 +34,19 @@ func waitForCacheUpdateCmd(cache data.GlobalCache) tea.Cmd {
 	}
 }
 
+// loadResourceYAMLCmd creates a command to load any resource's YAML for the YAML overlay.
+func loadResourceYAMLCmd(cache data.GlobalCache, ctx context.Context, resourceType, name, namespace string) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("loadResourceYAML", "type", resourceType, "name", name, "ns", namespace)
+		if cache == nil {
+			return ResourceYAMLMsg{ResourceType: resourceType, ResourceName: name, YAML: "# No cache available"}
+		}
+
+		yaml, err := cache.GetResourceYAML(ctx, resourceType, name, namespace)
+		return ResourceYAMLMsg{ResourceType: resourceType, ResourceName: name, YAML: yaml, Err: err}
+	}
+}
+
 // loadPodYAMLCmd creates a command to load a Pod's YAML via direct API GET.
 // This is the one exception — Pod YAML is large and rarely accessed.
 func loadPodYAMLCmd(cache data.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
