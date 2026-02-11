@@ -676,5 +676,5 @@ func colorizeResourceRow(r data.Resource) []string {
 // Note: bubbles/table doesn't handle per-cell ANSI styling well,
 // so we return plain text and rely on row-level styling (Selected style).
 func colorizeEventRow(e data.Event) []string {
-	return []string{e.Type, e.Reason, e.Age, e.From, e.Message}
+	return []string{e.Type, e.Kind, e.Reason, e.Age, e.From, e.Message}
 }

@@ -34,6 +34,7 @@ var (
 
 	eventColumnSpecs = []ColumnSpec{
 		{Title: "TYPE", Weight: 2},
+		{Title: "KIND", Weight: 3},
 		{Title: "REASON", Weight: 3},
 		{Title: "AGE", Weight: 1},
 		{Title: "FROM", Weight: 3},
