@@ -18,6 +18,7 @@ package data
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -144,6 +145,22 @@ func ViewTypeName(vt ViewType) string {
 		return "TopologyView"
 	default:
 		return fmt.Sprintf("ViewType(%d)", vt)
+	}
+}
+
+// SortResourcesByName sorts a slice of Resource in place by Name.
+// This ensures stable, deterministic row ordering in the TUI regardless
+// of Go map iteration order or informer store List() order.
+func SortResourcesByName(resources []Resource) {
+	sort.Slice(resources, func(i, j int) bool {
+		return resources[i].Name < resources[j].Name
+	})
+}
+
+// SortResourceMapsByName sorts every []Resource value in the map by Name.
+func SortResourceMapsByName(m map[string][]Resource) {
+	for _, resources := range m {
+		SortResourcesByName(resources)
 	}
 }
 
