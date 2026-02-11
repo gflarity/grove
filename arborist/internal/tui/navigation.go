@@ -56,10 +56,12 @@ func (m *Model) updateTableFocus() {
 }
 
 // eventsCommandForSelection returns a tea.Cmd that updates the events table
-// to reflect the currently highlighted resource row. In ForestView this means
-// loading events for the highlighted PodCliqueSet from the backend; in
-// PodCliqueView the events are already loaded so we just rebuild the table
-// with the client-side filter (no server call needed).
+// to reflect the currently highlighted resource row. Called on every cursor
+// up/down in the resources table.
+//
+// Design principle: events should always reflect the subtree of the currently
+// highlighted row. At every level, navigating between rows reloads events
+// scoped to that row's subtree.
 func (m *Model) eventsCommandForSelection() tea.Cmd {
 	selectedRow := m.resourcesTable.SelectedRow()
 	if len(selectedRow) < 3 {
@@ -72,16 +74,83 @@ func (m *Model) eventsCommandForSelection() tea.Cmd {
 
 	switch m.viewState.ViewType {
 	case data.ForestView:
+		// Each PCS is an independent resource tree → load that PCS's events
 		if selectedType == "PodCliqueSet" {
 			return loadEventsForPCSCmd(m.provider, m.ctx, selectedName, selectedNamespace)
 		}
+
+	case data.PodCliqueSetView:
+		// Highlighting a PodCliqueSetReplica → load events for that replica's subtree
+		if selectedType == "PodCliqueSetReplica" {
+			// Extract replica index from name (format: "pcsname-replica-INDEX")
+			parts := strings.Split(selectedName, "-replica-")
+			if len(parts) == 2 {
+				return loadEventsForReplicaCmd(m.provider, m.ctx, m.viewState.SelectedPodCliqueSet, selectedNamespace, parts[1])
+			}
+		}
+
+	case data.PodCliqueSetReplicaView:
+		// Highlighting a PCSG → load events for that PCSG's subtree
+		if selectedType == "PodCliqueScalingGroup" {
+			return loadEventsForPCSGCmd(m.provider, m.ctx, selectedName, selectedNamespace)
+		}
+		// Highlighting a standalone PodClique → load events for that PodClique
+		if selectedType == "PodClique" {
+			return loadEventsForPodCliqueCmd(m.provider, m.ctx, selectedName, selectedNamespace)
+		}
+
+	case data.PodCliqueScalingGroupView:
+		// Highlighting a PodCliqueScalingGroupReplica → load events for that PCSG replica's subtree
+		if selectedType == "PodCliqueScalingGroupReplica" {
+			// Extract replica index from name (format: "pcsgName-replica-INDEX")
+			parts := strings.Split(selectedName, "-replica-")
+			if len(parts) == 2 {
+				return loadEventsForPCSGReplicaCmd(m.provider, m.ctx, m.viewState.SelectedScalingGroup, selectedNamespace, parts[1])
+			}
+		}
+
+	case data.PodCliqueScalingGroupReplicaView:
+		// Highlighting a PodClique → load events for that PodClique
+		if selectedType == "PodClique" {
+			return loadEventsForPodCliqueCmd(m.provider, m.ctx, selectedName, selectedNamespace)
+		}
+
 	case data.PodCliqueView:
 		// Client-side filter: getFilteredEvents reads the current selected row,
-		// so just rebuilding the events table is sufficient.
+		// so just rebuilding the events table is sufficient (no server call).
 		m.rebuildEventsTable()
 	}
 
 	return nil
+}
+
+// resolveNamespace returns the namespace for the current PCS context by
+// checking stored resources. All resources under a PCS share the same namespace.
+func (m Model) resolveNamespace() string {
+	// Try current view resources
+	viewKey := m.getCurrentViewKey()
+	if resources, ok := m.allResources[viewKey]; ok && len(resources) > 0 {
+		return resources[0].Namespace
+	}
+	// Try PCS replica key
+	replicaKey := "PodCliqueSetReplica/" + m.viewState.SelectedPodCliqueSet + "/" + m.viewState.SelectedReplicaIndex
+	if resources, ok := m.allResources[replicaKey]; ok && len(resources) > 0 {
+		return resources[0].Namespace
+	}
+	// Try PCS key
+	pcsKey := "PodCliqueSet/" + m.viewState.SelectedPodCliqueSet
+	if resources, ok := m.allResources[pcsKey]; ok && len(resources) > 0 {
+		return resources[0].Namespace
+	}
+	// Try forest
+	if resources, ok := m.allResources["forest"]; ok {
+		for _, r := range resources {
+			if r.Name == m.viewState.SelectedPodCliqueSet {
+				return r.Namespace
+			}
+		}
+	}
+	return "default"
 }
 
 // getCurrentViewKey returns the key for looking up resources in allResources map.
@@ -95,6 +164,8 @@ func (m Model) getCurrentViewKey() string {
 		return "PodCliqueSetReplica/" + m.viewState.SelectedPodCliqueSet + "/" + m.viewState.SelectedReplicaIndex
 	case data.PodCliqueScalingGroupView:
 		return "PodCliqueScalingGroup/" + m.viewState.SelectedScalingGroup
+	case data.PodCliqueScalingGroupReplicaView:
+		return "PodCliqueScalingGroupReplica/" + m.viewState.SelectedScalingGroup + "/" + m.viewState.SelectedPCSGReplicaIndex
 	case data.PodCliqueView:
 		return "PodClique/" + m.viewState.SelectedPodClique
 	case data.PodView:
@@ -131,11 +202,15 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 
 	switch selectedType {
 	case "PodCliqueSet":
+		oldViewType := m.viewState.ViewType
+		m.viewState.ViewType = data.PodCliqueSetView
 		m.viewState.SelectedPodCliqueSet = selectedName
 		m.viewState.SelectedReplicaIndex = ""
 		m.viewState.SelectedScalingGroup = ""
 		m.viewState.SelectedPodClique = ""
 		m.viewState.SelectedPod = ""
+
+		debugLogStateTransition(oldViewType, data.PodCliqueSetView, fmt.Sprintf("pcs=%q", selectedName))
 
 		// Clear cached topology data
 		m.cachedTopologyInfo = nil
@@ -173,16 +248,36 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 		oldViewType := m.viewState.ViewType
 		m.viewState.ViewType = data.PodCliqueScalingGroupView
 		m.viewState.SelectedScalingGroup = selectedName
+		m.viewState.SelectedPCSGReplicaIndex = ""
 		m.viewState.SelectedPodClique = ""
 		m.viewState.SelectedPod = ""
 
 		debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupView, fmt.Sprintf("pcsg=%q", selectedName))
 
-		// Load children resources and events for this PCSG
+		// Load PCSG replica indexes (mirrors PCS replica flow)
 		cmds = append(cmds,
-			loadPCSGChildrenCmd(m.provider, m.ctx, selectedName, selectedNamespace),
+			loadPCSGReplicasCmd(m.provider, m.ctx, selectedName, selectedNamespace),
 			loadEventsForPCSGCmd(m.provider, m.ctx, selectedName, selectedNamespace),
 		)
+
+	case "PodCliqueScalingGroupReplica":
+		// Extract replica index from name (format: "pcsgName-replica-INDEX")
+		parts := strings.Split(selectedName, "-replica-")
+		if len(parts) == 2 {
+			oldViewType := m.viewState.ViewType
+			m.viewState.ViewType = data.PodCliqueScalingGroupReplicaView
+			m.viewState.SelectedPCSGReplicaIndex = parts[1]
+			m.viewState.SelectedPodClique = ""
+			m.viewState.SelectedPod = ""
+
+			debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupReplicaView, fmt.Sprintf("pcsg-replica=%q", parts[1]))
+
+			// Load PodCliques for this PCSG replica and events scoped to it
+			cmds = append(cmds,
+				loadPCSGReplicaChildrenCmd(m.provider, m.ctx, m.viewState.SelectedScalingGroup, selectedNamespace, parts[1]),
+				loadEventsForPCSGReplicaCmd(m.provider, m.ctx, m.viewState.SelectedScalingGroup, selectedNamespace, parts[1]),
+			)
+		}
 
 	case "PodClique":
 		oldViewType := m.viewState.ViewType
@@ -310,6 +405,147 @@ func (m *Model) topologyDrillBack() {
 	m.rebuildTopologyPodsTable()
 }
 
+// =============================================================================
+// Command Mode (vim-style ":" lens switching with autocomplete)
+// =============================================================================
+
+// lensCommand represents a named lens (view) that can be switched to via command mode.
+type lensCommand struct {
+	Name string // canonical name shown in UI, e.g. "topology"
+}
+
+// lensCommands is the registry of all available lens commands, sorted alphabetically.
+// This is the single source of truth for command-mode autocomplete and matching.
+var lensCommands = []lensCommand{
+	{Name: "forest"},
+	{Name: "topology"},
+}
+
+// LensCommandNames returns the list of available command names.
+// Exported for testing.
+func LensCommandNames() []string {
+	names := make([]string, len(lensCommands))
+	for i, c := range lensCommands {
+		names[i] = c.Name
+	}
+	return names
+}
+
+// matchLensCommand finds the best lens command matching the given prefix.
+// Returns the matching command name and true if exactly one command matches.
+// Returns ("", false) if zero or multiple commands match.
+func matchLensCommand(prefix string) (string, bool) {
+	if prefix == "" {
+		return "", false
+	}
+	prefix = strings.ToLower(prefix)
+	var matches []string
+	for _, c := range lensCommands {
+		if strings.HasPrefix(c.Name, prefix) {
+			matches = append(matches, c.Name)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return "", false
+}
+
+// completeLensCommand returns the longest common prefix among all lens commands
+// that match the given input prefix. Used for tab-completion.
+// If no commands match, returns the original prefix unchanged.
+// If exactly one command matches, returns its full name.
+func completeLensCommand(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+	lower := strings.ToLower(prefix)
+	var matches []string
+	for _, c := range lensCommands {
+		if strings.HasPrefix(c.Name, lower) {
+			matches = append(matches, c.Name)
+		}
+	}
+	if len(matches) == 0 {
+		return prefix
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	// Find longest common prefix among matches
+	lcp := matches[0]
+	for _, m := range matches[1:] {
+		for i := 0; i < len(lcp); i++ {
+			if i >= len(m) || lcp[i] != m[i] {
+				lcp = lcp[:i]
+				break
+			}
+		}
+	}
+	return lcp
+}
+
+// executeCommand attempts to execute a command string by matching it to a lens
+// and switching the view. Returns the updated model and any tea.Cmd.
+func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
+	input = strings.TrimSpace(strings.ToLower(input))
+	if input == "" {
+		return m, nil
+	}
+
+	// Try exact match first, then prefix match
+	matched := ""
+	for _, c := range lensCommands {
+		if c.Name == input {
+			matched = c.Name
+			break
+		}
+	}
+	if matched == "" {
+		if name, ok := matchLensCommand(input); ok {
+			matched = name
+		}
+	}
+	if matched == "" {
+		debugLogWithContext("command mode: no match for %q", input)
+		return m, nil
+	}
+
+	debugLogWithContext("command mode: executing %q (matched %q)", input, matched)
+
+	switch matched {
+	case "forest":
+		if m.viewState.ViewType == data.TopologyView {
+			m.viewState.ViewType = data.ForestView
+			m.activePane = data.ResourcesPane
+			m.updateTableFocus()
+		}
+		// If already in forest hierarchy, go back to root
+		if m.viewState.ViewType != data.ForestView {
+			m.viewState.ViewType = data.ForestView
+			m.viewState.SelectedPodCliqueSet = ""
+			m.viewState.SelectedReplicaIndex = ""
+			m.viewState.SelectedScalingGroup = ""
+			m.viewState.SelectedPodClique = ""
+			m.viewState.SelectedPod = ""
+			m.cachedTopologyInfo = nil
+			m.cachedPods = nil
+			m.cachedNodeLabels = nil
+			m.activePane = data.ResourcesPane
+			m.updateTableFocus()
+			m.rebuildResourcesTable()
+			m.rebuildEventsTable()
+			return m, loadForestDataCmd(m.provider, m.ctx)
+		}
+		return m, nil
+
+	case "topology":
+		return m.toggleTopologyView()
+	}
+
+	return m, nil
+}
+
 // topologyBreadcrumbString generates a breadcrumb like "region=us-east-1 > zone=us-east-1a".
 func (m *Model) topologyBreadcrumbString() string {
 	if len(m.topologyDrillStack) == 0 {
@@ -390,6 +626,8 @@ func (m Model) navigateBack() (tea.Model, tea.Cmd) {
 			m.allEvents = []data.Event{}
 		} else {
 			// Multiple replicas, go back to PodCliqueSet view
+			// Capture the replica index we came from — cursor will land on this row
+			returningToReplicaIndex := m.viewState.SelectedReplicaIndex
 			m.viewState.ViewType = data.PodCliqueSetView
 			m.viewState.SelectedReplicaIndex = ""
 			m.viewState.SelectedScalingGroup = ""
@@ -398,25 +636,103 @@ func (m Model) navigateBack() (tea.Model, tea.Cmd) {
 
 			debugLogStateTransition(oldViewType, data.PodCliqueSetView, "")
 
+			// Load replicas data; events scoped to the replica cursor will land on
 			cmds = append(cmds,
 				loadReplicasCmd(m.provider, m.ctx, m.viewState.SelectedPodCliqueSet, namespace),
-				loadEventsForPCSCmd(m.provider, m.ctx, m.viewState.SelectedPodCliqueSet, namespace),
 			)
+			if returningToReplicaIndex != "" {
+				cmds = append(cmds,
+					loadEventsForReplicaCmd(m.provider, m.ctx, m.viewState.SelectedPodCliqueSet, namespace, returningToReplicaIndex),
+				)
+			}
 		}
 
 	case data.PodCliqueScalingGroupView:
 		// Go back to PodCliqueSetReplica
+		namespace := m.resolveNamespace()
+		// Capture the PCSG we came from — the cursor will land on this row
+		returningToScalingGroup := m.viewState.SelectedScalingGroup
 		m.viewState.ViewType = data.PodCliqueSetReplicaView
 		m.viewState.SelectedScalingGroup = ""
+		m.viewState.SelectedPCSGReplicaIndex = ""
 		m.viewState.SelectedPodClique = ""
 		m.viewState.SelectedPod = ""
 
 		debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, "")
 
+		// Load events scoped to the PCSG row the cursor will land on
+		if returningToScalingGroup != "" {
+			cmds = append(cmds,
+				loadEventsForPCSGCmd(m.provider, m.ctx, returningToScalingGroup, namespace),
+			)
+		} else {
+			cmds = append(cmds,
+				loadEventsForReplicaCmd(m.provider, m.ctx, m.viewState.SelectedPodCliqueSet, namespace, m.viewState.SelectedReplicaIndex),
+			)
+		}
+
+	case data.PodCliqueScalingGroupReplicaView:
+		// Check if we should go back to PodCliqueScalingGroupView or PodCliqueSetReplicaView
+		// (if there's only 1 PCSG replica, we skip PodCliqueScalingGroupView)
+		pcsgKey := "PodCliqueScalingGroup/" + m.viewState.SelectedScalingGroup
+		pcsgResources := m.allResources[pcsgKey]
+		namespace := m.resolveNamespace()
+
+		if len(pcsgResources) == 1 {
+			// Only 1 PCSG replica, so we came directly from PodCliqueSetReplicaView
+			// Capture the PCSG we came from — the cursor will land on this row
+			returningToScalingGroup := m.viewState.SelectedScalingGroup
+			m.viewState.ViewType = data.PodCliqueSetReplicaView
+			m.viewState.SelectedScalingGroup = ""
+			m.viewState.SelectedPCSGReplicaIndex = ""
+
+			debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, "single PCSG replica skip")
+
+			// Load events scoped to the PCSG row the cursor will land on
+			if returningToScalingGroup != "" {
+				cmds = append(cmds,
+					loadEventsForPCSGCmd(m.provider, m.ctx, returningToScalingGroup, namespace),
+				)
+			} else {
+				cmds = append(cmds,
+					loadEventsForReplicaCmd(m.provider, m.ctx, m.viewState.SelectedPodCliqueSet, namespace, m.viewState.SelectedReplicaIndex),
+				)
+			}
+		} else {
+			// Multiple PCSG replicas, go back to PodCliqueScalingGroupView
+			// Capture the PCSG replica index — cursor will land on this row
+			returningToPCSGReplicaIndex := m.viewState.SelectedPCSGReplicaIndex
+			m.viewState.ViewType = data.PodCliqueScalingGroupView
+			m.viewState.SelectedPCSGReplicaIndex = ""
+			m.viewState.SelectedPodClique = ""
+			m.viewState.SelectedPod = ""
+
+			debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupView, "")
+
+			// Load events scoped to the PCSG replica the cursor will land on
+			if returningToPCSGReplicaIndex != "" {
+				cmds = append(cmds,
+					loadPCSGReplicasCmd(m.provider, m.ctx, m.viewState.SelectedScalingGroup, namespace),
+					loadEventsForPCSGReplicaCmd(m.provider, m.ctx, m.viewState.SelectedScalingGroup, namespace, returningToPCSGReplicaIndex),
+				)
+			} else {
+				cmds = append(cmds,
+					loadPCSGReplicasCmd(m.provider, m.ctx, m.viewState.SelectedScalingGroup, namespace),
+					loadEventsForPCSGCmd(m.provider, m.ctx, m.viewState.SelectedScalingGroup, namespace),
+				)
+			}
+		}
+
 	case data.PodCliqueView:
-		// Go back to parent (either PodCliqueSetReplica or PodCliqueScalingGroup)
+		// Go back to parent — determine which level based on view state
+		namespace := m.resolveNamespace()
+		// Capture the PodClique we came from — the cursor will land on this row
+		returningToPodClique := m.viewState.SelectedPodClique
 		var newViewType data.ViewType
-		if m.viewState.SelectedScalingGroup != "" {
+		if m.viewState.SelectedScalingGroup != "" && m.viewState.SelectedPCSGReplicaIndex != "" {
+			newViewType = data.PodCliqueScalingGroupReplicaView
+		} else if m.viewState.SelectedScalingGroup != "" {
+			// Shouldn't happen in normal flow but handle gracefully
 			newViewType = data.PodCliqueScalingGroupView
 		} else {
 			newViewType = data.PodCliqueSetReplicaView
@@ -427,12 +743,25 @@ func (m Model) navigateBack() (tea.Model, tea.Cmd) {
 
 		debugLogStateTransition(oldViewType, newViewType, "")
 
+		// Load events scoped to the PodClique row the cursor will land on
+		if returningToPodClique != "" {
+			cmds = append(cmds,
+				loadEventsForPodCliqueCmd(m.provider, m.ctx, returningToPodClique, namespace),
+			)
+		}
+
 	case data.PodView:
 		// Go back to PodClique view
+		namespace := m.resolveNamespace()
 		m.viewState.ViewType = data.PodCliqueView
 		m.viewState.SelectedPod = ""
 
 		debugLogStateTransition(oldViewType, data.PodCliqueView, "")
+
+		// Reload events for the PodClique
+		cmds = append(cmds,
+			loadEventsForPodCliqueCmd(m.provider, m.ctx, m.viewState.SelectedPodClique, namespace),
+		)
 	}
 
 	m.rebuildResourcesTable()

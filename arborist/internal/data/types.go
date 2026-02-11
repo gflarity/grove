@@ -39,6 +39,7 @@ const (
 	PodCliqueSetView
 	PodCliqueSetReplicaView
 	PodCliqueScalingGroupView
+	PodCliqueScalingGroupReplicaView
 	PodCliqueView
 	PodView
 	TopologyView
@@ -46,12 +47,13 @@ const (
 
 // ViewState tracks the current navigation state.
 type ViewState struct {
-	ViewType             ViewType
-	SelectedPodCliqueSet string
-	SelectedReplicaIndex string // The replica index (e.g., "0", "1", "2")
-	SelectedScalingGroup string
-	SelectedPodClique    string
-	SelectedPod          string
+	ViewType                 ViewType
+	SelectedPodCliqueSet     string
+	SelectedReplicaIndex     string // The PCS replica index (e.g., "0", "1", "2")
+	SelectedScalingGroup     string
+	SelectedPCSGReplicaIndex string // The PCSG replica index (e.g., "0", "1", "2")
+	SelectedPodClique        string
+	SelectedPod              string
 }
 
 // Resource represents a generic resource item.
@@ -127,6 +129,8 @@ func ViewTypeName(vt ViewType) string {
 		return "PodCliqueSetReplicaView"
 	case PodCliqueScalingGroupView:
 		return "PodCliqueScalingGroupView"
+	case PodCliqueScalingGroupReplicaView:
+		return "PodCliqueScalingGroupReplicaView"
 	case PodCliqueView:
 		return "PodCliqueView"
 	case PodView:

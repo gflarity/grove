@@ -41,6 +41,16 @@ type PCSGChildrenMsg struct {
 	Err        error
 }
 
+// PCSGReplicaDataMsg is sent when PCSG replica index data has been loaded.
+type PCSGReplicaDataMsg struct {
+	PCSGName       string
+	Namespace      string
+	ReplicaIndexes []string
+	// PodCliquesByReplica maps replicaIndex -> PodClique resources within that replica.
+	PodCliquesByReplica map[string][]data.Resource
+	Err                 error
+}
+
 // PodCliqueChildrenMsg is sent when Pod children of a PodClique have been loaded.
 type PodCliqueChildrenMsg struct {
 	PodCliqueName string

@@ -105,6 +105,54 @@ func loadPCSGChildrenCmd(provider data.DataProvider, ctx context.Context, pcsgNa
 	}
 }
 
+// loadPCSGReplicasCmd creates a command to load PCSG replica data (mirrors loadReplicasCmd for PCS).
+func loadPCSGReplicasCmd(provider data.DataProvider, ctx context.Context, pcsgName, namespace string) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("loadPCSGReplicas", "pcsg", pcsgName, "ns", namespace)
+		if provider == nil {
+			return PCSGReplicaDataMsg{PCSGName: pcsgName, Namespace: namespace, Err: nil}
+		}
+
+		replicaIndexes, err := provider.GetReplicaIndexesForPodCliqueScalingGroup(ctx, pcsgName, namespace)
+		if err != nil {
+			return PCSGReplicaDataMsg{PCSGName: pcsgName, Namespace: namespace, Err: err}
+		}
+
+		// For each replica, get PodCliques for aggregation
+		podCliquesByReplica := make(map[string][]data.Resource)
+		for _, replicaIndex := range replicaIndexes {
+			podCliques, _ := provider.GetPodCliquesForPodCliqueScalingGroupReplica(ctx, pcsgName, namespace, replicaIndex)
+			podCliquesByReplica[replicaIndex] = podCliques
+		}
+
+		return PCSGReplicaDataMsg{
+			PCSGName:            pcsgName,
+			Namespace:           namespace,
+			ReplicaIndexes:      replicaIndexes,
+			PodCliquesByReplica: podCliquesByReplica,
+			Err:                 nil,
+		}
+	}
+}
+
+// loadPCSGReplicaChildrenCmd creates a command to load children for a specific PCSG replica.
+func loadPCSGReplicaChildrenCmd(provider data.DataProvider, ctx context.Context, pcsgName, namespace, replicaIndex string) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("loadPCSGReplicaChildren", "pcsg", pcsgName, "ns", namespace, "replica", replicaIndex)
+		if provider == nil {
+			return PCSGChildrenMsg{PCSGName: pcsgName, Namespace: namespace}
+		}
+
+		podCliques, err := provider.GetPodCliquesForPodCliqueScalingGroupReplica(ctx, pcsgName, namespace, replicaIndex)
+		return PCSGChildrenMsg{
+			PCSGName:   pcsgName,
+			Namespace:  namespace,
+			PodCliques: podCliques,
+			Err:        err,
+		}
+	}
+}
+
 // loadPodCliqueChildrenCmd creates a command to load children (Pods) for a PodClique.
 func loadPodCliqueChildrenCmd(provider data.DataProvider, ctx context.Context, pcName, namespace string) tea.Cmd {
 	return func() tea.Msg {
@@ -158,6 +206,19 @@ func loadEventsForPCSGCmd(provider data.DataProvider, ctx context.Context, pcsgN
 		}
 
 		events, err := provider.GetEventsForPodCliqueScalingGroup(ctx, pcsgName, namespace)
+		return EventsMsg{Events: events, Err: err}
+	}
+}
+
+// loadEventsForPCSGReplicaCmd creates a command to load events for a PodCliqueScalingGroup replica.
+func loadEventsForPCSGReplicaCmd(provider data.DataProvider, ctx context.Context, pcsgName, namespace, replicaIndex string) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("loadEventsForPCSGReplica", "pcsg", pcsgName, "ns", namespace, "replica", replicaIndex)
+		if provider == nil {
+			return EventsMsg{Events: []data.Event{}}
+		}
+
+		events, err := provider.GetEventsForPodCliqueScalingGroupReplica(ctx, pcsgName, namespace, replicaIndex)
 		return EventsMsg{Events: events, Err: err}
 	}
 }

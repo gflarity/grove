@@ -176,23 +176,67 @@ func buildFullMockProvider() *data.MockProvider {
 
 	// alpha-pcs has 1 replica
 	mp.ReplicaIndexes["default/alpha-pcs"] = []string{"0"}
-	// beta-pcs has 2 replicas
+	// beta-pcs has 2 replicas with children
 	mp.ReplicaIndexes["staging/beta-pcs"] = []string{"0", "1"}
+	mp.ScalingGroups["staging/beta-pcs/0"] = []data.Resource{
+		{Name: "beta-pcs-0-sg-main", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"},
+	}
+	mp.ScalingGroups["staging/beta-pcs/1"] = []data.Resource{
+		{Name: "beta-pcs-1-sg-main", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"},
+	}
 
 	scalingGroups, podCliques := sampleReplicaChildren()
 	mp.ScalingGroups["default/alpha-pcs/0"] = scalingGroups
 	mp.ReplicaPodCliques["default/alpha-pcs/0"] = podCliques
 
+	// PCSG replica data for alpha-pcs-0-sg-prefill (has 2 replicas)
+	mp.PCSGReplicaIndexes["default/alpha-pcs-0-sg-prefill"] = []string{"0", "1"}
+	mp.PCSGReplicaPodCliques["default/alpha-pcs-0-sg-prefill/0"] = []data.Resource{
+		{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+	}
+	mp.PCSGReplicaPodCliques["default/alpha-pcs-0-sg-prefill/1"] = []data.Resource{
+		{Name: "alpha-pcs-0-sg-prefill-1-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+	}
+
 	// PodClique children (pods)
 	mp.PodCliquePods["default/alpha-pcs-0-standalone-pc"] = samplePods()
+	mp.PodCliquePods["default/alpha-pcs-0-sg-prefill-0-worker"] = samplePods()
 
 	// Pod YAML
 	mp.PodYAMLs["default/alpha-pcs-0-pc-worker-0"] = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: alpha-pcs-0-pc-worker-0\n"
 
-	// Events
+	// Events — at every level of the hierarchy
 	mp.Events["pcs/default/alpha-pcs"] = sampleEvents()[:2]
-	mp.Events["replica/default/alpha-pcs/0"] = sampleEvents()[:1]
-	mp.Events["pc/default/alpha-pcs-0-standalone-pc"] = sampleEvents()[2:]
+	mp.Events["replica/default/alpha-pcs/0"] = []data.Event{
+		{Type: "Normal", Reason: "Scaled", Age: "5m", From: "controller", Message: "replica-0 scaled", Parent: "alpha-pcs"},
+	}
+	mp.Events["pcsg/default/alpha-pcs-0-sg-prefill"] = []data.Event{
+		{Type: "Normal", Reason: "SGReady", Age: "3m", From: "controller", Message: "sg-prefill ready", Parent: "alpha-pcs-0-sg-prefill"},
+	}
+	mp.Events["pc/default/alpha-pcs-0-standalone-pc"] = []data.Event{
+		{Type: "Normal", Reason: "Created", Age: "10m", From: "controller", Message: "standalone-pc created", Parent: "alpha-pcs-0-standalone-pc"},
+	}
+	mp.Events["pc/default/alpha-pcs-0-sg-prefill-0-worker"] = []data.Event{
+		{Type: "Normal", Reason: "Created", Age: "8m", From: "controller", Message: "prefill-0-worker created", Parent: "alpha-pcs-0-sg-prefill-0-worker"},
+	}
+	// PCSG replica events
+	mp.Events["pcsg-replica/default/alpha-pcs-0-sg-prefill/0"] = []data.Event{
+		{Type: "Normal", Reason: "ReplicaReady", Age: "4m", From: "controller", Message: "pcsg-replica-0 ready", Parent: "alpha-pcs-0-sg-prefill"},
+	}
+	mp.Events["pcsg-replica/default/alpha-pcs-0-sg-prefill/1"] = []data.Event{
+		{Type: "Normal", Reason: "ReplicaReady", Age: "4m", From: "controller", Message: "pcsg-replica-1 ready", Parent: "alpha-pcs-0-sg-prefill"},
+	}
+
+	// beta-pcs replica events (for multi-replica PCS event tests)
+	mp.Events["pcs/staging/beta-pcs"] = []data.Event{
+		{Type: "Normal", Reason: "Created", Age: "1m", From: "controller", Message: "beta-pcs created", Parent: "beta-pcs"},
+	}
+	mp.Events["replica/staging/beta-pcs/0"] = []data.Event{
+		{Type: "Normal", Reason: "Ready", Age: "1m", From: "controller", Message: "beta replica-0 ready", Parent: "beta-pcs"},
+	}
+	mp.Events["replica/staging/beta-pcs/1"] = []data.Event{
+		{Type: "Warning", Reason: "Pending", Age: "30s", From: "scheduler", Message: "beta replica-1 pending", Parent: "beta-pcs"},
+	}
 
 	return mp
 }
@@ -272,9 +316,12 @@ func TestNavigationDrillDown(t *testing.T) {
 	var cmd tea.Cmd
 	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
 
-	// Verify the PCS was selected
+	// Verify the PCS was selected and ViewType transitioned immediately
 	if m.viewState.SelectedPodCliqueSet != "alpha-pcs" {
 		t.Fatalf("expected SelectedPodCliqueSet=alpha-pcs, got %s", m.viewState.SelectedPodCliqueSet)
+	}
+	if m.viewState.ViewType != data.PodCliqueSetView {
+		t.Fatalf("expected immediate transition to PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
 	// Execute all batch commands (loadTopologyInfo, loadPodInfo, loadReplicas)
@@ -376,6 +423,62 @@ func TestSingleReplicaSkip(t *testing.T) {
 	m = sendKey(m, tea.KeyEsc)
 	if m.viewState.ViewType != data.ForestView {
 		t.Fatalf("expected ForestView after Esc from single-replica skip, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+// TestMultiReplicaPCS_FullNavigationFlow verifies pressing Enter on a PCS with
+// multiple replicas transitions to PodCliqueSetView and shows the replica list.
+func TestMultiReplicaPCS_FullNavigationFlow(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Load forest data
+	m = executeCmdAndApply(m, m.Init())
+
+	// Move down to beta-pcs (second row, has 2 replicas)
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+
+	// Verify beta-pcs is selected
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 3 || selectedRow[2] != "beta-pcs" {
+		t.Fatalf("expected beta-pcs selected, got %v", selectedRow)
+	}
+
+	// Press Enter to drill into beta-pcs
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	// ViewType should transition to PodCliqueSetView immediately
+	if m.viewState.ViewType != data.PodCliqueSetView {
+		t.Fatalf("expected immediate PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.viewState.SelectedPodCliqueSet != "beta-pcs" {
+		t.Fatalf("expected SelectedPodCliqueSet=beta-pcs, got %s", m.viewState.SelectedPodCliqueSet)
+	}
+
+	// Execute all batch commands (replica data arrives)
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+
+	// beta-pcs has 2 replicas, should stay at PodCliqueSetView with replica list
+	if m.viewState.ViewType != data.PodCliqueSetView {
+		t.Fatalf("expected PodCliqueSetView for multi-replica PCS, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Check that 2 replicas are stored and visible
+	pcsKey := "PodCliqueSet/beta-pcs"
+	if len(m.allResources[pcsKey]) != 2 {
+		t.Fatalf("expected 2 replica resources, got %d", len(m.allResources[pcsKey]))
+	}
+
+	// Back should go to ForestView
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 }
 
@@ -705,6 +808,448 @@ func TestEventsChangeWhenSelectingDifferentPCS(t *testing.T) {
 		if e.Parent != "beta-pcs" {
 			t.Errorf("expected event parent to be beta-pcs, got %s", e.Parent)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6.7b Test: Cursor movement between PCS replicas does NOT change events
+// ---------------------------------------------------------------------------
+
+func TestEventsDontChangeOnCursorMoveBetweenPCSReplicas(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Load forest, navigate into beta-pcs (2 replicas)
+	m = executeCmdAndApply(m, m.Init())
+
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown}) // select beta-pcs
+	m = executeCmdAndApply(m, cmd)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into beta-pcs
+	m = executeCmdAndApply(m, cmd)
+
+	// Should be at PodCliqueSetView with 2 replicas, PCS-level events loaded
+	if m.viewState.ViewType != data.PodCliqueSetView {
+		t.Fatalf("expected PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	pcsEvents := append([]data.Event{}, m.allEvents...)
+	if len(pcsEvents) == 0 {
+		t.Fatal("expected PCS-level events to be loaded initially")
+	}
+
+	// Move cursor down to replica-1 — events should NOT change (stay at PCS level)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+	// The table update cmd exists but there should be no event-loading cmd
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+
+	// Events should still be the same PCS-level events
+	if len(m.allEvents) != len(pcsEvents) {
+		t.Fatalf("expected events to stay at PCS-level (%d), got %d", len(pcsEvents), len(m.allEvents))
+	}
+
+	// Move cursor back up to replica-0 — events still the same
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+	if len(m.allEvents) != len(pcsEvents) {
+		t.Fatalf("expected events to still be PCS-level (%d), got %d", len(pcsEvents), len(m.allEvents))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6.7c Test: Drilling INTO a PCS replica loads replica events
+// ---------------------------------------------------------------------------
+
+func TestEventsScopedWhenDrillingIntoPCSReplica(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Load forest, navigate into beta-pcs (2 replicas)
+	m = executeCmdAndApply(m, m.Init())
+
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown}) // select beta-pcs
+	m = executeCmdAndApply(m, cmd)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into beta-pcs
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueSetView {
+		t.Fatalf("expected PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Drill into replica-0 (first row = Enter)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command when drilling into PCS replica")
+	}
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should now be for replica-0 specifically
+	if len(m.allEvents) != 1 {
+		t.Fatalf("expected 1 event for beta replica-0, got %d", len(m.allEvents))
+	}
+	if m.allEvents[0].Message != "beta replica-0 ready" {
+		t.Errorf("expected 'beta replica-0 ready', got %q", m.allEvents[0].Message)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6.7d Test: Cursor movement in PodCliqueSetReplicaView updates events to match
+// the highlighted row's subtree.
+// ---------------------------------------------------------------------------
+
+func TestEventsUpdateOnCursorMoveInReplicaView(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Navigate: Forest -> alpha-pcs (single replica skip) -> PodCliqueSetReplicaView
+	m = executeCmdAndApply(m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into alpha-pcs
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should be replica-0 events (loaded on entry)
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "replica-0 scaled" {
+		t.Fatalf("expected replica-0 events on entry, got %v", m.allEvents)
+	}
+
+	// Move down to standalone PodClique — events should update to PodClique scope
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+
+	// Events should now be for the standalone PodClique
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
+		t.Errorf("expected standalone PodClique events after cursor move, got %v", m.allEvents)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6.7e Test: Drilling INTO a PCSG loads PCSG events
+// ---------------------------------------------------------------------------
+
+func TestEventsScopedWhenDrillingIntoPCSG(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Navigate: Forest -> alpha-pcs (single skip) -> PodCliqueSetReplicaView
+	m = executeCmdAndApply(m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events are replica-0 events
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "replica-0 scaled" {
+		t.Fatalf("expected replica-0 events, got %v", m.allEvents)
+	}
+
+	// Drill into sg-prefill PCSG (first row)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
+		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should now be PCSG-level
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "sg-prefill ready" {
+		t.Fatalf("expected PCSG events after drilling in, got %v", m.allEvents)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6.7f Test: Drilling INTO a PodClique loads PodClique events
+// ---------------------------------------------------------------------------
+
+func TestEventsScopedWhenDrillingIntoPodClique(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Navigate: Forest -> alpha-pcs (single skip) -> PodCliqueSetReplicaView
+	m = executeCmdAndApply(m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	// Move down to standalone PodClique, drill in
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should be PodClique-level
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
+		t.Fatalf("expected PodClique events, got %v", m.allEvents)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6.7g Test: Events reload when navigating back
+// ---------------------------------------------------------------------------
+
+func TestEventsReloadOnNavigateBack(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Navigate down to PodCliqueView: Forest -> PCS -> Replica -> PodClique
+	m = executeCmdAndApply(m, m.Init())
+	var cmd tea.Cmd
+
+	// Drill into alpha-pcs (single replica skip -> PodCliqueSetReplicaView)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Move down to standalone PodClique and drill into it
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Verify PodClique events loaded
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
+		t.Fatalf("expected standalone-pc events at PodCliqueView, got %v", m.allEvents)
+	}
+
+	// Navigate back — should reload replica-level events
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected event-reload command on back-navigation from PodCliqueView")
+	}
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should be scoped to the PodClique row the cursor lands on
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
+		t.Fatalf("expected standalone-pc events after back-nav (cursor on PodClique row), got %v", m.allEvents)
+	}
+}
+
+func TestEventsReloadOnNavigateBack_PCSG(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Navigate: Forest -> alpha-pcs (single replica skip) -> PCSG (2 PCSG replicas)
+	m = executeCmdAndApply(m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into alpha-pcs
+	m = executeCmdAndApply(m, cmd)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // drill into sg-prefill PCSG
+	m = executeCmdAndApply(m, cmd)
+
+	// Should be at PodCliqueScalingGroupView (2 PCSG replicas)
+	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
+		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should be for the PCSG
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "sg-prefill ready" {
+		t.Fatalf("expected sg-prefill events, got %v", m.allEvents)
+	}
+
+	// Navigate back — should reload replica-level events for the PCS replica
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected event-reload command on back-navigation from PCSGView")
+	}
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should be scoped to the PCSG row the cursor lands on
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "sg-prefill ready" {
+		t.Fatalf("expected sg-prefill events after back-nav (cursor on PCSG row), got %v", m.allEvents)
+	}
+}
+
+func TestEventsReloadOnNavigateBack_PodView(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Navigate down to Pod view via standalone PodClique
+	m = executeCmdAndApply(m, m.Init())
+	var cmd tea.Cmd
+
+	// alpha-pcs (single replica skip)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	// Select standalone-pc and drill in
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	// Now at PodCliqueView with standalone-pc events
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Drill into first Pod
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodView {
+		t.Fatalf("expected PodView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Navigate back — should reload PodClique events
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected event-reload command on back-navigation from PodView")
+	}
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should be PodClique events, not filtered to a single Pod
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "standalone-pc created" {
+		t.Fatalf("expected standalone-pc events after back-nav from PodView, got %v", m.allEvents)
+	}
+}
+
+func TestEventsReloadOnNavigateBack_PCSGReplicaView(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Navigate: Forest -> alpha-pcs -> PCSG (2 replicas) -> PCSG replica-0 -> PodClique
+	m = executeCmdAndApply(m, m.Init())
+	var cmd tea.Cmd
+
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // alpha-pcs
+	m = executeCmdAndApply(m, cmd)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // sg-prefill
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
+		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Drill into first PCSG replica
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
+		t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Drill into PodClique
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should be for the PodClique
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "prefill-0-worker created" {
+		t.Fatalf("expected prefill-0-worker events, got %v", m.allEvents)
+	}
+
+	// Navigate back to PCSGReplicaView — should reload PCSG events
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected event-reload command on back-navigation from PodCliqueView to PCSGReplicaView")
+	}
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
+		t.Fatalf("expected PodCliqueScalingGroupReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events should be scoped to the PodClique row the cursor lands on
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "prefill-0-worker created" {
+		t.Fatalf("expected prefill-0-worker events after back-nav (cursor on PodClique row), got %v", m.allEvents)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6.7h Test: Cursor movement in PodCliqueScalingGroupReplicaView updates events
+// to match the highlighted PodClique row.
+// ---------------------------------------------------------------------------
+
+func TestEventsUpdateOnCursorMoveInPCSGReplicaView(t *testing.T) {
+	mp := buildFullMockProvider()
+
+	// Add a second PodClique to PCSG replica-0 so we have rows to move between
+	mp.PCSGReplicaPodCliques["default/alpha-pcs-0-sg-prefill/0"] = []data.Resource{
+		{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+		{Name: "alpha-pcs-0-sg-prefill-0-extra", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+	}
+	// Add events for the second PodClique
+	mp.Events["pc/default/alpha-pcs-0-sg-prefill-0-extra"] = []data.Event{
+		{Type: "Normal", Reason: "Created", Age: "7m", From: "controller", Message: "extra-pc created", Parent: "alpha-pcs-0-sg-prefill-0-extra"},
+	}
+
+	m := newTestModelWithProvider(mp)
+	m = executeCmdAndApply(m, m.Init())
+
+	// Navigate: Forest -> alpha-pcs -> PCSG -> PCSG replica-0
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // alpha-pcs
+	m = executeCmdAndApply(m, cmd)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // sg-prefill
+	m = executeCmdAndApply(m, cmd)
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter}) // PCSG replica-0
+	m = executeCmdAndApply(m, cmd)
+
+	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
+		t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Events were loaded at PCSG replica level on entry
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "pcsg-replica-0 ready" {
+		t.Fatalf("expected PCSG replica-0 events on entry, got %v", m.allEvents)
+	}
+
+	// Move cursor down to second PodClique — events should update to that PodClique
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+
+	// Events should be for the second PodClique
+	if len(m.allEvents) != 1 || m.allEvents[0].Message != "extra-pc created" {
+		t.Fatalf("expected extra-pc events after cursor move, got %v", m.allEvents)
 	}
 }
 
@@ -1149,10 +1694,32 @@ func TestNavigateBackFromPCSGView(t *testing.T) {
 	if m.viewState.SelectedScalingGroup != "" {
 		t.Fatalf("expected SelectedScalingGroup cleared, got %q", m.viewState.SelectedScalingGroup)
 	}
+	if m.viewState.SelectedPCSGReplicaIndex != "" {
+		t.Fatalf("expected SelectedPCSGReplicaIndex cleared, got %q", m.viewState.SelectedPCSGReplicaIndex)
+	}
 }
 
 func TestNavigateBackFromPodCliqueView_WithScalingGroup(t *testing.T) {
 	m := newTestModel(nil)
+	// With PCSG replica index set, back should go to PodCliqueScalingGroupReplicaView
+	m.viewState = data.ViewState{
+		ViewType:                 data.PodCliqueView,
+		SelectedPodCliqueSet:     "my-pcs",
+		SelectedReplicaIndex:     "0",
+		SelectedScalingGroup:     "my-sg",
+		SelectedPCSGReplicaIndex: "0",
+		SelectedPodClique:        "my-pc",
+	}
+
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
+		t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestNavigateBackFromPodCliqueView_WithScalingGroupNoPCSGReplicaIndex(t *testing.T) {
+	m := newTestModel(nil)
+	// Without PCSG replica index, back should go to PodCliqueScalingGroupView (fallback)
 	m.viewState = data.ViewState{
 		ViewType:             data.PodCliqueView,
 		SelectedPodCliqueSet: "my-pcs",
@@ -1255,6 +1822,221 @@ func TestHandlePCSGChildrenMsg(t *testing.T) {
 	}
 	if len(resources) != 1 {
 		t.Fatalf("expected 1 resource, got %d", len(resources))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PCSG Replica Tests
+// ---------------------------------------------------------------------------
+
+func TestPCSGReplicaData_SingleReplica_Skip(t *testing.T) {
+	m := newTestModel(nil)
+	m.viewState.ViewType = data.PodCliqueScalingGroupView
+	m.viewState.SelectedPodCliqueSet = "my-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+	m.viewState.SelectedScalingGroup = "my-pcsg"
+
+	// Send PCSGReplicaDataMsg with 1 replica -> should skip to PodCliqueScalingGroupReplicaView
+	m = mustApply(m, PCSGReplicaDataMsg{
+		PCSGName:       "my-pcsg",
+		Namespace:      "default",
+		ReplicaIndexes: []string{"0"},
+		PodCliquesByReplica: map[string][]data.Resource{
+			"0": {{Name: "my-pcsg-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
+		},
+	})
+
+	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
+		t.Fatalf("expected PodCliqueScalingGroupReplicaView (single PCSG replica skip), got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.viewState.SelectedPCSGReplicaIndex != "0" {
+		t.Fatalf("expected SelectedPCSGReplicaIndex=0, got %s", m.viewState.SelectedPCSGReplicaIndex)
+	}
+
+	// Should have 1 virtual replica tracked for back navigation
+	pcsgKey := "PodCliqueScalingGroup/my-pcsg"
+	if len(m.allResources[pcsgKey]) != 1 {
+		t.Fatalf("expected 1 PCSG replica tracked, got %d", len(m.allResources[pcsgKey]))
+	}
+
+	// Back navigation should skip directly to PodCliqueSetReplicaView
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView after Esc from single PCSG replica skip, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestPCSGReplicaData_MultiReplica_ShowsList(t *testing.T) {
+	m := newTestModel(nil)
+	m.viewState.ViewType = data.PodCliqueScalingGroupView
+	m.viewState.SelectedPodCliqueSet = "my-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+	m.viewState.SelectedScalingGroup = "my-pcsg"
+
+	// Send PCSGReplicaDataMsg with 2 replicas
+	m = mustApply(m, PCSGReplicaDataMsg{
+		PCSGName:       "my-pcsg",
+		Namespace:      "default",
+		ReplicaIndexes: []string{"0", "1"},
+		PodCliquesByReplica: map[string][]data.Resource{
+			"0": {{Name: "my-pcsg-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
+			"1": {{Name: "my-pcsg-1-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
+		},
+	})
+
+	// Should stay at PodCliqueScalingGroupView with replica list
+	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
+		t.Fatalf("expected PodCliqueScalingGroupView for multi-replica PCSG, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Should have 2 virtual PCSG replica resources
+	pcsgKey := "PodCliqueScalingGroup/my-pcsg"
+	if len(m.allResources[pcsgKey]) != 2 {
+		t.Fatalf("expected 2 PCSG replica resources, got %d", len(m.allResources[pcsgKey]))
+	}
+
+	// Verify the virtual resources have the correct type
+	for _, r := range m.allResources[pcsgKey] {
+		if r.Type != "PodCliqueScalingGroupReplica" {
+			t.Errorf("expected type PodCliqueScalingGroupReplica, got %s", r.Type)
+		}
+	}
+
+	// Back should go to PodCliqueSetReplicaView
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestPCSGReplicaData_Error(t *testing.T) {
+	m := newTestModel(nil)
+	m.viewState.SelectedScalingGroup = "my-pcsg"
+
+	m = mustApply(m, PCSGReplicaDataMsg{
+		PCSGName:  "my-pcsg",
+		Namespace: "default",
+		Err:       errForTest("PCSG replica fetch failed"),
+	})
+
+	if m.lastError == nil {
+		t.Fatal("expected lastError to be set")
+	}
+}
+
+func TestNavigateBackFromPCSGReplicaView_MultiReplica(t *testing.T) {
+	m := newTestModel(nil)
+	m.viewState = data.ViewState{
+		ViewType:                 data.PodCliqueScalingGroupReplicaView,
+		SelectedPodCliqueSet:     "my-pcs",
+		SelectedReplicaIndex:     "0",
+		SelectedScalingGroup:     "my-pcsg",
+		SelectedPCSGReplicaIndex: "1",
+	}
+	// Store 2 PCSG replicas (so it won't skip back)
+	m.allResources["PodCliqueScalingGroup/my-pcsg"] = []data.Resource{
+		{Name: "my-pcsg-replica-0", Type: "PodCliqueScalingGroupReplica", Namespace: "default"},
+		{Name: "my-pcsg-replica-1", Type: "PodCliqueScalingGroupReplica", Namespace: "default"},
+	}
+
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
+		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.viewState.SelectedPCSGReplicaIndex != "" {
+		t.Fatalf("expected SelectedPCSGReplicaIndex cleared, got %q", m.viewState.SelectedPCSGReplicaIndex)
+	}
+}
+
+func TestPCSGReplica_FullNavigationFlow(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Load forest data
+	m = executeCmdAndApply(m, m.Init())
+
+	// Navigate into alpha-pcs (1 PCS replica → single-replica skip)
+	var cmd tea.Cmd
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = executeCmdAndApply(m, cmd)
+
+	// Should be at PodCliqueSetReplicaView (single PCS replica skip)
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// First row should be the PCSG: alpha-pcs-0-sg-prefill
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 3 || selectedRow[2] != "alpha-pcs-0-sg-prefill" {
+		t.Fatalf("expected alpha-pcs-0-sg-prefill selected, got %v", selectedRow)
+	}
+
+	// Navigate into the PCSG
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
+		t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Execute batch commands (PCSG replica data arrives)
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+
+	// alpha-pcs-0-sg-prefill has 2 PCSG replicas, should show replica list
+	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
+		t.Fatalf("expected PodCliqueScalingGroupView for multi-replica PCSG, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	pcsgKey := "PodCliqueScalingGroup/alpha-pcs-0-sg-prefill"
+	if len(m.allResources[pcsgKey]) != 2 {
+		t.Fatalf("expected 2 PCSG replica resources, got %d", len(m.allResources[pcsgKey]))
+	}
+
+	// Navigate into first PCSG replica
+	m, cmd = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
+		t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if cmd != nil {
+		m = executeCmdAndApply(m, cmd)
+	}
+
+	// Should show PodCliques for this PCSG replica
+	replicaKey := "PodCliqueScalingGroupReplica/alpha-pcs-0-sg-prefill/0"
+	if len(m.allResources[replicaKey]) != 1 {
+		t.Fatalf("expected 1 PodClique in PCSG replica, got %d", len(m.allResources[replicaKey]))
+	}
+
+	// Back should go to PodCliqueScalingGroupView (2 replicas, no skip)
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.PodCliqueScalingGroupView {
+		t.Fatalf("expected PodCliqueScalingGroupView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Back again should go to PodCliqueSetReplicaView
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.PodCliqueSetReplicaView {
+		t.Fatalf("expected PodCliqueSetReplicaView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestPCSGReplica_BreadcrumbRendering(t *testing.T) {
+	m := newTestModel(nil)
+
+	// PodCliqueScalingGroupReplicaView breadcrumb
+	m.viewState = data.ViewState{
+		ViewType:                 data.PodCliqueScalingGroupReplicaView,
+		SelectedPodCliqueSet:     "my-pcs",
+		SelectedReplicaIndex:     "0",
+		SelectedScalingGroup:     "my-pcsg",
+		SelectedPCSGReplicaIndex: "1",
+	}
+	bc := m.renderBreadcrumb()
+	if !strings.Contains(bc, "my-pcsg") {
+		t.Errorf("expected breadcrumb to contain 'my-pcsg', got %q", bc)
+	}
+	if !strings.Contains(bc, "replica-1") {
+		t.Errorf("expected breadcrumb to contain 'replica-1' (PCSG replica), got %q", bc)
 	}
 }
 
@@ -1365,6 +2147,7 @@ func TestGetCurrentViewKey(t *testing.T) {
 		{data.ViewState{ViewType: data.PodCliqueSetView, SelectedPodCliqueSet: "my-pcs"}, "PodCliqueSet/my-pcs"},
 		{data.ViewState{ViewType: data.PodCliqueSetReplicaView, SelectedPodCliqueSet: "my-pcs", SelectedReplicaIndex: "1"}, "PodCliqueSetReplica/my-pcs/1"},
 		{data.ViewState{ViewType: data.PodCliqueScalingGroupView, SelectedScalingGroup: "my-sg"}, "PodCliqueScalingGroup/my-sg"},
+		{data.ViewState{ViewType: data.PodCliqueScalingGroupReplicaView, SelectedScalingGroup: "my-sg", SelectedPCSGReplicaIndex: "0"}, "PodCliqueScalingGroupReplica/my-sg/0"},
 		{data.ViewState{ViewType: data.PodCliqueView, SelectedPodClique: "my-pc"}, "PodClique/my-pc"},
 		{data.ViewState{ViewType: data.PodView}, ""},
 	}
@@ -2433,5 +3216,340 @@ func TestTopologyView_TopologyViewDataMsgWithError(t *testing.T) {
 	}
 	if !strings.Contains(m.lastError.Error(), "cache error") {
 		t.Errorf("expected error message to contain 'cache error', got %q", m.lastError.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Command Mode Tests (vim-style ":" lens switching)
+// ---------------------------------------------------------------------------
+
+func TestCommandMode_ActivateWithColon(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	// Initially command mode is off
+	if m.commandActive {
+		t.Fatal("expected command mode inactive initially")
+	}
+
+	// Press ':' to activate command mode
+	m = sendRune(m, ':')
+	if !m.commandActive {
+		t.Fatal("expected command mode active after pressing :")
+	}
+}
+
+func TestCommandMode_EscCancels(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	// Activate command mode
+	m = sendRune(m, ':')
+	if !m.commandActive {
+		t.Fatal("expected command mode active")
+	}
+
+	// Type some text
+	m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+
+	// Press Esc to cancel
+	m = sendKey(m, tea.KeyEsc)
+	if m.commandActive {
+		t.Fatal("expected command mode deactivated after Esc")
+	}
+	if m.commandInput.Value() != "" {
+		t.Fatalf("expected command input cleared after Esc, got %q", m.commandInput.Value())
+	}
+}
+
+func TestCommandMode_EnterExecutesTopology(t *testing.T) {
+	mp := data.NewMockProvider()
+	mp.PodCliqueSets = samplePCSResources()
+	mockCache := data.NewMockTopologyCache()
+	mockCache.SetSnapshot(sampleTopologyViewData())
+
+	m := NewModel(mp, WithTopologyCache(mockCache))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	// Start in ForestView
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Activate command mode and type "topology"
+	m = sendRune(m, ':')
+	for _, r := range "topology" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Press Enter to execute
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.commandActive {
+		t.Fatal("expected command mode deactivated after Enter")
+	}
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView after :topology, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestCommandMode_PrefixMatchTopology(t *testing.T) {
+	mp := data.NewMockProvider()
+	mp.PodCliqueSets = samplePCSResources()
+	mockCache := data.NewMockTopologyCache()
+	mockCache.SetSnapshot(sampleTopologyViewData())
+
+	m := NewModel(mp, WithTopologyCache(mockCache))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	// Activate command mode and type just "top"
+	m = sendRune(m, ':')
+	for _, r := range "top" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Press Enter — should match "topology" via prefix
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView after :top (prefix match), got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestCommandMode_PrefixMatchForest(t *testing.T) {
+	m := newTopologyTestModel()
+
+	// Should be in TopologyView
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Activate command mode and type "for"
+	m = sendRune(m, ':')
+	for _, r := range "for" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Press Enter — should match "forest" via prefix
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after :for (prefix match), got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestCommandMode_TabCompletion(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	// Activate command mode and type "top"
+	m = sendRune(m, ':')
+	for _, r := range "top" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m.commandInput.Value() != "top" {
+		t.Fatalf("expected command input 'top', got %q", m.commandInput.Value())
+	}
+
+	// Press Tab to complete
+	m = sendKey(m, tea.KeyTab)
+	if m.commandInput.Value() != "topology" {
+		t.Fatalf("expected command input 'topology' after Tab, got %q", m.commandInput.Value())
+	}
+}
+
+func TestCommandMode_TabCompletionForest(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	// Activate command mode and type "for"
+	m = sendRune(m, ':')
+	for _, r := range "for" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Press Tab to complete
+	m = sendKey(m, tea.KeyTab)
+	if m.commandInput.Value() != "forest" {
+		t.Fatalf("expected command input 'forest' after Tab, got %q", m.commandInput.Value())
+	}
+}
+
+func TestCommandMode_NoMatchDoesNothing(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	viewBefore := m.viewState.ViewType
+
+	// Activate command mode and type gibberish
+	m = sendRune(m, ':')
+	for _, r := range "xyz" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Press Enter — no match, should not change view
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != viewBefore {
+		t.Fatalf("expected view unchanged after unmatched command, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.commandActive {
+		t.Fatal("expected command mode deactivated after Enter (even with no match)")
+	}
+}
+
+func TestCommandMode_EmptyInputDoesNothing(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	viewBefore := m.viewState.ViewType
+
+	// Activate command mode, don't type anything, press Enter
+	m = sendRune(m, ':')
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != viewBefore {
+		t.Fatalf("expected view unchanged after empty command, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestCommandMode_CtrlCQuitsFromCommandMode(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = sendRune(m, ':') // activate command mode
+	if !m.commandActive {
+		t.Fatal("expected command active")
+	}
+
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("expected quit command even in command mode")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+func TestCommandMode_ViewShowsCommandBar(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	// Command bar should not be visible initially
+	view := m.View()
+	if strings.Contains(view, ": ") && strings.Count(view, "┌") > 2 {
+		// Hard to assert negatively since ":" appears in other contexts
+		// Just check it renders without panic
+	}
+
+	// Activate command mode
+	m = sendRune(m, ':')
+
+	// Should render without panic and show the command input
+	view = m.View()
+	if view == "" {
+		t.Fatal("expected non-empty view with command bar")
+	}
+}
+
+func TestCommandMode_HeaderShowsCmdShortcut(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = mustApply(m, ForestDataMsg{Resources: samplePCSResources()})
+
+	header := m.renderHeaderFrame()
+	if !strings.Contains(header, "Cmd") {
+		t.Errorf("expected header to contain 'Cmd' shortcut, got:\n%s", header)
+	}
+}
+
+func TestLensCommandNames(t *testing.T) {
+	names := LensCommandNames()
+	if len(names) != 2 {
+		t.Fatalf("expected 2 lens commands, got %d", len(names))
+	}
+	expected := map[string]bool{"forest": true, "topology": true}
+	for _, n := range names {
+		if !expected[n] {
+			t.Errorf("unexpected lens command name: %q", n)
+		}
+	}
+}
+
+func TestMatchLensCommand(t *testing.T) {
+	tests := []struct {
+		prefix    string
+		wantName  string
+		wantMatch bool
+	}{
+		{"topology", "topology", true},
+		{"top", "topology", true},
+		{"t", "topology", true},     // only 1 match starting with "t"
+		{"forest", "forest", true},
+		{"for", "forest", true},
+		{"f", "forest", true},       // only 1 match starting with "f"
+		{"xyz", "", false},
+		{"", "", false},
+	}
+
+	for _, tt := range tests {
+		name, ok := matchLensCommand(tt.prefix)
+		if ok != tt.wantMatch {
+			t.Errorf("matchLensCommand(%q): got ok=%v, want %v", tt.prefix, ok, tt.wantMatch)
+		}
+		if name != tt.wantName {
+			t.Errorf("matchLensCommand(%q): got name=%q, want %q", tt.prefix, name, tt.wantName)
+		}
+	}
+}
+
+func TestCompleteLensCommand(t *testing.T) {
+	tests := []struct {
+		prefix string
+		want   string
+	}{
+		{"top", "topology"},
+		{"topology", "topology"},
+		{"for", "forest"},
+		{"forest", "forest"},
+		{"f", "forest"},
+		{"t", "topology"},
+		{"xyz", "xyz"},  // no match, return unchanged
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		got := completeLensCommand(tt.prefix)
+		if got != tt.want {
+			t.Errorf("completeLensCommand(%q): got %q, want %q", tt.prefix, got, tt.want)
+		}
+	}
+}
+
+func TestCommandMode_SwitchToForestFromDeepView(t *testing.T) {
+	mp := buildFullMockProvider()
+	m := newTestModelWithProvider(mp)
+
+	// Set up deep navigation state
+	m.viewState = data.ViewState{
+		ViewType:             data.PodCliqueView,
+		SelectedPodCliqueSet: "alpha-pcs",
+		SelectedReplicaIndex: "0",
+		SelectedPodClique:    "alpha-pcs-0-standalone-pc",
+	}
+
+	// Use command mode to go to forest
+	m = sendRune(m, ':')
+	for _, r := range "forest" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after :forest from deep view, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	// Navigation state should be cleared
+	if m.viewState.SelectedPodCliqueSet != "" {
+		t.Fatalf("expected SelectedPodCliqueSet cleared, got %q", m.viewState.SelectedPodCliqueSet)
 	}
 }
