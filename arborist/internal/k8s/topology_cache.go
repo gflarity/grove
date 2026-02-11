@@ -25,7 +25,6 @@ import (
 	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -274,21 +273,7 @@ func (c *InformerTopologyCache) rebuildSnapshot() {
 
 // readClusterTopologyLevels reads the ClusterTopology CR from the informer cache.
 func (c *InformerTopologyCache) readClusterTopologyLevels() []corev1alpha1.TopologyLevel {
-	items := c.ctInformer.GetStore().List()
-	for _, item := range items {
-		uns, ok := item.(*unstructured.Unstructured)
-		if !ok {
-			continue
-		}
-		var ct corev1alpha1.ClusterTopology
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(uns.Object, &ct); err != nil {
-			continue
-		}
-		if ct.Name == corev1alpha1.DefaultClusterTopologyName {
-			return ct.Spec.Levels
-		}
-	}
-	return nil
+	return readClusterTopologyLevelsFromInformer(c.ctInformer)
 }
 
 // nodeReadResult holds the combined output of readNodeLabels: topology labels, GPU product map,
@@ -303,51 +288,9 @@ type nodeReadResult struct {
 const gpuProductLabelKey = "nvidia.com/gpu.product"
 
 // readNodeLabels reads all node labels from the informer cache,
-// filtering to only topology-relevant keys. Also captures the GPU product
-// label from each node and parses it into a short GPU type name.
+// filtering to only topology-relevant keys.
 func (c *InformerTopologyCache) readNodeLabels(topologyKeys map[string]bool) nodeReadResult {
-	items := c.nodeInformer.GetStore().List()
-	result := nodeReadResult{
-		nodeLabels:      make(map[string]map[string]string, len(items)),
-		nodeGPUProducts: make(map[string]string, len(items)),
-		nodeGPUCapacity: make(map[string]int64, len(items)),
-	}
-
-	for _, item := range items {
-		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(item)
-		if err != nil {
-			continue
-		}
-		name, _, _ := unstructured.NestedString(obj, "metadata", "name")
-		if name == "" {
-			continue
-		}
-		labels, _, _ := unstructured.NestedStringMap(obj, "metadata", "labels")
-
-		filtered := make(map[string]string)
-		for k, v := range labels {
-			if topologyKeys[k] {
-				filtered[k] = v
-			}
-		}
-		result.nodeLabels[name] = filtered
-
-		// Capture GPU product label
-		if gpuProduct, ok := labels[gpuProductLabelKey]; ok && gpuProduct != "" {
-			shortName := data.ParseGPUProductShortName(gpuProduct)
-			if shortName != "" {
-				result.nodeGPUProducts[name] = shortName
-			}
-		}
-
-		// Capture GPU capacity from status.allocatable["nvidia.com/gpu"]
-		gpuCap := parseNodeGPUCapacity(obj)
-		if gpuCap > 0 {
-			result.nodeGPUCapacity[name] = gpuCap
-		}
-	}
-
-	return result
+	return readNodeLabelsFromInformer(c.nodeInformer, topologyKeys)
 }
 
 // parseNodeGPUCapacity reads status.allocatable["nvidia.com/gpu"] from a node object.
@@ -377,55 +320,12 @@ func parseNodeGPUCapacity(obj map[string]interface{}) int64 {
 
 // readPCSSpecs reads all PodCliqueSet specs from the informer cache.
 func (c *InformerTopologyCache) readPCSSpecs() map[string]*corev1alpha1.PodCliqueSet {
-	items := c.pcsInformer.GetStore().List()
-	result := make(map[string]*corev1alpha1.PodCliqueSet, len(items))
-
-	for _, item := range items {
-		uns, ok := item.(*unstructured.Unstructured)
-		if !ok {
-			continue
-		}
-		var pcs corev1alpha1.PodCliqueSet
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(uns.Object, &pcs); err != nil {
-			continue
-		}
-		result[pcs.Name] = &pcs
-	}
-
-	return result
+	return readPCSSpecsFromInformer(c.pcsInformer)
 }
 
 // readPods reads all pods from the informer cache and converts them to TopologyPodInput.
 func (c *InformerTopologyCache) readPods() []data.TopologyPodInput {
-	items := c.podInformer.GetStore().List()
-	result := make([]data.TopologyPodInput, 0, len(items))
-
-	for _, item := range items {
-		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(item)
-		if err != nil {
-			continue
-		}
-
-		name, _, _ := unstructured.NestedString(obj, "metadata", "name")
-		namespace, _, _ := unstructured.NestedString(obj, "metadata", "namespace")
-		labels, _, _ := unstructured.NestedStringMap(obj, "metadata", "labels")
-		nodeName, _, _ := unstructured.NestedString(obj, "spec", "nodeName")
-		phase, _, _ := unstructured.NestedString(obj, "status", "phase")
-
-		// Parse GPU requests from all containers
-		gpuRequests := parseGPURequests(obj)
-
-		result = append(result, data.TopologyPodInput{
-			Namespace:   namespace,
-			Name:        name,
-			NodeName:    nodeName,
-			Phase:       phase,
-			Labels:      labels,
-			GPURequests: gpuRequests,
-		})
-	}
-
-	return result
+	return readPodsFromInformer(c.podInformer)
 }
 
 // parseGPURequests sums nvidia.com/gpu resource requests across all containers in a pod.

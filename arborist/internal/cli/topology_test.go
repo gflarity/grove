@@ -759,6 +759,106 @@ func TestFilterDisplayPods(t *testing.T) {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// printPodListWithGPU
+// ---------------------------------------------------------------------------
+
+func TestPrintPodListWithGPU_NoPods(t *testing.T) {
+	var buf bytes.Buffer
+	printPodListWithGPU(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for nil pods, got %q", buf.String())
+	}
+}
+
+func TestPrintPodListWithGPU_SinglePodNoGPU(t *testing.T) {
+	pods := []topologyPod{
+		{Name: "pod-a"},
+	}
+	var buf bytes.Buffer
+	printPodListWithGPU(&buf, pods)
+	got := buf.String()
+	if !strings.Contains(got, "└─ pod-a") {
+		t.Errorf("expected last-item connector for single pod, got:\n%s", got)
+	}
+}
+
+func TestPrintPodListWithGPU_MultiplePodsMixedGPU(t *testing.T) {
+	pods := []topologyPod{
+		{Name: "pod-a", GPUType: "H200", GPUCount: 4},
+		{Name: "pod-b-longname", GPUType: "H200", GPUCount: 2},
+		{Name: "pod-c"},
+	}
+	var buf bytes.Buffer
+	printPodListWithGPU(&buf, pods)
+	got := buf.String()
+
+	// First pod should have ├─ connector
+	if !strings.Contains(got, "├─ pod-a") {
+		t.Errorf("expected ├─ connector for first pod, got:\n%s", got)
+	}
+	// Last pod should have └─ connector
+	if !strings.Contains(got, "└─ pod-c") {
+		t.Errorf("expected └─ connector for last pod, got:\n%s", got)
+	}
+	// GPU annotation present on GPU pods
+	if !strings.Contains(got, "[H200: 4]") {
+		t.Errorf("expected [H200: 4] annotation, got:\n%s", got)
+	}
+	if !strings.Contains(got, "[H200: 2]") {
+		t.Errorf("expected [H200: 2] annotation, got:\n%s", got)
+	}
+}
+
+func TestPrintPodListWithGPU_AllPodsNoGPU(t *testing.T) {
+	pods := []topologyPod{
+		{Name: "pod-a"},
+		{Name: "pod-b"},
+	}
+	var buf bytes.Buffer
+	printPodListWithGPU(&buf, pods)
+	got := buf.String()
+
+	// Should not contain any GPU annotation brackets
+	if strings.Contains(got, "[") {
+		t.Errorf("expected no GPU annotations when no pods have GPUs, got:\n%s", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// printGPUMiniTable — additional edge cases
+// ---------------------------------------------------------------------------
+
+func TestPrintGPUMiniTable_LargeNumbers(t *testing.T) {
+	entries := []gpuUsageEntry{
+		{Type: "B200", ThisPCS: 128, Total: 1024, Other: 256, Free: 640},
+	}
+	var buf bytes.Buffer
+	printGPUMiniTable(&buf, entries)
+	got := buf.String()
+
+	// Columns should right-align with the wider numbers
+	if !strings.Contains(got, "1024") {
+		t.Errorf("expected 1024 in output, got:\n%s", got)
+	}
+	if !strings.Contains(got, "128") {
+		t.Errorf("expected 128 in output, got:\n%s", got)
+	}
+}
+
+func TestPrintGPUMiniTable_ZeroValues(t *testing.T) {
+	entries := []gpuUsageEntry{
+		{Type: "H100", ThisPCS: 0, Total: 8, Other: 0, Free: 8},
+	}
+	var buf bytes.Buffer
+	printGPUMiniTable(&buf, entries)
+	got := buf.String()
+
+	if !strings.Contains(got, "0") {
+		t.Errorf("expected 0 in output, got:\n%s", got)
+	}
+}
+
 func TestComputeThreeWayGPUUsage_FreeClamped(t *testing.T) {
 	// Test overcommit scenario: more GPU requests than capacity
 	nodeLabels := map[string]map[string]string{
