@@ -104,16 +104,20 @@ func (s *CacheSnapshot) GetEventsForPCS(pcsName string) []Event {
 	// PCS itself
 	addUniqueEvents(&result, s.EventsByObject["PodCliqueSet/"+pcsName], seen)
 
+	// Collect PCSG names that belong to this PCS (used to scope PCSG child lookups)
+	pcsgNamesForPCS := make(map[string]bool)
+
 	// All PCSGs for this PCS (across all replicas)
 	for key, pcsgResources := range s.ScalingGroupsByReplica {
 		if strings.HasPrefix(key, pcsName+"/") {
 			for _, pcsg := range pcsgResources {
+				pcsgNamesForPCS[pcsg.Name] = true
 				addUniqueEvents(&result, s.EventsByObject["PodCliqueScalingGroup/"+pcsg.Name], seen)
 			}
 		}
 	}
 
-	// All PodCliques for this PCS (across all replicas, including PCSG children)
+	// All PodCliques for this PCS — standalone cliques (across all replicas)
 	for key, pcResources := range s.PodCliquesByReplica {
 		if strings.HasPrefix(key, pcsName+"/") {
 			for _, pc := range pcResources {
@@ -121,27 +125,34 @@ func (s *CacheSnapshot) GetEventsForPCS(pcsName string) []Event {
 			}
 		}
 	}
-	for _, pcResources := range s.PodCliquesByPCSG {
+
+	// PodCliques within PCSGs that belong to this PCS
+	for pcsgName, pcResources := range s.PodCliquesByPCSG {
+		if !pcsgNamesForPCS[pcsgName] {
+			continue
+		}
 		for _, pc := range pcResources {
 			addUniqueEvents(&result, s.EventsByObject["PodClique/"+pc.Name], seen)
 		}
 	}
-	for _, pcResources := range s.PodCliquesByPCSGReplica {
+	for pcsgReplicaKey, pcResources := range s.PodCliquesByPCSGReplica {
+		// pcsgReplicaKey is "pcsgName/replicaIndex" — extract pcsgName
+		pcsgName := pcsgReplicaKey
+		if idx := strings.Index(pcsgReplicaKey, "/"); idx >= 0 {
+			pcsgName = pcsgReplicaKey[:idx]
+		}
+		if !pcsgNamesForPCS[pcsgName] {
+			continue
+		}
 		for _, pc := range pcResources {
 			addUniqueEvents(&result, s.EventsByObject["PodClique/"+pc.Name], seen)
 		}
 	}
 
 	// All Pods for this PCS
-	for _, podInfo := range s.PodInfos {
+	for podName, podInfo := range s.PodInfos {
 		if podInfo.Labels["app.kubernetes.io/part-of"] == pcsName {
-			podName := "" // find name from PodsByPodClique
-			for pn := range s.PodInfos {
-				if s.PodInfos[pn].Labels["app.kubernetes.io/part-of"] == pcsName {
-					addUniqueEvents(&result, s.EventsByObject["Pod/"+pn], seen)
-				}
-			}
-			_ = podName
+			addUniqueEvents(&result, s.EventsByObject["Pod/"+podName], seen)
 		}
 	}
 
