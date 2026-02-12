@@ -90,7 +90,7 @@ func (m Model) View() string {
 func (m Model) viewDisplayName() string {
 	switch m.viewState.ViewType {
 	case data.ForestView:
-		return "Forest"
+		return "forest"
 	case data.PodCliqueSetView:
 		return "PodCliqueSet"
 	case data.PodCliqueSetReplicaView:
@@ -104,7 +104,7 @@ func (m Model) viewDisplayName() string {
 	case data.PodView:
 		return "Pod"
 	case data.TopologyView:
-		return "Topology"
+		return "topology"
 	default:
 		return "Unknown"
 	}
@@ -127,7 +127,12 @@ func (m Model) renderHeaderFrame() string {
 	userLine := HeaderLabelStyle.Render("User:        ") + " " + HeaderValueStyle.Render(orUnknown(m.userName))
 	arboristLine := HeaderLabelStyle.Render("Arborist Rev:") + " " + HeaderValueStyle.Render(orUnknown(m.arboristVersion))
 	k8sLine := HeaderLabelStyle.Render("K8s Rev:     ") + " " + HeaderValueStyle.Render(orUnknown(m.k8sVersion))
-	viewLine := HeaderLabelStyle.Render("Lens:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
+	var viewLine string
+	if m.lensEditActive {
+		viewLine = HeaderLabelStyle.Render("Lens:        ") + " " + m.lensInput.View()
+	} else {
+		viewLine = HeaderLabelStyle.Render("Lens:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
+	}
 
 	leftCol := lipgloss.JoinVertical(lipgloss.Left, contextLine, clusterLine, userLine, arboristLine, k8sLine, viewLine)
 
@@ -139,6 +144,7 @@ func (m Model) renderHeaderFrame() string {
 
 	items := []menuItem{
 		{":", "Cmd"},
+		{"l", "Lens"},
 		{"/", "Filter"},
 		{"tab", "Switch"},
 	}
@@ -739,6 +745,7 @@ func (m Model) renderMenuBar() string {
 
 	items := []menuItem{
 		{":", "Cmd"},
+		{"l", "Lens"},
 		{"/", "Filter"},
 		{"tab", "Switch"},
 	}
@@ -779,6 +786,7 @@ func (m Model) buildShortcutsString() string {
 	var parts []string
 
 	parts = append(parts, "<:>Cmd")
+	parts = append(parts, "<l>Lens")
 	parts = append(parts, "</>Filter")
 	parts = append(parts, "<tab>Switch")
 

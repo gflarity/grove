@@ -74,6 +74,7 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 	m.filterInput.Width = m.width - 6
 	m.commandInput.Width = m.width - 6
+	m.lensInput.Width = m.width / 3 // lens input sits inline in the header, so keep it compact
 	m.yamlSearchInput.Width = m.width - 6
 
 	// Resize YAML overlay viewport
@@ -114,6 +115,11 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// YAML overlay mode has its own key handling
 	if m.yamlOverlayActive {
 		return m.handleYAMLOverlayKey(msg)
+	}
+
+	// Lens edit mode has its own key handling (inline in header)
+	if m.lensEditActive {
+		return m.handleLensEditKey(msg)
 	}
 
 	// Command mode has different key handling
@@ -243,6 +249,12 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 		case "y", "Y":
 			return m.openYAMLOverlay()
+		case "l", "L":
+			m.lensEditActive = true
+			m.lensInput.SetValue("")
+			m.lensInput.Focus()
+			debugLogWithContext("lens edit mode activated")
+			return m, textinput.Blink
 		}
 	}
 
@@ -278,6 +290,39 @@ func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		var cmd tea.Cmd
 		m.commandInput, cmd = m.commandInput.Update(msg)
+		return m, cmd
+	}
+}
+
+// handleLensEditKey handles keys when lens edit mode is active (inline in header).
+func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.lensEditActive = false
+		m.lensInput.SetValue("")
+		debugLogWithContext("lens edit mode deactivated (cancelled)")
+		return m, nil
+
+	case tea.KeyEnter:
+		input := m.lensInput.Value()
+		m.lensEditActive = false
+		m.lensInput.SetValue("")
+		debugLogWithContext("lens edit mode executing: %q", input)
+		return m.executeCommand(input)
+
+	case tea.KeyTab:
+		current := m.lensInput.Value()
+		completed := completeLensCommand(current)
+		if completed != current {
+			m.lensInput.SetValue(completed)
+			m.lensInput.CursorEnd()
+			debugLogWithContext("lens edit tab-complete: %q -> %q", current, completed)
+		}
+		return m, nil
+
+	default:
+		var cmd tea.Cmd
+		m.lensInput, cmd = m.lensInput.Update(msg)
 		return m, cmd
 	}
 }
