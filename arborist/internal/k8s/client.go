@@ -86,8 +86,8 @@ func (k *K8sClient) DynamicClient() dynamic.Interface {
 // NewGlobalCache creates a new InformerGlobalCache using this client's
 // clientset and dynamic client. The caller is responsible for calling Start()
 // and Stop() on the returned cache.
-func (k *K8sClient) NewGlobalCache() data.GlobalCache {
-	return NewInformerGlobalCache(k.clientset, k.dynamicClient)
+func (k *K8sClient) NewGlobalCache(opts ...GlobalCacheOption) data.GlobalCache {
+	return NewInformerGlobalCache(k.clientset, k.dynamicClient, opts...)
 }
 
 // GetServerVersion returns the Kubernetes server version string (e.g. "v1.33.5+k3s1").

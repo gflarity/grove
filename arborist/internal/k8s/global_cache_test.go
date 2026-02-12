@@ -245,6 +245,10 @@ func TestInformerGlobalCache_RebuildSnapshot(t *testing.T) {
 				"grove.io/podcliqueset-replica-index": "0",
 			},
 		},
+		Spec: corev1alpha1.PodCliqueScalingGroupSpec{
+			Replicas:    1,
+			CliqueNames: []string{"worker"},
+		},
 		Status: corev1alpha1.PodCliqueScalingGroupStatus{
 			Replicas:          1,
 			AvailableReplicas: 1,
@@ -256,9 +260,10 @@ func TestInformerGlobalCache_RebuildSnapshot(t *testing.T) {
 			Name:      "my-pcs-0-worker",
 			Namespace: "default",
 			Labels: map[string]string{
-				"app.kubernetes.io/part-of":           "my-pcs",
-				"grove.io/podcliqueset-replica-index": "0",
-				"grove.io/podcliquescalinggroup":      "my-pcsg-0",
+				"app.kubernetes.io/part-of":                       "my-pcs",
+				"grove.io/podcliqueset-replica-index":             "0",
+				"grove.io/podcliquescalinggroup":                  "my-pcsg-0",
+				"grove.io/podcliquescalinggroup-replica-index":    "0",
 			},
 		},
 		Spec: corev1alpha1.PodCliqueSpec{
@@ -308,6 +313,10 @@ func TestInformerGlobalCache_RebuildSnapshot(t *testing.T) {
 	if snap.PodCliqueSets[0].Ready != "1/1" {
 		t.Errorf("PCS ready = %q, want %q", snap.PodCliqueSets[0].Ready, "1/1")
 	}
+	// Scheduled is computed from pod NodeName: 1 pod on node-1 -> PCS "1/1"
+	if snap.PodCliqueSets[0].Scheduled != "1/1" {
+		t.Errorf("PCS scheduled = %q, want %q", snap.PodCliqueSets[0].Scheduled, "1/1")
+	}
 
 	// Verify PCS specs
 	if _, ok := snap.PodCliqueSetSpecs["my-pcs"]; !ok {
@@ -328,6 +337,10 @@ func TestInformerGlobalCache_RebuildSnapshot(t *testing.T) {
 	if sgs[0].Name != "my-pcsg-0" {
 		t.Errorf("PCSG name = %q, want %q", sgs[0].Name, "my-pcsg-0")
 	}
+	// PCSG Scheduled: 1 replica, its PodClique has 1/1 pods scheduled -> "1/1"
+	if sgs[0].Scheduled != "1/1" {
+		t.Errorf("PCSG scheduled = %q, want %q", sgs[0].Scheduled, "1/1")
+	}
 
 	// Verify PodCliques under PCSG
 	pcs_under_pcsg := snap.PodCliquesByPCSG["my-pcsg-0"]
@@ -336,6 +349,10 @@ func TestInformerGlobalCache_RebuildSnapshot(t *testing.T) {
 	}
 	if pcs_under_pcsg[0].Name != "my-pcs-0-worker" {
 		t.Errorf("PC name = %q, want %q", pcs_under_pcsg[0].Name, "my-pcs-0-worker")
+	}
+	// PodClique Scheduled: 1 pod with NodeName -> "1/1"
+	if pcs_under_pcsg[0].Scheduled != "1/1" {
+		t.Errorf("PC scheduled = %q, want %q", pcs_under_pcsg[0].Scheduled, "1/1")
 	}
 
 	// Verify Pods
@@ -625,6 +642,799 @@ func TestInformerGlobalCache_OldEventsFiltered(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Scheduled computation unit tests
+// ---------------------------------------------------------------------------
+
+func TestIsPCSGReplicaScheduled(t *testing.T) {
+	tests := []struct {
+		name     string
+		pcs      []*corev1alpha1.PodClique
+		sched    map[string]int32
+		expected bool
+	}{
+		{
+			name:     "no PodCliques -> not scheduled",
+			pcs:      nil,
+			sched:    map[string]int32{},
+			expected: false,
+		},
+		{
+			name: "all PodCliques meet minAvailable (defaults to replicas)",
+			pcs: []*corev1alpha1.PodClique{
+				{ObjectMeta: metav1.ObjectMeta{Name: "pc-a"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "pc-b"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}},
+			},
+			sched:    map[string]int32{"pc-a": 2, "pc-b": 1},
+			expected: true,
+		},
+		{
+			name: "one PodClique below minAvailable -> not scheduled",
+			pcs: []*corev1alpha1.PodClique{
+				{ObjectMeta: metav1.ObjectMeta{Name: "pc-a"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "pc-b"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 3}},
+			},
+			sched:    map[string]int32{"pc-a": 2, "pc-b": 2},
+			expected: false,
+		},
+		{
+			name: "MinAvailable explicitly set, meets threshold",
+			pcs: []*corev1alpha1.PodClique{
+				{ObjectMeta: metav1.ObjectMeta{Name: "pc-a"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 4, MinAvailable: int32Ptr(2)}},
+			},
+			sched:    map[string]int32{"pc-a": 2},
+			expected: true,
+		},
+		{
+			name: "MinAvailable nil defaults to Replicas, not enough scheduled",
+			pcs: []*corev1alpha1.PodClique{
+				{ObjectMeta: metav1.ObjectMeta{Name: "pc-a"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 3}},
+			},
+			sched:    map[string]int32{"pc-a": 2},
+			expected: false,
+		},
+		{
+			name: "zero pods scheduled",
+			pcs: []*corev1alpha1.PodClique{
+				{ObjectMeta: metav1.ObjectMeta{Name: "pc-a"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}},
+			},
+			sched:    map[string]int32{},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isPCSGReplicaScheduled(tt.pcs, tt.sched)
+			if got != tt.expected {
+				t.Errorf("isPCSGReplicaScheduled() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestComputePCSGScheduledReplicas(t *testing.T) {
+	tests := []struct {
+		name     string
+		pcsg     *corev1alpha1.PodCliqueScalingGroup
+		sched    map[string]int32
+		pcObjs   map[string][]*corev1alpha1.PodClique
+		expected int32
+	}{
+		{
+			name: "2 PCSG replicas, both scheduled",
+			pcsg: &corev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1"},
+				Spec:       corev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2, CliqueNames: []string{"worker"}},
+			},
+			sched: map[string]int32{"pcsg-1-0-worker": 2, "pcsg-1-1-worker": 2},
+			pcObjs: map[string][]*corev1alpha1.PodClique{
+				"pcsg-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1-0-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}}},
+				"pcsg-1/1": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1-1-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}}},
+			},
+			expected: 2,
+		},
+		{
+			name: "2 PCSG replicas, one not scheduled (partial)",
+			pcsg: &corev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1"},
+				Spec:       corev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2, CliqueNames: []string{"worker"}},
+			},
+			sched: map[string]int32{"pcsg-1-0-worker": 2, "pcsg-1-1-worker": 0},
+			pcObjs: map[string][]*corev1alpha1.PodClique{
+				"pcsg-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1-0-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}}},
+				"pcsg-1/1": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1-1-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}}},
+			},
+			expected: 1,
+		},
+		{
+			name: "MinAvailable edge case: Replicas=4, MinAvailable=2, only 2 scheduled -> still counts",
+			pcsg: &corev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1"},
+				Spec:       corev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1, CliqueNames: []string{"worker"}},
+			},
+			sched: map[string]int32{"pcsg-1-0-worker": 2},
+			pcObjs: map[string][]*corev1alpha1.PodClique{
+				"pcsg-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1-0-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 4, MinAvailable: int32Ptr(2)}}},
+			},
+			expected: 1,
+		},
+		{
+			name: "zero pods scheduled everywhere",
+			pcsg: &corev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1"},
+				Spec:       corev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2, CliqueNames: []string{"worker"}},
+			},
+			sched: map[string]int32{},
+			pcObjs: map[string][]*corev1alpha1.PodClique{
+				"pcsg-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1-0-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}}},
+				"pcsg-1/1": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-1-1-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}}},
+			},
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computePCSGScheduledReplicas(tt.pcsg, tt.sched, tt.pcObjs)
+			if got != tt.expected {
+				t.Errorf("computePCSGScheduledReplicas() = %d, want %d", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestComputePCSScheduledReplicas(t *testing.T) {
+	tests := []struct {
+		name           string
+		pcs            *corev1alpha1.PodCliqueSet
+		sched          map[string]int32
+		pcObjsByPCSG   map[string][]*corev1alpha1.PodClique
+		standalonePCs  map[string][]*corev1alpha1.PodClique
+		pcsgsByReplica map[string][]*corev1alpha1.PodCliqueScalingGroup
+		expected       int32
+	}{
+		{
+			name: "1 PCS replica, all standalone PCs scheduled -> 1/1",
+			pcs: &corev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcs-1"},
+				Spec:       corev1alpha1.PodCliqueSetSpec{Replicas: 1},
+			},
+			sched: map[string]int32{"pcs-1-0-worker": 2},
+			standalonePCs: map[string][]*corev1alpha1.PodClique{
+				"pcs-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-0-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}}},
+			},
+			pcsgsByReplica: map[string][]*corev1alpha1.PodCliqueScalingGroup{},
+			pcObjsByPCSG:   map[string][]*corev1alpha1.PodClique{},
+			expected:       1,
+		},
+		{
+			name: "2 PCS replicas, one has unscheduled standalone PC -> 1/2",
+			pcs: &corev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcs-1"},
+				Spec:       corev1alpha1.PodCliqueSetSpec{Replicas: 2},
+			},
+			sched: map[string]int32{"pcs-1-0-worker": 2, "pcs-1-1-worker": 0},
+			standalonePCs: map[string][]*corev1alpha1.PodClique{
+				"pcs-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-0-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}}},
+				"pcs-1/1": {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-1-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 2}}},
+			},
+			pcsgsByReplica: map[string][]*corev1alpha1.PodCliqueScalingGroup{},
+			pcObjsByPCSG:   map[string][]*corev1alpha1.PodClique{},
+			expected:       1,
+		},
+		{
+			name: "PCS replica with scheduled standalone PC but unscheduled PCSG -> not counted",
+			pcs: &corev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcs-1"},
+				Spec:       corev1alpha1.PodCliqueSetSpec{Replicas: 1},
+			},
+			sched: map[string]int32{"pcs-1-0-worker": 1, "pcsg-0-0-trainer": 0},
+			standalonePCs: map[string][]*corev1alpha1.PodClique{
+				"pcs-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-0-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}}},
+			},
+			pcsgsByReplica: map[string][]*corev1alpha1.PodCliqueScalingGroup{
+				"pcs-1/0": {{
+					ObjectMeta: metav1.ObjectMeta{Name: "pcsg-0"},
+					Spec:       corev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1, CliqueNames: []string{"trainer"}},
+				}},
+			},
+			pcObjsByPCSG: map[string][]*corev1alpha1.PodClique{
+				"pcsg-0/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-0-0-trainer"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}}},
+			},
+			expected: 0,
+		},
+		{
+			name: "all scheduled: standalone PC + PCSG both meet requirements",
+			pcs: &corev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcs-1"},
+				Spec:       corev1alpha1.PodCliqueSetSpec{Replicas: 1},
+			},
+			sched: map[string]int32{"pcs-1-0-worker": 1, "pcsg-0-0-trainer": 1},
+			standalonePCs: map[string][]*corev1alpha1.PodClique{
+				"pcs-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-0-worker"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}}},
+			},
+			pcsgsByReplica: map[string][]*corev1alpha1.PodCliqueScalingGroup{
+				"pcs-1/0": {{
+					ObjectMeta: metav1.ObjectMeta{Name: "pcsg-0"},
+					Spec:       corev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1, CliqueNames: []string{"trainer"}},
+				}},
+			},
+			pcObjsByPCSG: map[string][]*corev1alpha1.PodClique{
+				"pcsg-0/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcsg-0-0-trainer"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}}},
+			},
+			expected: 1,
+		},
+		{
+			name: "zero pods scheduled at all levels",
+			pcs: &corev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "pcs-1"},
+				Spec:       corev1alpha1.PodCliqueSetSpec{Replicas: 2},
+			},
+			sched: map[string]int32{},
+			standalonePCs: map[string][]*corev1alpha1.PodClique{
+				"pcs-1/0": {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-0-w"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}}},
+				"pcs-1/1": {{ObjectMeta: metav1.ObjectMeta{Name: "pcs-1-1-w"}, Spec: corev1alpha1.PodCliqueSpec{Replicas: 1}}},
+			},
+			pcsgsByReplica: map[string][]*corev1alpha1.PodCliqueScalingGroup{},
+			pcObjsByPCSG:   map[string][]*corev1alpha1.PodClique{},
+			expected:       0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computePCSScheduledReplicas(tt.pcs, tt.sched, tt.pcObjsByPCSG, tt.standalonePCs, tt.pcsgsByReplica)
+			if got != tt.expected {
+				t.Errorf("computePCSScheduledReplicas() = %d, want %d", got, tt.expected)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Option plumbing tests (Steps 4.3–4.4)
+// ---------------------------------------------------------------------------
+
+func TestWithCacheNamespace_SetsField(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
+
+	gc := NewInformerGlobalCache(clientset, dynClient, WithCacheNamespace("test-ns"))
+	if gc.namespace != "test-ns" {
+		t.Errorf("namespace = %q, want %q", gc.namespace, "test-ns")
+	}
+}
+
+func TestWithCacheNamespace_EmptyIsClusterWide(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
+
+	// No options
+	gc1 := NewInformerGlobalCache(clientset, dynClient)
+	if gc1.namespace != "" {
+		t.Errorf("no option: namespace = %q, want %q", gc1.namespace, "")
+	}
+
+	// Explicit empty string
+	gc2 := NewInformerGlobalCache(clientset, dynClient, WithCacheNamespace(""))
+	if gc2.namespace != "" {
+		t.Errorf("empty option: namespace = %q, want %q", gc2.namespace, "")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Namespace-scoped snapshot tests (Steps 4.5–4.11)
+// ---------------------------------------------------------------------------
+
+// newNamespaceScopedTestResources creates a full set of resources in two
+// namespaces ("test-ns" and "other-ns") for namespace-scoping tests.
+type namespacedTestData struct {
+	clientset *kubefake.Clientset
+	dynClient *dynamicfake.FakeDynamicClient
+}
+
+func newNamespacedTestData() namespacedTestData {
+	// Nodes (cluster-scoped)
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-1",
+			Labels: map[string]string{
+				"topology.kubernetes.io/zone": "us-east-1a",
+				"nvidia.com/gpu.product":      "NVIDIA-H100-80GB-HBM3",
+			},
+		},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				"nvidia.com/gpu": *mustParseQuantity("8"),
+			},
+		},
+	}
+
+	// --- test-ns resources ---
+	podTestNS := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pcs-a-0-worker-abc",
+			Namespace: "test-ns",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":           "pcs-a",
+				"grove.io/podcliqueset-replica-index": "0",
+				"grove.io/podclique":                  "pcs-a-0-worker",
+			},
+		},
+		Spec:   corev1.PodSpec{NodeName: "node-1"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	eventTestNS := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pcs-a.event1",
+			Namespace: "test-ns",
+		},
+		InvolvedObject: corev1.ObjectReference{Kind: "PodCliqueSet", Name: "pcs-a"},
+		Type:           "Normal",
+		Reason:         "Created",
+		Message:        "test-ns event",
+		LastTimestamp:   metav1.NewTime(time.Now().Add(-10 * time.Second)),
+	}
+
+	// --- other-ns resources ---
+	podOtherNS := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pcs-b-0-worker-xyz",
+			Namespace: "other-ns",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":           "pcs-b",
+				"grove.io/podcliqueset-replica-index": "0",
+				"grove.io/podclique":                  "pcs-b-0-worker",
+			},
+		},
+		Spec:   corev1.PodSpec{NodeName: "node-1"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	eventOtherNS := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pcs-b.event1",
+			Namespace: "other-ns",
+		},
+		InvolvedObject: corev1.ObjectReference{Kind: "PodCliqueSet", Name: "pcs-b"},
+		Type:           "Warning",
+		Reason:         "Failed",
+		Message:        "other-ns event",
+		LastTimestamp:   metav1.NewTime(time.Now().Add(-5 * time.Second)),
+	}
+
+	clientset := kubefake.NewSimpleClientset(node1, podTestNS, podOtherNS, eventTestNS, eventOtherNS)
+
+	// ClusterTopology (cluster-scoped)
+	ct := &corev1alpha1.ClusterTopology{
+		ObjectMeta: metav1.ObjectMeta{Name: corev1alpha1.DefaultClusterTopologyName},
+		Spec: corev1alpha1.ClusterTopologySpec{
+			Levels: []corev1alpha1.TopologyLevel{
+				{Domain: corev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
+			},
+		},
+	}
+
+	// PCS in test-ns
+	pcsA := &corev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pcs-a", Namespace: "test-ns"},
+		Spec: corev1alpha1.PodCliqueSetSpec{
+			Replicas: 1,
+			Template: corev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*corev1alpha1.PodCliqueTemplateSpec{{Name: "worker"}},
+			},
+		},
+		Status: corev1alpha1.PodCliqueSetStatus{Replicas: 1, AvailableReplicas: 1},
+	}
+
+	// PCSG in test-ns
+	pcsgA := &corev1alpha1.PodCliqueScalingGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pcsg-a-0", Namespace: "test-ns",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":           "pcs-a",
+				"grove.io/podcliqueset-replica-index": "0",
+			},
+		},
+		Spec: corev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1, CliqueNames: []string{"worker"}},
+		Status: corev1alpha1.PodCliqueScalingGroupStatus{Replicas: 1, AvailableReplicas: 1},
+	}
+
+	// PC in test-ns
+	pcA := &corev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pcs-a-0-worker", Namespace: "test-ns",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":                    "pcs-a",
+				"grove.io/podcliqueset-replica-index":          "0",
+				"grove.io/podcliquescalinggroup":               "pcsg-a-0",
+				"grove.io/podcliquescalinggroup-replica-index": "0",
+			},
+		},
+		Spec:   corev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: corev1alpha1.PodCliqueStatus{ReadyReplicas: 1},
+	}
+
+	// PCS in other-ns
+	pcsB := &corev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pcs-b", Namespace: "other-ns"},
+		Spec: corev1alpha1.PodCliqueSetSpec{
+			Replicas: 1,
+			Template: corev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*corev1alpha1.PodCliqueTemplateSpec{{Name: "worker"}},
+			},
+		},
+		Status: corev1alpha1.PodCliqueSetStatus{Replicas: 1, AvailableReplicas: 1},
+	}
+
+	// PCSG in other-ns
+	pcsgB := &corev1alpha1.PodCliqueScalingGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pcsg-b-0", Namespace: "other-ns",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":           "pcs-b",
+				"grove.io/podcliqueset-replica-index": "0",
+			},
+		},
+		Spec: corev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1, CliqueNames: []string{"worker"}},
+		Status: corev1alpha1.PodCliqueScalingGroupStatus{Replicas: 1, AvailableReplicas: 1},
+	}
+
+	// PC in other-ns
+	pcB := &corev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pcs-b-0-worker", Namespace: "other-ns",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":                    "pcs-b",
+				"grove.io/podcliqueset-replica-index":          "0",
+				"grove.io/podcliquescalinggroup":               "pcsg-b-0",
+				"grove.io/podcliquescalinggroup-replica-index": "0",
+			},
+		},
+		Spec:   corev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: corev1alpha1.PodCliqueStatus{ReadyReplicas: 1},
+	}
+
+	dynClient := dynamicfake.NewSimpleDynamicClient(
+		newGlobalFakeScheme(),
+		toUnstructuredObj(ct, "grove.io", "v1alpha1", "ClusterTopology"),
+		toUnstructuredObj(pcsA, "grove.io", "v1alpha1", "PodCliqueSet"),
+		toUnstructuredObj(pcsgA, "grove.io", "v1alpha1", "PodCliqueScalingGroup"),
+		toUnstructuredObj(pcA, "grove.io", "v1alpha1", "PodClique"),
+		toUnstructuredObj(pcsB, "grove.io", "v1alpha1", "PodCliqueSet"),
+		toUnstructuredObj(pcsgB, "grove.io", "v1alpha1", "PodCliqueScalingGroup"),
+		toUnstructuredObj(pcB, "grove.io", "v1alpha1", "PodClique"),
+	)
+
+	return namespacedTestData{clientset: clientset, dynClient: dynClient}
+}
+
+// startAndSync is a test helper that starts a cache and waits for sync + first update.
+func startAndSync(t *testing.T, gc *InformerGlobalCache) (context.Context, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := gc.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("Start() returned error: %v", err)
+	}
+	if !gc.WaitForSync(ctx) {
+		cancel()
+		t.Fatal("WaitForSync() returned false")
+	}
+	waitForUpdate(t, gc, 5*time.Second)
+	return ctx, cancel
+}
+
+func TestInformerGlobalCache_NamespaceScoped_PCSFiltered(t *testing.T) {
+	td := newNamespacedTestData()
+	gc := NewInformerGlobalCache(td.clientset, td.dynClient, WithCacheNamespace("test-ns"))
+	ctx, cancel := startAndSync(t, gc)
+	defer cancel()
+	defer gc.Stop()
+	_ = ctx
+
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+
+	// Only PCS from test-ns should be present
+	if len(snap.PodCliqueSets) != 1 {
+		t.Fatalf("expected 1 PCS, got %d", len(snap.PodCliqueSets))
+	}
+	if snap.PodCliqueSets[0].Name != "pcs-a" {
+		t.Errorf("PCS name = %q, want %q", snap.PodCliqueSets[0].Name, "pcs-a")
+	}
+	if snap.PodCliqueSets[0].Namespace != "test-ns" {
+		t.Errorf("PCS namespace = %q, want %q", snap.PodCliqueSets[0].Namespace, "test-ns")
+	}
+}
+
+func TestInformerGlobalCache_NamespaceScoped_PodsFiltered(t *testing.T) {
+	td := newNamespacedTestData()
+	gc := NewInformerGlobalCache(td.clientset, td.dynClient, WithCacheNamespace("test-ns"))
+	_, cancel := startAndSync(t, gc)
+	defer cancel()
+	defer gc.Stop()
+
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+
+	// Only pods from test-ns should be present
+	pods := snap.PodsByPodClique["pcs-a-0-worker"]
+	if len(pods) != 1 {
+		t.Fatalf("expected 1 pod under pcs-a-0-worker, got %d", len(pods))
+	}
+	if pods[0].Name != "pcs-a-0-worker-abc" {
+		t.Errorf("pod name = %q, want %q", pods[0].Name, "pcs-a-0-worker-abc")
+	}
+
+	// other-ns pods should NOT be present
+	otherPods := snap.PodsByPodClique["pcs-b-0-worker"]
+	if len(otherPods) != 0 {
+		t.Errorf("expected 0 pods from other-ns, got %d", len(otherPods))
+	}
+
+	// PodInfos should only contain test-ns pods
+	if _, ok := snap.PodInfos["pcs-b-0-worker-xyz"]; ok {
+		t.Error("PodInfos should not contain pod from other-ns")
+	}
+	if _, ok := snap.PodInfos["pcs-a-0-worker-abc"]; !ok {
+		t.Error("PodInfos should contain pod from test-ns")
+	}
+}
+
+func TestInformerGlobalCache_NamespaceScoped_EventsFiltered(t *testing.T) {
+	td := newNamespacedTestData()
+	gc := NewInformerGlobalCache(td.clientset, td.dynClient, WithCacheNamespace("test-ns"))
+	_, cancel := startAndSync(t, gc)
+	defer cancel()
+	defer gc.Stop()
+
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+
+	// test-ns event should be present
+	evts, ok := snap.EventsByObject["PodCliqueSet/pcs-a"]
+	if !ok || len(evts) == 0 {
+		t.Error("expected event for pcs-a from test-ns")
+	}
+
+	// other-ns event should NOT be present
+	if _, ok := snap.EventsByObject["PodCliqueSet/pcs-b"]; ok {
+		t.Error("event from other-ns should not be present")
+	}
+}
+
+func TestInformerGlobalCache_NamespaceScoped_PCSGAndPCFiltered(t *testing.T) {
+	td := newNamespacedTestData()
+	gc := NewInformerGlobalCache(td.clientset, td.dynClient, WithCacheNamespace("test-ns"))
+	_, cancel := startAndSync(t, gc)
+	defer cancel()
+	defer gc.Stop()
+
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+
+	// PCSG from test-ns should be present
+	sgs := snap.ScalingGroupsByReplica["pcs-a/0"]
+	if len(sgs) != 1 {
+		t.Fatalf("expected 1 PCSG under pcs-a/0, got %d", len(sgs))
+	}
+	if sgs[0].Name != "pcsg-a-0" {
+		t.Errorf("PCSG name = %q, want %q", sgs[0].Name, "pcsg-a-0")
+	}
+
+	// PCSG from other-ns should NOT be present
+	otherSgs := snap.ScalingGroupsByReplica["pcs-b/0"]
+	if len(otherSgs) != 0 {
+		t.Errorf("expected 0 PCSGs from other-ns, got %d", len(otherSgs))
+	}
+
+	// PodCliques from test-ns under PCSG
+	pcs := snap.PodCliquesByPCSG["pcsg-a-0"]
+	if len(pcs) != 1 {
+		t.Fatalf("expected 1 PC under pcsg-a-0, got %d", len(pcs))
+	}
+	if pcs[0].Name != "pcs-a-0-worker" {
+		t.Errorf("PC name = %q, want %q", pcs[0].Name, "pcs-a-0-worker")
+	}
+
+	// PodCliques from other-ns should NOT be present
+	otherPcs := snap.PodCliquesByPCSG["pcsg-b-0"]
+	if len(otherPcs) != 0 {
+		t.Errorf("expected 0 PCs from other-ns, got %d", len(otherPcs))
+	}
+}
+
+func TestInformerGlobalCache_NamespaceScoped_NodesStillVisible(t *testing.T) {
+	td := newNamespacedTestData()
+	gc := NewInformerGlobalCache(td.clientset, td.dynClient, WithCacheNamespace("test-ns"))
+	_, cancel := startAndSync(t, gc)
+	defer cancel()
+	defer gc.Stop()
+
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+
+	// Nodes are cluster-scoped — should still be visible
+	if _, ok := snap.NodeLabels["node-1"]; !ok {
+		t.Error("NodeLabels should still contain node-1 under namespace scoping")
+	}
+	if snap.NodeGPUProducts["node-1"] != "H100" {
+		t.Errorf("NodeGPUProducts[node-1] = %q, want %q", snap.NodeGPUProducts["node-1"], "H100")
+	}
+	if snap.NodeGPUCapacity["node-1"] != 8 {
+		t.Errorf("NodeGPUCapacity[node-1] = %d, want 8", snap.NodeGPUCapacity["node-1"])
+	}
+}
+
+func TestInformerGlobalCache_NamespaceScoped_ClusterTopologyStillVisible(t *testing.T) {
+	td := newNamespacedTestData()
+	gc := NewInformerGlobalCache(td.clientset, td.dynClient, WithCacheNamespace("test-ns"))
+	_, cancel := startAndSync(t, gc)
+	defer cancel()
+	defer gc.Stop()
+
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+
+	// ClusterTopology is cluster-scoped — should still populate TopologyViewData
+	if snap.TopologyViewData == nil {
+		t.Error("TopologyViewData should not be nil under namespace scoping")
+	}
+}
+
+func TestInformerGlobalCache_NamespaceScoped_FullHierarchy(t *testing.T) {
+	td := newNamespacedTestData()
+	gc := NewInformerGlobalCache(td.clientset, td.dynClient, WithCacheNamespace("test-ns"))
+	_, cancel := startAndSync(t, gc)
+	defer cancel()
+	defer gc.Stop()
+
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+
+	// --- Verify test-ns hierarchy is correct ---
+
+	// PCS
+	if len(snap.PodCliqueSets) != 1 {
+		t.Fatalf("expected 1 PCS, got %d", len(snap.PodCliqueSets))
+	}
+	if snap.PodCliqueSets[0].Name != "pcs-a" {
+		t.Errorf("PCS name = %q, want %q", snap.PodCliqueSets[0].Name, "pcs-a")
+	}
+
+	// Replica indexes
+	indexes := snap.ReplicaIndexesByPCS["pcs-a"]
+	if len(indexes) == 0 {
+		t.Error("ReplicaIndexesByPCS should have entries for pcs-a")
+	}
+
+	// PCSG under PCS replica
+	sgs := snap.ScalingGroupsByReplica["pcs-a/0"]
+	if len(sgs) != 1 || sgs[0].Name != "pcsg-a-0" {
+		t.Errorf("PCSG under pcs-a/0: got %v", sgs)
+	}
+
+	// PC under PCSG
+	pcs := snap.PodCliquesByPCSG["pcsg-a-0"]
+	if len(pcs) != 1 || pcs[0].Name != "pcs-a-0-worker" {
+		t.Errorf("PC under pcsg-a-0: got %v", pcs)
+	}
+
+	// Pods under PC
+	pods := snap.PodsByPodClique["pcs-a-0-worker"]
+	if len(pods) != 1 || pods[0].Name != "pcs-a-0-worker-abc" {
+		t.Errorf("Pod under pcs-a-0-worker: got %v", pods)
+	}
+
+	// Events for test-ns PCS
+	if _, ok := snap.EventsByObject["PodCliqueSet/pcs-a"]; !ok {
+		t.Error("missing events for pcs-a")
+	}
+
+	// Nodes (cluster-scoped, always visible)
+	if _, ok := snap.NodeLabels["node-1"]; !ok {
+		t.Error("NodeLabels missing node-1")
+	}
+
+	// TopologyViewData (cluster-scoped, always visible)
+	if snap.TopologyViewData == nil {
+		t.Error("TopologyViewData should not be nil")
+	}
+
+	// GPU summary built from scoped pods only
+	if snap.GPUSummary == nil {
+		t.Error("GPUSummary should not be nil")
+	}
+
+	// --- Verify zero resources from other-ns leaked ---
+
+	// No other-ns PCS
+	for _, pcsRes := range snap.PodCliqueSets {
+		if pcsRes.Namespace == "other-ns" {
+			t.Errorf("PCS from other-ns leaked: %s", pcsRes.Name)
+		}
+	}
+
+	// No other-ns PCSG
+	for key, sgs := range snap.ScalingGroupsByReplica {
+		for _, sg := range sgs {
+			if sg.Namespace == "other-ns" {
+				t.Errorf("PCSG from other-ns leaked at key %s: %s", key, sg.Name)
+			}
+		}
+	}
+
+	// No other-ns pods
+	for key, pods := range snap.PodsByPodClique {
+		for _, pod := range pods {
+			if pod.Namespace == "other-ns" {
+				t.Errorf("Pod from other-ns leaked at key %s: %s", key, pod.Name)
+			}
+		}
+	}
+
+	// No other-ns events
+	if _, ok := snap.EventsByObject["PodCliqueSet/pcs-b"]; ok {
+		t.Error("events from other-ns leaked for pcs-b")
+	}
+
+	// No other-ns PodInfos
+	if _, ok := snap.PodInfos["pcs-b-0-worker-xyz"]; ok {
+		t.Error("PodInfos from other-ns leaked")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CLI wiring test (Step 4.12)
+// ---------------------------------------------------------------------------
+
+func TestBuildCacheOptions_NamespacePassedToGlobalCache(t *testing.T) {
+	// Verify the option-building logic: when namespace is non-empty,
+	// WithCacheNamespace should produce a GlobalCacheOption that sets the field.
+	tests := []struct {
+		name      string
+		namespace string
+		wantNS    string
+	}{
+		{"empty namespace means cluster-wide", "", ""},
+		{"non-empty namespace is scoped", "gpu-stack", "gpu-stack"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []GlobalCacheOption
+			if tt.namespace != "" {
+				opts = append(opts, WithCacheNamespace(tt.namespace))
+			}
+
+			clientset := kubefake.NewSimpleClientset()
+			dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
+			gc := NewInformerGlobalCache(clientset, dynClient, opts...)
+
+			if gc.namespace != tt.wantNS {
+				t.Errorf("namespace = %q, want %q", gc.namespace, tt.wantNS)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -642,4 +1452,9 @@ func waitForUpdate(t *testing.T, gc *InformerGlobalCache, timeout time.Duration)
 func mustParseQuantity(s string) *resource.Quantity {
 	q := resource.MustParse(s)
 	return &q
+}
+
+// int32Ptr returns a pointer to the given int32 value.
+func int32Ptr(i int32) *int32 {
+	return &i
 }
