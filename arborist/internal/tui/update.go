@@ -15,33 +15,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	debugSetContext(m.viewState.ViewType, m.activePane, m.filterActive)
 	debugLogMsg(msg)
 
+	var model tea.Model
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		return m.handleWindowSize(msg)
+		model, cmd = m.handleWindowSize(msg)
 
 	case tea.KeyMsg:
-		return m.handleKeyMsg(msg)
+		model, cmd = m.handleKeyMsg(msg)
 
 	// Cache messages
 	case CacheSyncedMsg:
-		return m.handleCacheSynced(msg)
+		model, cmd = m.handleCacheSynced(msg)
 
 	case CacheUpdateMsg:
-		return m.handleCacheUpdate(msg)
+		model, cmd = m.handleCacheUpdate(msg)
 
 	case PodYAMLMsg:
-		return m.handlePodYAML(msg)
+		model, cmd = m.handlePodYAML(msg)
 
 	case ResourceYAMLMsg:
-		return m.handleResourceYAML(msg)
+		model, cmd = m.handleResourceYAML(msg)
 
 	case ErrorMsg:
 		debugLog("ERROR: %s: %v", msg.Operation, msg.Err)
 		m.lastError = msg.Err
-		return m, nil
+		model, cmd = m, nil
+
+	default:
+		model, cmd = m, nil
 	}
 
-	return m, nil
+	// Log the outcome: what view we're in now and whether a command was returned.
+	if updated, ok := model.(Model); ok {
+		hasCmd := cmd != nil
+		debugLogWithContext("Update result: view=%s pane=%s hasCmd=%v",
+			data.ViewTypeName(updated.viewState.ViewType),
+			data.PaneName(updated.activePane),
+			hasCmd)
+	}
+
+	return model, cmd
 }
 
 // handleWindowSize handles terminal resize events.
@@ -107,6 +122,10 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 // handleKeyMsg handles keyboard input.
 func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	debugLogWithContext("handleKeyMsg: type=%d(%s) runes=%q alt=%v modes=[yaml=%v lens=%v cmd=%v filter=%v]",
+		msg.Type, msg.Type.String(), string(msg.Runes), msg.Alt,
+		m.yamlOverlayActive, m.lensEditActive, m.commandActive, m.filterActive)
+
 	// Ctrl+C always quits
 	if msg.Type == tea.KeyCtrlC {
 		debugLogWithContext("quitting (ctrl+c)")
@@ -170,6 +189,11 @@ func (m Model) handleFilterModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleNormalModeKey handles keys in normal (non-filter) mode.
 func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	debugLogWithContext("handleNormalModeKey: keyType=%d(%s) str=%q view=%s pane=%s drillDepth=%d",
+		msg.Type, msg.Type.String(), msg.String(),
+		data.ViewTypeName(m.viewState.ViewType), data.PaneName(m.activePane),
+		len(m.topologyDrillStack))
+
 	switch msg.Type {
 	case tea.KeyTab:
 		m.switchPane()
@@ -267,6 +291,9 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handles AcceptSuggestion natively (fills ghost text, moves cursor to end).
 // Only Enter (execute) and Esc (cancel) are intercepted.
 func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	debugLogWithContext("handleCommandModeKey: keyType=%d(%s) str=%q inputValue=%q",
+		msg.Type, msg.Type.String(), msg.String(), m.commandInput.Value())
+
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.commandActive = false
@@ -278,7 +305,7 @@ func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		input := m.commandInput.Value()
 		m.commandActive = false
 		m.commandInput.SetValue("")
-		debugLogWithContext("command mode executing: %q", input)
+		debugLogWithContext("command mode executing: %q (commandActive now=%v)", input, m.commandActive)
 		return m.executeCommand(input)
 
 	default:
@@ -293,6 +320,9 @@ func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handles AcceptSuggestion natively (fills ghost text, moves cursor to end).
 // Only Enter (execute) and Esc (cancel) are intercepted.
 func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	debugLogWithContext("handleLensEditKey: keyType=%d(%s) str=%q inputValue=%q",
+		msg.Type, msg.Type.String(), msg.String(), m.lensInput.Value())
+
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.lensEditActive = false
@@ -304,7 +334,7 @@ func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		input := m.lensInput.Value()
 		m.lensEditActive = false
 		m.lensInput.SetValue("")
-		debugLogWithContext("lens edit mode executing: %q", input)
+		debugLogWithContext("lens edit mode executing: %q (lensEditActive now=%v)", input, m.lensEditActive)
 		return m.executeCommand(input)
 
 	default:
@@ -316,6 +346,7 @@ func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // toggleTopologyView switches between Forest and Topology views.
 func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
+	debugLogWithContext("toggleTopologyView: current view=%s", data.ViewTypeName(m.viewState.ViewType))
 	if m.viewState.ViewType == data.TopologyView {
 		m.viewState.ViewType = data.ForestView
 		m.activePane = data.ResourcesPane
