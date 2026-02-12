@@ -1246,7 +1246,7 @@ func TestHeaderShowsClusterInfo(t *testing.T) {
 	if !strings.Contains(header, "forest") {
 		t.Errorf("expected header to contain view name 'forest', got:\n%s", header)
 	}
-	for _, label := range []string{"Context:", "Cluster:", "User:", "Arborist Rev:", "K8s Rev:", "Lens:"} {
+	for _, label := range []string{"Context:", "Cluster:", "User:", "Arborist Rev:", "K8s Rev:", "Namespace:", "Lens:"} {
 		if !strings.Contains(header, label) {
 			t.Errorf("expected header to contain '%s' label, got:\n%s", label, header)
 		}
@@ -4776,5 +4776,117 @@ func TestEscFromDrilledFlatPC_BackToPC_ThenToPCS(t *testing.T) {
 	}
 	if m.allResources["forest"][0].Type != "PodCliqueSet" {
 		t.Fatalf("expected PodCliqueSets after reset, got %q", m.allResources["forest"][0].Type)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Namespace filtering tests
+// ---------------------------------------------------------------------------
+
+func TestWithNamespaceOption(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	m := NewModel(mc, WithNamespace("gpu-stack"))
+	if m.namespace != "gpu-stack" {
+		t.Errorf("expected namespace 'gpu-stack', got %q", m.namespace)
+	}
+	if m.allNamespaces {
+		t.Error("expected allNamespaces=false when namespace is set")
+	}
+}
+
+func TestWithAllNamespacesOption(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	m := NewModel(mc, WithAllNamespaces(true))
+	if !m.allNamespaces {
+		t.Error("expected allNamespaces=true")
+	}
+	if m.namespace != "" {
+		t.Errorf("expected empty namespace, got %q", m.namespace)
+	}
+}
+
+func TestDefaultAllNamespacesIsTrue(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	m := NewModel(mc)
+	if !m.allNamespaces {
+		t.Error("expected allNamespaces=true by default")
+	}
+}
+
+func TestNamespaceFilteringInPopulateForestResources(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.PodCliqueSets = []data.Resource{
+		{Name: "pcs-a", Type: "PodCliqueSet", Namespace: "gpu-stack", Ready: "1/1", Scheduled: "1/1"},
+		{Name: "pcs-b", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+		{Name: "pcs-c", Type: "PodCliqueSet", Namespace: "gpu-stack", Ready: "2/2", Scheduled: "2/2"},
+	}
+	mc.SetSnapshot(snap)
+
+	// All namespaces: should see all 3
+	m := NewModel(mc)
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
+	if len(m.allResources["forest"]) != 3 {
+		t.Fatalf("expected 3 resources with all namespaces, got %d", len(m.allResources["forest"]))
+	}
+
+	// Scoped to gpu-stack: should see 2
+	m2 := NewModel(mc, WithNamespace("gpu-stack"))
+	m2 = mustApply(m2, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m2.cacheSynced = true
+	m2 = mustApply(m2, CacheSyncedMsg{})
+	if len(m2.allResources["forest"]) != 2 {
+		t.Fatalf("expected 2 resources in gpu-stack namespace, got %d", len(m2.allResources["forest"]))
+	}
+	for _, r := range m2.allResources["forest"] {
+		if r.Namespace != "gpu-stack" {
+			t.Errorf("expected namespace 'gpu-stack', got %q for resource %s", r.Namespace, r.Name)
+		}
+	}
+
+	// Scoped to default: should see 1
+	m3 := NewModel(mc, WithNamespace("default"))
+	m3 = mustApply(m3, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m3.cacheSynced = true
+	m3 = mustApply(m3, CacheSyncedMsg{})
+	if len(m3.allResources["forest"]) != 1 {
+		t.Fatalf("expected 1 resource in default namespace, got %d", len(m3.allResources["forest"]))
+	}
+	if m3.allResources["forest"][0].Namespace != "default" {
+		t.Errorf("expected namespace 'default', got %q", m3.allResources["forest"][0].Namespace)
+	}
+
+	// Scoped to nonexistent namespace: should see 0
+	m4 := NewModel(mc, WithNamespace("nonexistent"))
+	m4 = mustApply(m4, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m4.cacheSynced = true
+	m4 = mustApply(m4, CacheSyncedMsg{})
+	if len(m4.allResources["forest"]) != 0 {
+		t.Fatalf("expected 0 resources in nonexistent namespace, got %d", len(m4.allResources["forest"]))
+	}
+}
+
+func TestHeaderShowsNamespaceAll(t *testing.T) {
+	m := newTestModel(nil)
+	header := m.renderHeaderFrame()
+	if !strings.Contains(header, "Namespace:") {
+		t.Errorf("expected header to contain 'Namespace:' label, got:\n%s", header)
+	}
+	if !strings.Contains(header, "all") {
+		t.Errorf("expected header to show 'all' for default namespace scope, got:\n%s", header)
+	}
+}
+
+func TestHeaderShowsSpecificNamespace(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	m := NewModel(mc, WithNamespace("gpu-stack"))
+	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.cacheSynced = true
+	m = mustApply(m, CacheSyncedMsg{})
+	header := m.renderHeaderFrame()
+	if !strings.Contains(header, "gpu-stack") {
+		t.Errorf("expected header to show 'gpu-stack', got:\n%s", header)
 	}
 }

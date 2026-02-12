@@ -50,7 +50,8 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.height = msg.Height
 
 	// Calculate table heights.
-	fixedLines := 12
+	// 7(header: context+cluster+user+arborist+k8s+namespace+lens) + 2*(2 border + 1 table header) = 13
+	fixedLines := 13
 	if m.filterActive {
 		fixedLines += 3
 	}

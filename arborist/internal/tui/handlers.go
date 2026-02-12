@@ -498,20 +498,39 @@ func (m *Model) rebuildFlatDrillInResources(snapshot *data.CacheSnapshot) {
 }
 
 // populateForestResources sets m.allResources["forest"] based on m.forestResourceType.
+// If namespace scoping is active (m.allNamespaces == false), resources are filtered
+// in-memory to only include those in m.namespace.
 func (m *Model) populateForestResources(snapshot *data.CacheSnapshot) {
 	if snapshot == nil {
 		return
 	}
+	var resources []data.Resource
 	switch m.forestResourceType {
 	case "pc":
-		m.allResources["forest"] = flatPodCliques(snapshot)
+		resources = flatPodCliques(snapshot)
 	case "pcsg":
-		m.allResources["forest"] = flatScalingGroups(snapshot)
+		resources = flatScalingGroups(snapshot)
 	case "pod":
-		m.allResources["forest"] = flatPods(snapshot)
+		resources = flatPods(snapshot)
 	default: // "pcs" or empty
-		m.allResources["forest"] = snapshot.PodCliqueSets
+		resources = snapshot.PodCliqueSets
 	}
+	m.allResources["forest"] = m.filterByNamespace(resources)
+}
+
+// filterByNamespace returns the subset of resources in m.namespace.
+// If allNamespaces is true (or namespace is empty), the input is returned unchanged.
+func (m *Model) filterByNamespace(resources []data.Resource) []data.Resource {
+	if m.allNamespaces || m.namespace == "" {
+		return resources
+	}
+	var filtered []data.Resource
+	for _, r := range resources {
+		if r.Namespace == m.namespace {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }
 
 // flatPodCliques returns a deduplicated flat list of all PodCliques from the snapshot.
