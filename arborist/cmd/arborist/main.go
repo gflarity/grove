@@ -17,11 +17,20 @@
 package main
 
 import (
+	"os"
+
 	"github.com/ai-dynamo/grove/arborist/internal/cli"
 	"github.com/alecthomas/kong"
 )
 
 func main() {
+	// Kong doesn't chain two levels of default:"withargs", so bare
+	// `arborist` (no args) would fail to resolve tui→forest. Inject "tui"
+	// so the inner default kicks in.
+	if len(os.Args) == 1 {
+		os.Args = append(os.Args, "tui")
+	}
+
 	var c cli.CLI
 	ctx := kong.Parse(&c,
 		kong.Name("arborist"),

@@ -169,6 +169,8 @@ type Model struct {
 	// Configuration
 	debug              bool
 	forestResourceType string // "pcs" (default), "pc", "pcsg", "pod"
+	namespace          string // if non-empty, scope to this namespace
+	allNamespaces      bool   // true = show all namespaces (default)
 
 	// Cluster info (resolved from kubeconfig at startup)
 	contextName      string
@@ -224,6 +226,24 @@ func WithK8sVersion(version string) Option {
 func WithArboristVersion(version string) Option {
 	return func(m *Model) {
 		m.arboristVersion = version
+	}
+}
+
+// WithNamespace sets the namespace to scope resources to.
+// When non-empty, only resources in this namespace are shown.
+func WithNamespace(ns string) Option {
+	return func(m *Model) {
+		m.namespace = ns
+		if ns != "" {
+			m.allNamespaces = false
+		}
+	}
+}
+
+// WithAllNamespaces sets whether to show resources from all namespaces.
+func WithAllNamespaces(all bool) Option {
+	return func(m *Model) {
+		m.allNamespaces = all
 	}
 }
 
@@ -319,6 +339,7 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 		yamlSearchInput:    yi,
 		lensAutocomplete:   ac,
 		forestResourceType: "pcs", // default resource type
+		allNamespaces:      true,  // default: show all namespaces
 	}
 
 	// Apply options

@@ -30,10 +30,29 @@ import (
 )
 
 // TUICmd launches the interactive Bubble Tea TUI.
-type TUICmd struct{}
+// It delegates to the ForestCmd subcommand by default.
+type TUICmd struct {
+	Forest ForestCmd `cmd:"" default:"withargs" help:"Show the forest view (default)."`
+}
 
-// Run executes the TUI command.
+// Run is called when `arborist` is invoked bare (no subcommand at all).
+// Kong resolves CLI → TUI via `default:"withargs"` but doesn't chain into
+// ForestCmd automatically, so we delegate here with default values.
 func (c *TUICmd) Run(globals *CLI) error {
+	return c.Forest.Run(globals)
+}
+
+// ForestCmd is the default subcommand of TUICmd. It renders the forest view
+// with optional resource type, namespace scoping, and name filter.
+type ForestCmd struct {
+	Resource      string `arg:"" optional:"" default:"pcs" help:"Resource type to display: pcs, pc, pcsg, pod."`
+	Namespace     string `short:"n" help:"Scope to a specific namespace." default:""`
+	AllNamespaces bool   `short:"A" help:"Show resources from all namespaces (default)." default:"true"`
+	Filter        string `short:"f" help:"Filter resources by name." default:""`
+}
+
+// Run executes the ForestCmd (TUI forest view).
+func (c *ForestCmd) Run(globals *CLI) error {
 	// Recover from panics so we can log the stack trace and restore the
 	// terminal before exiting.
 	defer func() {
@@ -45,6 +64,14 @@ func (c *TUICmd) Run(globals *CLI) error {
 			os.Exit(1)
 		}
 	}()
+
+	// Resolve namespace: if -n is set, use it (override -A); otherwise all namespaces.
+	namespace := ""
+	allNamespaces := true
+	if c.Namespace != "" {
+		namespace = c.Namespace
+		allNamespaces = false
+	}
 
 	// Initialize Kubernetes client
 	tui.DebugLog("initializing Kubernetes client")
@@ -75,15 +102,27 @@ func (c *TUICmd) Run(globals *CLI) error {
 	arboristVersion := resolveArboristVersion()
 	tui.DebugLog("arborist version=%s", arboristVersion)
 
-	// Create the Bubble Tea model
-	m := tui.NewModel(globalCache,
+	tui.DebugLog("forest args: resource=%s namespace=%q allNamespaces=%v filter=%q",
+		c.Resource, namespace, allNamespaces, c.Filter)
+
+	// Build TUI model options
+	opts := []tui.Option{
 		tui.WithContext(context.Background()),
 		tui.WithDebug(globals.Debug != ""),
 		tui.WithClusterInfo(contextName, clusterName),
 		tui.WithUserName(userName),
 		tui.WithK8sVersion(k8sVersion),
 		tui.WithArboristVersion(arboristVersion),
-	)
+		tui.WithForestResourceType(c.Resource),
+		tui.WithNamespace(namespace),
+		tui.WithAllNamespaces(allNamespaces),
+	}
+	if c.Filter != "" {
+		opts = append(opts, tui.WithFilter(c.Filter))
+	}
+
+	// Create the Bubble Tea model
+	m := tui.NewModel(globalCache, opts...)
 
 	// Ensure global cache is cleaned up when the TUI exits
 	if globalCache != nil {

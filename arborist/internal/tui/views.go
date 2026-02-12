@@ -40,9 +40,9 @@ func (m Model) View() string {
 
 	// Calculate available height for the main viewport.
 	// Must match handleWindowSize — see that function for the full breakdown.
-	// Fixed: 6(header) + 2*(2 border + 1 table header) = 12
+	// Fixed: 7(header) + 2*(2 border + 1 table header) = 13
 	// (section headers are now embedded in the top border, not separate lines)
-	fixedLines := 12
+	fixedLines := 13
 	if m.filterActive {
 		fixedLines += 3 // filter frame: top border + content + bottom border
 	}
@@ -112,6 +112,11 @@ func (m Model) renderHeaderFrame() string {
 	userLine := HeaderLabelStyle.Render("User:        ") + " " + HeaderValueStyle.Render(orUnknown(m.userName))
 	arboristLine := HeaderLabelStyle.Render("Arborist Rev:") + " " + HeaderValueStyle.Render(orUnknown(m.arboristVersion))
 	k8sLine := HeaderLabelStyle.Render("K8s Rev:     ") + " " + HeaderValueStyle.Render(orUnknown(m.k8sVersion))
+	nsDisplay := "all"
+	if !m.allNamespaces && m.namespace != "" {
+		nsDisplay = m.namespace
+	}
+	namespaceLine := HeaderLabelStyle.Render("Namespace:   ") + " " + HeaderValueStyle.Render(nsDisplay)
 	var viewLine string
 	if m.lensEditActive {
 		viewLine = HeaderLabelStyle.Render("Lens:        ") + " " + m.lensInput.View()
@@ -119,7 +124,7 @@ func (m Model) renderHeaderFrame() string {
 		viewLine = HeaderLabelStyle.Render("Lens:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
 	}
 
-	leftCol := lipgloss.JoinVertical(lipgloss.Left, contextLine, clusterLine, userLine, arboristLine, k8sLine, viewLine)
+	leftCol := lipgloss.JoinVertical(lipgloss.Left, contextLine, clusterLine, userLine, arboristLine, k8sLine, namespaceLine, viewLine)
 
 	// --- Middle column: key helpers in 2 rows ---
 	type menuItem struct {
