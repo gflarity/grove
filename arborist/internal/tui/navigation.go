@@ -393,6 +393,9 @@ func LensCommandNames() []string {
 }
 
 func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
+	debugLogWithContext("executeCommand: input=%q currentView=%s commandActive=%v lensEditActive=%v",
+		input, data.ViewTypeName(m.viewState.ViewType), m.commandActive, m.lensEditActive)
+
 	input = strings.TrimSpace(strings.ToLower(input))
 	if input == "" {
 		return m, nil
@@ -413,11 +416,11 @@ func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
 		}
 	}
 	if matched == "" {
-		debugLogWithContext("command mode: no match for %q", input)
+		debugLogWithContext("executeCommand: no match for %q", input)
 		return m, nil
 	}
 
-	debugLogWithContext("command mode: executing %q (matched %q)", input, matched)
+	debugLogWithContext("executeCommand: executing %q (matched %q)", input, matched)
 
 	// Normalize long forms to short forms for resource type commands
 	normalized := normalizeResourceType(matched)

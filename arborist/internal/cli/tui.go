@@ -30,16 +30,9 @@ import (
 )
 
 // TUICmd launches the interactive Bubble Tea TUI.
-// It delegates to the ForestCmd subcommand by default.
+// Kong routes to ForestCmd automatically via default:"withargs".
 type TUICmd struct {
 	Forest ForestCmd `cmd:"" default:"withargs" help:"Show the forest view (default)."`
-}
-
-// Run is called when `arborist` is invoked bare (no subcommand at all).
-// Kong resolves CLI → TUI via `default:"withargs"` but doesn't chain into
-// ForestCmd automatically, so we delegate here with default values.
-func (c *TUICmd) Run(globals *CLI) error {
-	return c.Forest.Run(globals)
 }
 
 // ForestCmd is the default subcommand of TUICmd. It renders the forest view
