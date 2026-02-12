@@ -427,6 +427,15 @@ func (m *Model) topologyAvailable() bool {
 	return m.topologyViewData != nil && len(m.topologyViewData.Domains) > 0
 }
 
+// topologyColumnVisible returns true when the TOPOLOGY column should be shown
+// in the resources table. Requires both that the cache has synced (so we know
+// cluster state) and that a ClusterTopology resource exists (i.e. topology is
+// available). Before cache sync, we don't show or hide — the column is hidden
+// by default since topologyAvailable() returns false when topologyViewData is nil.
+func (m *Model) topologyColumnVisible() bool {
+	return m.topologyAvailable()
+}
+
 // rebuildResourcesTable rebuilds the resources table from current data with color-coded cells.
 func (m *Model) rebuildResourcesTable() {
 	// Remember the currently selected row's name so we can restore it after rebuild.
@@ -517,15 +526,18 @@ func (m *Model) rebuildResourcesTable() {
 
 // buildResourceColumnSpecs builds the column spec for the resources table,
 // inserting dynamic GPU columns between READY and SCHEDULED/PHASE.
+// The TOPOLOGY column is only included when topology data is available.
 func (m *Model) buildResourceColumnSpecs(gpuTypes []string, lastColTitle string) []ColumnSpec {
-	// Base columns: NAMESPACE, TYPE, NAME, TOPOLOGY, READY
+	// Base columns: NAMESPACE, TYPE, NAME, [TOPOLOGY], READY
 	specs := []ColumnSpec{
 		{Title: "NAMESPACE", Weight: 2},
 		{Title: "TYPE", Weight: 3},
 		{Title: "NAME", Weight: 5},
-		{Title: "TOPOLOGY", Weight: 3},
-		{Title: "READY", Weight: 2},
 	}
+	if m.topologyColumnVisible() {
+		specs = append(specs, ColumnSpec{Title: "TOPOLOGY", Weight: 3})
+	}
+	specs = append(specs, ColumnSpec{Title: "READY", Weight: 2})
 
 	// GPU type columns (one per discovered GPU type)
 	for _, gpuType := range gpuTypes {
@@ -539,9 +551,14 @@ func (m *Model) buildResourceColumnSpecs(gpuTypes []string, lastColTitle string)
 }
 
 // colorizeResourceRowWithGPU returns plain text for each column value including GPU columns.
-// The row format is: [Namespace, Type, Name, Topology, Ready, <gpu1>, <gpu2>, ..., Scheduled]
+// The row format is: [Namespace, Type, Name, [Topology], Ready, <gpu1>, <gpu2>, ..., Scheduled]
+// The Topology field is only included when topology data is available.
 func (m *Model) colorizeResourceRowWithGPU(r data.Resource, gpuTypes []string) []string {
-	row := []string{r.Namespace, r.Type, r.Name, r.Topology, r.Ready}
+	row := []string{r.Namespace, r.Type, r.Name}
+	if m.topologyColumnVisible() {
+		row = append(row, r.Topology)
+	}
+	row = append(row, r.Ready)
 
 	// Add GPU count values
 	if len(gpuTypes) > 0 {
