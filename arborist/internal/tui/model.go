@@ -120,6 +120,9 @@ type Model struct {
 	lensEditActive bool
 	lensInput      textinput.Model
 
+	// Autocomplete for lens/command inputs (shared candidate list)
+	lensAutocomplete *Autocompleter
+
 	// Data — all derived from the cache snapshot
 	allResources       map[string][]data.Resource
 	allEvents          []data.Event
@@ -263,19 +266,25 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 	yi.Prompt = "/ "
 	yi.PromptStyle = FilterBarStyle
 
+	// Initialize autocomplete for lens/command inputs
+	ac := NewAutocompleter(LensCommandNames())
+	ac.ConfigureInput(&ci, AutocompleteSuggestionStyle)
+	ac.ConfigureInput(&li, AutocompleteSuggestionStyle)
+
 	m := Model{
 		viewState: data.ViewState{
 			ViewType: data.ForestView,
 		},
-		activePane:    data.ResourcesPane,
-		allResources:  make(map[string][]data.Resource),
-		podYAMLData:   make(map[string]string),
-		cache:         cache,
-		ctx:           context.Background(),
-		filterInput:   ti,
-		commandInput:  ci,
-		lensInput:     li,
-		yamlSearchInput: yi,
+		activePane:       data.ResourcesPane,
+		allResources:     make(map[string][]data.Resource),
+		podYAMLData:      make(map[string]string),
+		cache:            cache,
+		ctx:              context.Background(),
+		filterInput:      ti,
+		commandInput:     ci,
+		lensInput:        li,
+		yamlSearchInput:  yi,
+		lensAutocomplete: ac,
 	}
 
 	// Apply options

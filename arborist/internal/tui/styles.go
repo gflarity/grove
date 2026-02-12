@@ -215,6 +215,13 @@ var CommandBarStyle = lipgloss.NewStyle().
 	Foreground(ColorAqua)
 
 // =============================================================================
+// Autocomplete Suggestion Style (inline ghost text for textinput completions)
+// =============================================================================
+
+var AutocompleteSuggestionStyle = lipgloss.NewStyle().
+	Foreground(ColorLightSlateGray)
+
+// =============================================================================
 // Topology Display Styles
 // =============================================================================
 
