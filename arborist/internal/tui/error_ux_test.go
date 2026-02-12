@@ -638,3 +638,194 @@ func TestTopology_TransitionFalseToTrue_AfterCacheUpdate(t *testing.T) {
 		t.Errorf("expected TopologyView after cache update, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 }
+
+// ===========================================================================
+// Part 3: Hide Topology Column & Note When Unavailable
+// ===========================================================================
+
+// --- topologyColumnVisible ---
+
+func TestTopologyColumnVisible_FalseWhenNoTopologyData(t *testing.T) {
+	m := newTestModel(nil)
+	m.topologyViewData = nil
+
+	if m.topologyColumnVisible() {
+		t.Error("expected topologyColumnVisible() = false when topologyViewData is nil")
+	}
+}
+
+func TestTopologyColumnVisible_FalseWhenEmptyDomains(t *testing.T) {
+	m := newTestModel(nil)
+	m.topologyViewData = &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{},
+	}
+
+	if m.topologyColumnVisible() {
+		t.Error("expected topologyColumnVisible() = false when Domains is empty")
+	}
+}
+
+func TestTopologyColumnVisible_TrueWhenDomainsExist(t *testing.T) {
+	m := newTestModel(nil)
+	m.topologyViewData = &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+		},
+	}
+
+	if !m.topologyColumnVisible() {
+		t.Error("expected topologyColumnVisible() = true when topology data exists")
+	}
+}
+
+// --- TOPOLOGY column hidden when unavailable ---
+
+func TestResourcesTable_HidesTopologyColumn_WhenUnavailable(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.PodCliqueSets = []data.Resource{
+		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "N/A"},
+	}
+	mc.SetSnapshot(snap)
+	m := newTestModelWithCache(mc)
+
+	// No topology data
+	m.topologyViewData = nil
+	m.rebuildResourcesTable()
+
+	// Check that column headers do NOT include "TOPOLOGY"
+	cols := m.resourcesTable.Columns()
+	for _, col := range cols {
+		if col.Title == "TOPOLOGY" {
+			t.Error("TOPOLOGY column should be hidden when topology is unavailable")
+		}
+	}
+}
+
+func TestResourcesTable_ShowsTopologyColumn_WhenAvailable(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.PodCliqueSets = []data.Resource{
+		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "rack"},
+	}
+	snap.TopologyViewData = &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "rack", Key: "topology.io/rack", ValuesCount: 3},
+		},
+	}
+	mc.SetSnapshot(snap)
+	m := newTestModelWithCache(mc)
+
+	// Rebuild to pick up topology data
+	m.rebuildResourcesTable()
+
+	// Check that column headers include "TOPOLOGY"
+	found := false
+	cols := m.resourcesTable.Columns()
+	for _, col := range cols {
+		if col.Title == "TOPOLOGY" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("TOPOLOGY column should be visible when topology data is available")
+	}
+}
+
+func TestResourcesTable_RowWidth_MatchesColumns_NoTopology(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.PodCliqueSets = []data.Resource{
+		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "N/A"},
+	}
+	mc.SetSnapshot(snap)
+	m := newTestModelWithCache(mc)
+
+	// No topology data — TOPOLOGY column hidden
+	m.topologyViewData = nil
+	m.rebuildResourcesTable()
+
+	cols := m.resourcesTable.Columns()
+	rows := m.resourcesTable.Rows()
+	if len(rows) == 0 {
+		t.Fatal("expected at least 1 row")
+	}
+	if len(rows[0]) != len(cols) {
+		t.Errorf("row width %d != column count %d (no topology)", len(rows[0]), len(cols))
+	}
+}
+
+func TestResourcesTable_RowWidth_MatchesColumns_WithTopology(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.PodCliqueSets = []data.Resource{
+		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "rack"},
+	}
+	snap.TopologyViewData = &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "rack", Key: "topology.io/rack", ValuesCount: 3},
+		},
+	}
+	mc.SetSnapshot(snap)
+	m := newTestModelWithCache(mc)
+	m.rebuildResourcesTable()
+
+	cols := m.resourcesTable.Columns()
+	rows := m.resourcesTable.Rows()
+	if len(rows) == 0 {
+		t.Fatal("expected at least 1 row")
+	}
+	if len(rows[0]) != len(cols) {
+		t.Errorf("row width %d != column count %d (with topology)", len(rows[0]), len(cols))
+	}
+}
+
+// --- Topology column reappears after cache update delivers topology ---
+
+func TestTopologyColumn_AppearsAfterCacheUpdateDeliversTopology(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.PodCliqueSets = []data.Resource{
+		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "N/A"},
+	}
+	mc.SetSnapshot(snap)
+	m := newTestModelWithCache(mc)
+
+	// Initially no topology
+	m.topologyViewData = nil
+	m.rebuildResourcesTable()
+
+	// Verify no TOPOLOGY column
+	for _, col := range m.resourcesTable.Columns() {
+		if col.Title == "TOPOLOGY" {
+			t.Fatal("precondition: TOPOLOGY column should be hidden initially")
+		}
+	}
+
+	// Simulate cache update that delivers topology
+	snap = mc.Snapshot()
+	snap.TopologyViewData = &data.TopologyViewData{
+		Domains: []data.TopologyDomainRow{
+			{Domain: "rack", Key: "topology.io/rack", ValuesCount: 2},
+		},
+	}
+	snap.PodCliqueSets = []data.Resource{
+		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "rack"},
+	}
+	mc.SetSnapshot(snap)
+	m.applySnapshot()
+
+	// Now TOPOLOGY column should be present
+	found := false
+	for _, col := range m.resourcesTable.Columns() {
+		if col.Title == "TOPOLOGY" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("TOPOLOGY column should appear after topology data becomes available")
+	}
+}
+

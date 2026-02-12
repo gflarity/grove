@@ -1306,11 +1306,22 @@ func TestC14_RapidSuccessiveCacheUpdates(t *testing.T) {
 			t.Errorf("expected 4 PCS rows after two updates, got %d", len(rows))
 		}
 
-		// Verify alpha-pcs has the updated ready count
+		// Verify alpha-pcs has the updated ready count.
+		// The READY column position depends on whether TOPOLOGY is visible:
+		// With topology: NAMESPACE(0), TYPE(1), NAME(2), TOPOLOGY(3), READY(4), SCHEDULED(5)
+		// Without:       NAMESPACE(0), TYPE(1), NAME(2), READY(3), SCHEDULED(4)
+		readyIdx := 3 // no topology column by default
+		cols := m.resourcesTable.Columns()
+		for i, col := range cols {
+			if col.Title == "READY" {
+				readyIdx = i
+				break
+			}
+		}
 		for _, row := range rows {
-			if len(row) >= 5 && row[2] == "alpha-pcs" {
-				if row[4] != "1/3" {
-					t.Errorf("alpha-pcs Ready = %q, want '1/3'", row[4])
+			if len(row) > readyIdx && row[2] == "alpha-pcs" {
+				if row[readyIdx] != "1/3" {
+					t.Errorf("alpha-pcs Ready = %q, want '1/3'", row[readyIdx])
 				}
 			}
 		}
