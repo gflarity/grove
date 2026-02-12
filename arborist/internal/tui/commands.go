@@ -9,16 +9,29 @@ import (
 )
 
 // startGlobalCacheCmd starts the global cache and waits for initial sync.
+// Any non-fatal warnings from startup (e.g. missing CRDs) are collected
+// and delivered via CacheSyncedMsg.Warnings.
 func startGlobalCacheCmd(cache data.GlobalCache, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("startGlobalCache")
+
+		// Collect warnings from the cache startup via the OnWarning callback.
+		// The callback fires synchronously during cache.Start(), so a simple
+		// slice is safe (no concurrent access).
+		var warnings []string
+		if wc, ok := cache.(data.WarningConfigurable); ok {
+			wc.SetOnWarning(func(msg string) {
+				warnings = append(warnings, msg)
+			})
+		}
+
 		if err := cache.Start(ctx); err != nil {
 			return ErrorMsg{Operation: "startGlobalCache", Err: err}
 		}
 		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		cache.WaitForSync(syncCtx)
-		return CacheSyncedMsg{}
+		return CacheSyncedMsg{Warnings: warnings}
 	}
 }
 

@@ -4,7 +4,10 @@ package tui
 // The Update loop handles these messages to update model state.
 
 // CacheSyncedMsg signals the global cache has completed initial sync.
-type CacheSyncedMsg struct{}
+// Warnings contains any non-fatal messages from cache startup (e.g. missing CRDs).
+type CacheSyncedMsg struct {
+	Warnings []string
+}
 
 // CacheUpdateMsg signals the global cache has a new snapshot available.
 type CacheUpdateMsg struct{}
@@ -28,4 +31,10 @@ type ResourceYAMLMsg struct {
 type ErrorMsg struct {
 	Operation string
 	Err       error
+}
+
+// WarningMsg is a non-fatal warning message (e.g. missing CRD) that should be
+// surfaced in the error log box.
+type WarningMsg struct {
+	Message string
 }

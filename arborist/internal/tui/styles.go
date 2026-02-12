@@ -266,6 +266,20 @@ var FootnoteStyle = lipgloss.NewStyle().
 	PaddingLeft(1)
 
 // =============================================================================
+// Error Log Styles
+// =============================================================================
+
+var (
+	// ErrorLogTimestampStyle — muted (cadetblue) for the timestamp
+	ErrorLogTimestampStyle = lipgloss.NewStyle().
+				Foreground(ColorCadetBlue)
+
+	// ErrorLogMessageStyle — orange-red for the error text
+	ErrorLogMessageStyle = lipgloss.NewStyle().
+				Foreground(ColorOrangeRed)
+)
+
+// =============================================================================
 // YAML Search Highlight Style
 // =============================================================================
 

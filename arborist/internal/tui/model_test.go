@@ -1795,16 +1795,16 @@ func TestTopologyView_NilSnapshotToggleDoesNotPanic(t *testing.T) {
 	m.cacheSynced = true
 	m = mustApply(m, CacheSyncedMsg{})
 
-	// Press 't' — should toggle view
-	m = sendRune(m, 't')
-	if m.viewState.ViewType != data.TopologyView {
-		t.Fatalf("expected TopologyView even without topology data, got %s", data.ViewTypeName(m.viewState.ViewType))
-	}
-
-	// Toggle back should work
+	// Press 't' — with no topology data, should stay in ForestView and log an error
 	m = sendRune(m, 't')
 	if m.viewState.ViewType != data.ForestView {
-		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		t.Fatalf("expected ForestView when topology unavailable, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if len(m.errorLog) == 0 {
+		t.Fatal("expected an error to be logged when topology is unavailable")
+	}
+	if !strings.Contains(m.errorLog[0].Message, "Topology unavailable") {
+		t.Errorf("expected error about topology unavailable, got %q", m.errorLog[0].Message)
 	}
 }
 
@@ -1824,16 +1824,14 @@ func TestTopologyView_EmptySnapshot(t *testing.T) {
 	m.cacheSynced = true
 	m = mustApply(m, CacheSyncedMsg{})
 
-	// Toggle to topology
+	// Toggle to topology — empty domains means topologyAvailable() = false,
+	// so pressing 't' should stay in ForestView and log an error.
 	m = sendRune(m, 't')
-
-	rows := m.topologyDomainsTable.Rows()
-	if len(rows) != 0 {
-		t.Fatalf("expected 0 domain rows, got %d", len(rows))
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView when topology has empty domains, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
-	podRows := m.topologyPodsTable.Rows()
-	if len(podRows) != 0 {
-		t.Fatalf("expected 0 pod rows, got %d", len(podRows))
+	if len(m.errorLog) == 0 {
+		t.Fatal("expected error logged when toggling to topology with empty domains")
 	}
 }
 
@@ -3873,6 +3871,10 @@ func TestExecuteCommand_ResourceType_PreservesFilter(t *testing.T) {
 
 func TestExecuteCommand_Forest_StillWorks(t *testing.T) {
 	mc := buildFullMockCache()
+	// Add topology data so 't' can switch to TopologyView
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	mc.SetSnapshot(snap)
 	m := newTestModelWithCache(mc)
 
 	// Switch to topology first

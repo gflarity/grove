@@ -55,6 +55,14 @@ type GlobalCache interface {
 	GetResourceYAML(ctx context.Context, resourceType, name, namespace string) (string, error)
 }
 
+// WarningConfigurable is an optional interface that GlobalCache implementations
+// can satisfy to receive a warning callback before Start(). The TUI uses this
+// to capture non-fatal startup warnings (e.g. missing CRDs) and route them to
+// the error log box.
+type WarningConfigurable interface {
+	SetOnWarning(fn func(string))
+}
+
 // CacheSnapshot holds a point-in-time snapshot of all cluster state needed by the TUI.
 // Built from informer caches on every debounced change. All fields are read-only
 // after construction.

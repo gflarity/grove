@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ai-dynamo/grove/arborist/internal/data"
 	"github.com/charmbracelet/bubbles/table"
@@ -12,6 +13,15 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// ErrorEntry represents a single error entry in the error log.
+type ErrorEntry struct {
+	Time    time.Time
+	Message string
+}
+
+// maxErrorLogEntries is the maximum number of errors kept in the error log.
+const maxErrorLogEntries = 3
 
 // ColumnSpec defines a table column's title and relative weight for width calculation.
 // This is the single source of truth for a table's column layout — inspired by K9s's
@@ -180,7 +190,9 @@ type Model struct {
 	arboristVersion  string
 
 	// Error state
-	lastError error
+	lastError      error
+	errorLog       []ErrorEntry
+	errorLogVisible bool
 }
 
 // Option is a function that configures the Model.
@@ -385,6 +397,34 @@ func (m Model) Init() tea.Cmd {
 	// The cache will be started after the first WindowSizeMsg (when we know the terminal is ready).
 	// Return nil — no data loading needed until the cache is synced.
 	return nil
+}
+
+// addError prepends a new error entry to the error log, caps at maxErrorLogEntries
+// (oldest dropped), and makes the error log visible. Triggers a layout resize so
+// that tables shrink to make room for the error log frame.
+func (m *Model) addError(message string) {
+	prevCount := len(m.errorLog)
+	entry := ErrorEntry{
+		Time:    time.Now(),
+		Message: message,
+	}
+	m.errorLog = append([]ErrorEntry{entry}, m.errorLog...)
+	if len(m.errorLog) > maxErrorLogEntries {
+		m.errorLog = m.errorLog[:maxErrorLogEntries]
+	}
+	wasVisible := m.errorLogVisible
+	m.errorLogVisible = true
+	// Resize layout if the error log frame height changed (first show, or
+	// entry count grew within cap). Skip if terminal size hasn't been received yet.
+	if m.ready && (!wasVisible || len(m.errorLog) != prevCount) {
+		m.resizeLayout()
+	}
+}
+
+// topologyAvailable returns true only when topology data exists with at least
+// one domain. Used to guard the 't' key and ":topology" command.
+func (m *Model) topologyAvailable() bool {
+	return m.topologyViewData != nil && len(m.topologyViewData.Domains) > 0
 }
 
 // rebuildResourcesTable rebuilds the resources table from current data with color-coded cells.
