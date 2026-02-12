@@ -433,6 +433,12 @@ func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "topology":
+		// Guard: if not currently in topology view and topology is unavailable, log error
+		if m.viewState.ViewType != data.TopologyView && !m.topologyAvailable() {
+			m.addError("Topology unavailable — no ClusterTopology resource found")
+			debugLogWithContext("executeCommand: topology unavailable, staying in current view")
+			return m, nil
+		}
 		return m.toggleTopologyView()
 
 	case "pcs", "podcliqueset", "pc", "podclique", "pcsg", "podcliquescalinggroup", "pod":

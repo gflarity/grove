@@ -41,6 +41,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ErrorMsg:
 		debugLog("ERROR: %s: %v", msg.Operation, msg.Err)
 		m.lastError = msg.Err
+		m.addError(fmt.Sprintf("%s: %v", msg.Operation, msg.Err))
+		// If startGlobalCache failed, also set cacheSynced = true so the TUI
+		// doesn't hang on "Syncing..." forever.
+		if msg.Operation == "startGlobalCache" {
+			m.cacheSynced = true
+		}
 		model, cmd = m, nil
 
 	default:
@@ -59,11 +65,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return model, cmd
 }
 
-// handleWindowSize handles terminal resize events.
-func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
-	m.width = msg.Width
-	m.height = msg.Height
-
+// resizeLayout recalculates pane heights and resizes all tables/viewports to
+// fit the current terminal dimensions. Must be called whenever the terminal
+// size changes OR any element that affects layout height changes (e.g. error
+// log appearing/disappearing, filter bar toggling).
+func (m *Model) resizeLayout() {
 	// Calculate table heights.
 	// 7(header: context+cluster+user+arborist+k8s+namespace+lens) + 2*(2 border + 1 table header) = 13
 	fixedLines := 13
@@ -72,6 +78,11 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.commandActive {
 		fixedLines += 3
+	}
+	fixedLines += m.errorLogFrameHeight()
+	// Account for footnote line in topology view with GPU columns
+	if m.viewState.ViewType == data.TopologyView && m.topologyHasGPUColumns() {
+		fixedLines++
 	}
 	availableHeight := m.height - fixedLines
 	paneHeight := availableHeight / 2
@@ -96,6 +107,14 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// Resize YAML overlay viewport
 	m.yamlViewport.Width = frameContentWidth
 	m.yamlViewport.Height = m.height - 6 // room for header/footer
+}
+
+// handleWindowSize handles terminal resize events.
+func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
+	m.width = msg.Width
+	m.height = msg.Height
+
+	m.resizeLayout()
 
 	// Rebuild tables
 	m.rebuildResourcesTable()
@@ -272,6 +291,11 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.commandInput.Focus()
 			debugLogWithContext("command mode activated")
 			return m, textinput.Blink
+		case "e", "E":
+			m.errorLogVisible = !m.errorLogVisible
+			m.resizeLayout()
+			debugLogWithContext("error log toggled: visible=%v", m.errorLogVisible)
+			return m, nil
 		case "y", "Y":
 			return m.openYAMLOverlay()
 		case "l", "L":
@@ -348,10 +372,18 @@ func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
 	debugLogWithContext("toggleTopologyView: current view=%s", data.ViewTypeName(m.viewState.ViewType))
 	if m.viewState.ViewType == data.TopologyView {
+		// Switching FROM topology back to forest — always allowed
 		m.viewState.ViewType = data.ForestView
 		m.activePane = data.ResourcesPane
 		m.updateTableFocus()
 		debugLogWithContext("toggled from TopologyView to ForestView")
+		return m, nil
+	}
+
+	// Switching TO topology — guard: must have topology data
+	if !m.topologyAvailable() {
+		m.addError("Topology unavailable — no ClusterTopology resource found")
+		debugLogWithContext("toggleTopologyView: topology unavailable, staying in current view")
 		return m, nil
 	}
 

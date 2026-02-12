@@ -9,9 +9,16 @@ import (
 
 // handleCacheSynced handles CacheSyncedMsg.
 // Reads the initial snapshot, populates all tables, and starts listening for updates.
-func (m Model) handleCacheSynced(_ CacheSyncedMsg) (tea.Model, tea.Cmd) {
+// Any non-fatal warnings from cache startup are surfaced in the error log box.
+func (m Model) handleCacheSynced(msg CacheSyncedMsg) (tea.Model, tea.Cmd) {
 	debugLogWithContext("global cache synced")
 	m.cacheSynced = true
+
+	// Surface any startup warnings in the error log box.
+	for _, w := range msg.Warnings {
+		debugLogWithContext("cache warning: %s", w)
+		m.addError(w)
+	}
 
 	if m.cache == nil {
 		return m, nil

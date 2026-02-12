@@ -8,6 +8,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// errorLogFrameHeight returns the height consumed by the error log frame when visible.
+// Frame border (top + bottom) = 2, plus one line per error entry (minimum 1 for the empty state).
+func (m Model) errorLogFrameHeight() int {
+	if !m.errorLogVisible {
+		return 0
+	}
+	entries := len(m.errorLog)
+	if entries == 0 {
+		entries = 1 // empty-state placeholder line
+	}
+	return 2 + entries // border top + border bottom + content lines
+}
+
 // View renders the entire TUI. This is the main entry point for Bubble Tea rendering.
 func (m Model) View() string {
 	if !m.ready {
@@ -56,6 +69,10 @@ func (m Model) View() string {
 		fixedLines++ // 1 line for the footnote
 	}
 
+	// Account for error log frame height
+	errorLogHeight := m.errorLogFrameHeight()
+	fixedLines += errorLogHeight
+
 	availableHeight := m.height - fixedLines
 	resourcesHeight := availableHeight / 2
 	eventsHeight := availableHeight - resourcesHeight
@@ -77,6 +94,11 @@ func (m Model) View() string {
 	default:
 		sections = append(sections, m.renderResourcesFrame(resourcesHeight))
 		sections = append(sections, m.renderEventsFrame(eventsHeight))
+	}
+
+	// Error log frame (appears at the bottom when visible)
+	if m.errorLogVisible {
+		sections = append(sections, m.renderErrorLogFrame())
 	}
 
 	// Note: bottom menu bar removed — shortcuts are now displayed in the header
@@ -147,7 +169,10 @@ func (m Model) renderHeaderFrame() string {
 	}
 
 	items = append(items, menuItem{"y", "YAML"})
-	items = append(items, menuItem{"t", "Toggle"})
+	if m.topologyAvailable() {
+		items = append(items, menuItem{"t", "Topology"})
+	}
+	items = append(items, menuItem{"e", "Errors"})
 
 	if m.viewState.ViewType != data.ForestView {
 		items = append(items, menuItem{"esc", "Back"})
@@ -456,6 +481,27 @@ func (m Model) topologyHasGPUColumns() bool {
 // Only displayed when GPU columns are visible in the topology view.
 func (m Model) renderTopologyFootnote() string {
 	return FootnoteStyle.Render("¹ GPU: ▓▓ Grove  ░░ Other  (grove/other/total)")
+}
+
+// renderErrorLogFrame renders a framed box showing the last N errors (newest first).
+// Uses DarkOrange border color to draw the eye. Shows a placeholder when empty.
+func (m Model) renderErrorLogFrame() string {
+	title := renderSectionHeader("Errors", len(m.errorLog), false, "")
+
+	var content string
+	if len(m.errorLog) == 0 {
+		content = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("No errors")
+	} else {
+		var lines []string
+		for _, entry := range m.errorLog {
+			ts := ErrorLogTimestampStyle.Render(entry.Time.Format("15:04:05"))
+			msg := ErrorLogMessageStyle.Render(entry.Message)
+			lines = append(lines, ts+"  "+msg)
+		}
+		content = strings.Join(lines, "\n")
+	}
+
+	return renderFrameWithTitle(title, content, m.width, ColorDarkOrange)
 }
 
 // renderTopologyPodsFrame renders the topology pods section in a framed box.
@@ -795,7 +841,10 @@ func (m Model) renderMenuBar() string {
 	}
 
 	items = append(items, menuItem{"y", "YAML"})
-	items = append(items, menuItem{"t", "Toggle"})
+	if m.topologyAvailable() {
+		items = append(items, menuItem{"t", "Topology"})
+	}
+	items = append(items, menuItem{"e", "Errors"})
 
 	if m.viewState.ViewType != data.ForestView {
 		items = append(items, menuItem{"esc", "Back"})
@@ -835,7 +884,10 @@ func (m Model) buildShortcutsString() string {
 	}
 
 	parts = append(parts, "<y>YAML")
-	parts = append(parts, "<t>Toggle")
+	if m.topologyAvailable() {
+		parts = append(parts, "<t>Topology")
+	}
+	parts = append(parts, "<e>Errors")
 
 	if m.viewState.ViewType != data.ForestView {
 		parts = append(parts, "<esc>Back")

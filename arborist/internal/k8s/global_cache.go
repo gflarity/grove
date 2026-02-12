@@ -91,6 +91,15 @@ func WithCacheNamespace(ns string) GlobalCacheOption {
 	}
 }
 
+// WithOnWarning sets a callback that is invoked for non-fatal warnings during
+// cache startup (e.g. a missing CRD). The TUI uses this to surface warnings in
+// the error log box instead of losing them to stderr.
+func WithOnWarning(fn func(string)) GlobalCacheOption {
+	return func(c *InformerGlobalCache) {
+		c.onWarning = fn
+	}
+}
+
 // InformerGlobalCache implements data.GlobalCache using client-go informers.
 // It watches all resource types needed by the TUI: Nodes, Pods, Events,
 // PodCliqueSets, PodCliqueScalingGroups, PodCliques, and ClusterTopology.
@@ -132,6 +141,14 @@ type InformerGlobalCache struct {
 	// Lifecycle
 	cancel  context.CancelFunc
 	stopped bool
+
+	// Optional warning callback for non-fatal startup issues.
+	onWarning func(string)
+
+	// topologyCRDAvailable tracks whether the ClusterTopology CRD was found
+	// during Start(). When false, the ctInformer is nil and topology features
+	// are gracefully unavailable.
+	topologyCRDAvailable bool
 }
 
 // NewInformerGlobalCache creates a new InformerGlobalCache.
@@ -146,6 +163,11 @@ func NewInformerGlobalCache(clientset kubernetes.Interface, dynamicClient dynami
 		opt(c)
 	}
 	return c
+}
+
+// SetOnWarning sets the warning callback. Implements data.WarningConfigurable.
+func (c *InformerGlobalCache) SetOnWarning(fn func(string)) {
+	c.onWarning = fn
 }
 
 // Start begins the informers and starts watching. Non-blocking.
@@ -202,12 +224,6 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 		)
 	}
 
-	// Cluster-scoped dynamic factory for ClusterTopology — always cluster-wide.
-	c.clusterDynamicFactory = dynamicinformer.NewDynamicSharedInformerFactory(
-		c.dynamicClient,
-		0,
-	)
-
 	// Set up core informers
 	c.nodeInformer = c.coreFactory.Core().V1().Nodes().Informer()
 	c.podInformer = c.podInformerFactory.Core().V1().Pods().Informer()
@@ -218,8 +234,20 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 	c.pcsgInformer = c.dynamicFactory.ForResource(globalPcsgGVR).Informer()
 	c.pcInformer = c.dynamicFactory.ForResource(globalPcGVR).Informer()
 
-	// ClusterTopology informer — always cluster-wide via the unfiltered factory
-	c.ctInformer = c.clusterDynamicFactory.ForResource(globalClusterTopologyGVR).Informer()
+	// ClusterTopology informer — check if the CRD exists first to avoid
+	// noisy reflector errors when it doesn't.
+	c.topologyCRDAvailable = c.checkCRDExists(globalClusterTopologyGVR)
+	if c.topologyCRDAvailable {
+		c.clusterDynamicFactory = dynamicinformer.NewDynamicSharedInformerFactory(
+			c.dynamicClient,
+			0,
+		)
+		c.ctInformer = c.clusterDynamicFactory.ForResource(globalClusterTopologyGVR).Informer()
+	} else {
+		if c.onWarning != nil {
+			c.onWarning("ClusterTopology CRD not found — topology view unavailable")
+		}
+	}
 
 	// Register event handlers on all informers
 	handler := cache.ResourceEventHandlerFuncs{
@@ -240,15 +268,19 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 	c.pcsgInformer.AddEventHandler(handler)
 	//nolint:errcheck
 	c.pcInformer.AddEventHandler(handler)
-	//nolint:errcheck
-	c.ctInformer.AddEventHandler(handler)
+	if c.ctInformer != nil {
+		//nolint:errcheck
+		c.ctInformer.AddEventHandler(handler)
+	}
 
 	// Start informers
 	c.coreFactory.Start(ctx.Done())
 	c.podInformerFactory.Start(ctx.Done())
 	c.eventInformerFactory.Start(ctx.Done())
 	c.dynamicFactory.Start(ctx.Done())
-	c.clusterDynamicFactory.Start(ctx.Done())
+	if c.clusterDynamicFactory != nil {
+		c.clusterDynamicFactory.Start(ctx.Done())
+	}
 
 	return nil
 }
@@ -257,15 +289,18 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 // or the context is cancelled. After sync completes, it triggers an immediate
 // snapshot rebuild.
 func (c *InformerGlobalCache) WaitForSync(ctx context.Context) bool {
-	synced := cache.WaitForCacheSync(ctx.Done(),
+	syncFuncs := []cache.InformerSynced{
 		c.nodeInformer.HasSynced,
 		c.podInformer.HasSynced,
 		c.eventInformer.HasSynced,
 		c.pcsInformer.HasSynced,
 		c.pcsgInformer.HasSynced,
 		c.pcInformer.HasSynced,
-		c.ctInformer.HasSynced,
-	)
+	}
+	if c.ctInformer != nil {
+		syncFuncs = append(syncFuncs, c.ctInformer.HasSynced)
+	}
+	synced := cache.WaitForCacheSync(ctx.Done(), syncFuncs...)
 	if synced {
 		c.rebuildSnapshot()
 	}
@@ -546,7 +581,11 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 }
 
 // readClusterTopologyLevels reads the ClusterTopology CR from the informer cache.
+// Returns nil when the ClusterTopology CRD is not available.
 func (c *InformerGlobalCache) readClusterTopologyLevels() []corev1alpha1.TopologyLevel {
+	if c.ctInformer == nil {
+		return nil
+	}
 	return readClusterTopologyLevelsFromInformer(c.ctInformer)
 }
 
@@ -914,6 +953,23 @@ func splitReplicaKey(key string) []string {
 func containsString(slice []string, s string) bool {
 	for _, v := range slice {
 		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// checkCRDExists uses the discovery API to check whether a given GVR's resource
+// type is registered on the API server. Returns false if the API group or
+// resource is not found (e.g. the CRD is not installed).
+func (c *InformerGlobalCache) checkCRDExists(gvr schema.GroupVersionResource) bool {
+	resourceList, err := c.clientset.Discovery().ServerResourcesForGroupVersion(gvr.GroupVersion().String())
+	if err != nil {
+		// API group not found — CRD not installed
+		return false
+	}
+	for _, r := range resourceList.APIResources {
+		if r.Name == gvr.Resource {
 			return true
 		}
 	}
