@@ -167,7 +167,8 @@ type Model struct {
 	ready  bool // true after first WindowSizeMsg
 
 	// Configuration
-	debug bool
+	debug              bool
+	forestResourceType string // "pcs" (default), "pc", "pcsg", "pod"
 
 	// Cluster info (resolved from kubeconfig at startup)
 	contextName      string
@@ -233,6 +234,38 @@ func WithGlobalCache(cache data.GlobalCache) Option {
 	}
 }
 
+// WithForestResourceType sets the initial resource type for the forest view.
+// Valid values: "pcs" (default), "pc", "pcsg", "pod" and their long forms.
+func WithForestResourceType(rt string) Option {
+	return func(m *Model) {
+		m.forestResourceType = normalizeResourceType(rt)
+	}
+}
+
+// WithFilter sets the initial filter text.
+func WithFilter(filter string) Option {
+	return func(m *Model) {
+		m.filterText = filter
+		m.filterInput.SetValue(filter)
+	}
+}
+
+// normalizeResourceType maps long resource type names to their short forms.
+func normalizeResourceType(rt string) string {
+	switch strings.ToLower(strings.TrimSpace(rt)) {
+	case "podcliqueset", "pcs":
+		return "pcs"
+	case "podclique", "pc":
+		return "pc"
+	case "podcliquescalinggroup", "pcsg":
+		return "pcsg"
+	case "pod":
+		return "pod"
+	default:
+		return "pcs"
+	}
+}
+
 // NewModel creates a new Model with the given GlobalCache and options.
 func NewModel(cache data.GlobalCache, opts ...Option) Model {
 	// Initialize filter input
@@ -275,16 +308,17 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 		viewState: data.ViewState{
 			ViewType: data.ForestView,
 		},
-		activePane:       data.ResourcesPane,
-		allResources:     make(map[string][]data.Resource),
-		podYAMLData:      make(map[string]string),
-		cache:            cache,
-		ctx:              context.Background(),
-		filterInput:      ti,
-		commandInput:     ci,
-		lensInput:        li,
-		yamlSearchInput:  yi,
-		lensAutocomplete: ac,
+		activePane:         data.ResourcesPane,
+		allResources:       make(map[string][]data.Resource),
+		podYAMLData:        make(map[string]string),
+		cache:              cache,
+		ctx:                context.Background(),
+		filterInput:        ti,
+		commandInput:       ci,
+		lensInput:          li,
+		yamlSearchInput:    yi,
+		lensAutocomplete:   ac,
+		forestResourceType: "pcs", // default resource type
 	}
 
 	// Apply options
