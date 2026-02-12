@@ -272,3 +272,60 @@ func ComputeDomainGPUSummary(
 func FormatGPUGroveOtherTotal(grove, other, total int64) string {
 	return fmt.Sprintf("%d/%d/%d", grove, other, total)
 }
+
+// FormatGPUBar renders a unicode bar graph showing grove/other/free proportions
+// within barWidth characters, wrapped in brackets, with a numeric suffix.
+//
+// Character legend:
+//   - ▓ (dark shade U+2593)  = Grove (PCS-managed)
+//   - ░ (light shade U+2591) = Other (non-PCS)
+//   - ' ' (space)            = Free
+//
+// Example: "[▓▓                    ] 7/0/56"
+func FormatGPUBar(grove, other, total int64, barWidth int) string {
+	if barWidth <= 0 {
+		return fmt.Sprintf("[] (%d/%d/%d)", grove, other, total)
+	}
+
+	var groveChars, otherChars, freeChars int
+
+	if total <= 0 {
+		// No capacity: entire bar is free
+		freeChars = barWidth
+	} else {
+		// Clamp used counts so grove+other doesn't exceed total for bar purposes
+		used := grove + other
+		if used > total {
+			// Overcommit: scale grove and other proportionally to fill the bar
+			groveChars = int(float64(grove) / float64(used) * float64(barWidth))
+			otherChars = int(float64(other) / float64(used) * float64(barWidth))
+			// Ensure they sum to barWidth
+			freeChars = 0
+			remainder := barWidth - groveChars - otherChars
+			// Distribute remainder to grove first (largest contributor)
+			groveChars += remainder
+		} else {
+			// Normal case: compute proportional widths
+			groveChars = int(float64(grove) / float64(total) * float64(barWidth))
+			otherChars = int(float64(other) / float64(total) * float64(barWidth))
+			freeChars = barWidth - groveChars - otherChars
+		}
+	}
+
+	// Build bar string
+	var b strings.Builder
+	b.WriteRune('[')
+	for i := 0; i < groveChars; i++ {
+		b.WriteRune('▓')
+	}
+	for i := 0; i < otherChars; i++ {
+		b.WriteRune('░')
+	}
+	for i := 0; i < freeChars; i++ {
+		b.WriteRune(' ')
+	}
+	b.WriteRune(']')
+	b.WriteRune(' ')
+	b.WriteString(fmt.Sprintf("(%d/%d/%d)", grove, other, total))
+	return b.String()
+}

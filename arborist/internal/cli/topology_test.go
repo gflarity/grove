@@ -597,18 +597,16 @@ func TestPrintGPUMiniTable(t *testing.T) {
 			entries: []gpuUsageEntry{
 				{Type: "H200", ThisPCS: 2, Total: 8, Other: 1, Free: 5},
 			},
-		want: "│        total  grove  other  free\n" +
-			"│  H200      8      2      1     5\n",
-	},
-	{
-		name: "multiple types",
-		entries: []gpuUsageEntry{
-			{Type: "B200", ThisPCS: 7, Total: 56, Other: 3, Free: 46},
-			{Type: "H200", ThisPCS: 7, Total: 56, Other: 3, Free: 46},
+			want: "│  H200 [▓▓▓▓▓░░             ] (2/1/8)\n",
 		},
-		want: "│        total  grove  other  free\n" +
-			"│  B200     56      7      3    46\n" +
-			"│  H200     56      7      3    46\n",
+		{
+			name: "multiple types",
+			entries: []gpuUsageEntry{
+				{Type: "B200", ThisPCS: 7, Total: 56, Other: 3, Free: 46},
+				{Type: "H200", ThisPCS: 7, Total: 56, Other: 3, Free: 46},
+			},
+			want: "│  B200 [▓▓░                 ] (7/3/56)\n" +
+				"│  H200 [▓▓░                 ] (7/3/56)\n",
 		},
 	}
 
@@ -651,8 +649,7 @@ func TestPrintTopologyTree_WithGPU(t *testing.T) {
 		"PodCliqueSets: my-pcs",
 		"",
 		"┌ block: block-0",
-		"│        total  grove  other  free",
-		"│  H200      8      2      1     5",
+		"│  H200 [▓▓▓▓▓░░             ] (2/1/8)",
 		"├─ pcs-0-router-6whz7              [H200: 1]",
 		"├─ pcs-0-workers-0-worker-8szft    [H200: 1]",
 		"└─ pcs-1-coordinator-abc12",
@@ -837,12 +834,13 @@ func TestPrintGPUMiniTable_LargeNumbers(t *testing.T) {
 	printGPUMiniTable(&buf, entries)
 	got := buf.String()
 
-	// Columns should right-align with the wider numbers
-	if !strings.Contains(got, "1024") {
-		t.Errorf("expected 1024 in output, got:\n%s", got)
+	// Should contain the numeric suffix with all values
+	if !strings.Contains(got, "(128/256/1024)") {
+		t.Errorf("expected '(128/256/1024)' in output, got:\n%s", got)
 	}
-	if !strings.Contains(got, "128") {
-		t.Errorf("expected 128 in output, got:\n%s", got)
+	// Should contain bar graph brackets
+	if !strings.Contains(got, "[") || !strings.Contains(got, "]") {
+		t.Errorf("expected bar graph brackets in output, got:\n%s", got)
 	}
 }
 
@@ -854,8 +852,12 @@ func TestPrintGPUMiniTable_ZeroValues(t *testing.T) {
 	printGPUMiniTable(&buf, entries)
 	got := buf.String()
 
-	if !strings.Contains(got, "0") {
-		t.Errorf("expected 0 in output, got:\n%s", got)
+	// All free: bar should be all · (middle dots)
+	if !strings.Contains(got, "(0/0/8)") {
+		t.Errorf("expected '(0/0/8)' in output, got:\n%s", got)
+	}
+	if !strings.Contains(got, " ") {
+		t.Errorf("expected free characters (space) in bar, got:\n%s", got)
 	}
 }
 

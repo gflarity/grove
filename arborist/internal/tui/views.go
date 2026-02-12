@@ -455,7 +455,7 @@ func (m Model) topologyHasGPUColumns() bool {
 // renderTopologyFootnote returns the footnote line explaining GPU column format.
 // Only displayed when GPU columns are visible in the topology view.
 func (m Model) renderTopologyFootnote() string {
-	return FootnoteStyle.Render("¹ GPU: Grove/Other/Total")
+	return FootnoteStyle.Render("¹ GPU: ▓▓ Grove  ░░ Other  (grove/other/total)")
 }
 
 // renderTopologyPodsFrame renders the topology pods section in a framed box.
