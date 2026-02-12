@@ -385,52 +385,6 @@ func LensCommandNames() []string {
 	return names
 }
 
-func matchLensCommand(prefix string) (string, bool) {
-	if prefix == "" {
-		return "", false
-	}
-	prefix = strings.ToLower(prefix)
-	var matches []string
-	for _, c := range lensCommands {
-		if strings.HasPrefix(c.Name, prefix) {
-			matches = append(matches, c.Name)
-		}
-	}
-	if len(matches) == 1 {
-		return matches[0], true
-	}
-	return "", false
-}
-
-func completeLensCommand(prefix string) string {
-	if prefix == "" {
-		return ""
-	}
-	lower := strings.ToLower(prefix)
-	var matches []string
-	for _, c := range lensCommands {
-		if strings.HasPrefix(c.Name, lower) {
-			matches = append(matches, c.Name)
-		}
-	}
-	if len(matches) == 0 {
-		return prefix
-	}
-	if len(matches) == 1 {
-		return matches[0]
-	}
-	lcp := matches[0]
-	for _, m := range matches[1:] {
-		for i := 0; i < len(lcp); i++ {
-			if i >= len(m) || lcp[i] != m[i] {
-				lcp = lcp[:i]
-				break
-			}
-		}
-	}
-	return lcp
-}
-
 func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
 	input = strings.TrimSpace(strings.ToLower(input))
 	if input == "" {
@@ -445,8 +399,10 @@ func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
 		}
 	}
 	if matched == "" {
-		if name, ok := matchLensCommand(input); ok {
-			matched = name
+		if m.lensAutocomplete != nil {
+			if name, ok := m.lensAutocomplete.UniqueMatch(input); ok {
+				matched = name
+			}
 		}
 	}
 	if matched == "" {

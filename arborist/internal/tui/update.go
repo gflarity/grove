@@ -262,6 +262,9 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleCommandModeKey handles keys when command mode is active.
+// Tab is no longer intercepted — it flows through to textinput.Update which
+// handles AcceptSuggestion natively (fills ghost text, moves cursor to end).
+// Only Enter (execute) and Esc (cancel) are intercepted.
 func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
@@ -277,16 +280,6 @@ func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		debugLogWithContext("command mode executing: %q", input)
 		return m.executeCommand(input)
 
-	case tea.KeyTab:
-		current := m.commandInput.Value()
-		completed := completeLensCommand(current)
-		if completed != current {
-			m.commandInput.SetValue(completed)
-			m.commandInput.CursorEnd()
-			debugLogWithContext("command mode tab-complete: %q -> %q", current, completed)
-		}
-		return m, nil
-
 	default:
 		var cmd tea.Cmd
 		m.commandInput, cmd = m.commandInput.Update(msg)
@@ -295,6 +288,9 @@ func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleLensEditKey handles keys when lens edit mode is active (inline in header).
+// Tab is no longer intercepted — it flows through to textinput.Update which
+// handles AcceptSuggestion natively (fills ghost text, moves cursor to end).
+// Only Enter (execute) and Esc (cancel) are intercepted.
 func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
@@ -309,16 +305,6 @@ func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.lensInput.SetValue("")
 		debugLogWithContext("lens edit mode executing: %q", input)
 		return m.executeCommand(input)
-
-	case tea.KeyTab:
-		current := m.lensInput.Value()
-		completed := completeLensCommand(current)
-		if completed != current {
-			m.lensInput.SetValue(completed)
-			m.lensInput.CursorEnd()
-			debugLogWithContext("lens edit tab-complete: %q -> %q", current, completed)
-		}
-		return m, nil
 
 	default:
 		var cmd tea.Cmd

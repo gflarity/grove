@@ -2338,56 +2338,6 @@ func TestLensCommandNames(t *testing.T) {
 	}
 }
 
-func TestMatchLensCommand(t *testing.T) {
-	tests := []struct {
-		prefix    string
-		wantName  string
-		wantMatch bool
-	}{
-		{"topology", "topology", true},
-		{"top", "topology", true},
-		{"t", "topology", true},
-		{"forest", "forest", true},
-		{"for", "forest", true},
-		{"f", "forest", true},
-		{"xyz", "", false},
-		{"", "", false},
-	}
-
-	for _, tt := range tests {
-		name, ok := matchLensCommand(tt.prefix)
-		if ok != tt.wantMatch {
-			t.Errorf("matchLensCommand(%q): got ok=%v, want %v", tt.prefix, ok, tt.wantMatch)
-		}
-		if name != tt.wantName {
-			t.Errorf("matchLensCommand(%q): got name=%q, want %q", tt.prefix, name, tt.wantName)
-		}
-	}
-}
-
-func TestCompleteLensCommand(t *testing.T) {
-	tests := []struct {
-		prefix string
-		want   string
-	}{
-		{"top", "topology"},
-		{"topology", "topology"},
-		{"for", "forest"},
-		{"forest", "forest"},
-		{"f", "forest"},
-		{"t", "topology"},
-		{"xyz", "xyz"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		got := completeLensCommand(tt.prefix)
-		if got != tt.want {
-			t.Errorf("completeLensCommand(%q): got %q, want %q", tt.prefix, got, tt.want)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Topology GPU Column Tests
 // ---------------------------------------------------------------------------
