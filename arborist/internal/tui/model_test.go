@@ -607,9 +607,10 @@ func TestEventsShowAllInForestView(t *testing.T) {
 func TestPodYAMLView_ViaMessages(t *testing.T) {
 	m := newTestModel(nil)
 
-	// Set up at PodView
+	// Set up at PodView with parent PodClique context
 	m.viewState.ViewType = data.PodView
 	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
 
 	// Deliver PodYAMLMsg
 	yamlContent := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: alpha-pcs-0-pc-worker-0\n"
@@ -847,7 +848,7 @@ func TestEscAtForestViewDoesNothing(t *testing.T) {
 	}
 }
 
-func TestNavigateBackClearsFilter(t *testing.T) {
+func TestNavigateBackPreservesFilter(t *testing.T) {
 	mc := buildFullMockCache()
 	m := newTestModelWithCache(mc)
 
@@ -856,13 +857,14 @@ func TestNavigateBackClearsFilter(t *testing.T) {
 	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
 	m.viewState.SelectedReplicaIndex = "0"
 	m.filterText = "something"
+	m.filterInput.SetValue("something")
 
 	// Navigate back
 	m = sendKey(m, tea.KeyEsc)
 
-	// Filter should be cleared
-	if m.filterText != "" {
-		t.Fatalf("expected filter to be cleared after navigateBack, got %q", m.filterText)
+	// Filter should be preserved across back navigation
+	if m.filterText != "something" {
+		t.Fatalf("expected filter to be preserved after navigateBack, got %q", m.filterText)
 	}
 }
 
@@ -1265,16 +1267,24 @@ func TestHeaderShowsUnknownWhenNoClusterInfo(t *testing.T) {
 func TestHeaderShowsCurrentViewName(t *testing.T) {
 	m := newTestModel(nil)
 
+	// All hierarchy views should show "forest" as the lens
 	m.viewState.ViewType = data.PodCliqueSetView
 	header := m.renderHeaderFrame()
-	if !strings.Contains(header, "PodCliqueSet") {
-		t.Errorf("expected header to show 'PodCliqueSet' view name, got:\n%s", header)
+	if !strings.Contains(header, "forest") {
+		t.Errorf("expected header to show 'forest' lens for PodCliqueSetView, got:\n%s", header)
 	}
 
 	m.viewState.ViewType = data.PodView
 	header = m.renderHeaderFrame()
-	if !strings.Contains(header, "Pod") {
-		t.Errorf("expected header to show 'Pod' view name, got:\n%s", header)
+	if !strings.Contains(header, "forest") {
+		t.Errorf("expected header to show 'forest' lens for PodView, got:\n%s", header)
+	}
+
+	// Topology should show "topology"
+	m.viewState.ViewType = data.TopologyView
+	header = m.renderHeaderFrame()
+	if !strings.Contains(header, "topology") {
+		t.Errorf("expected header to show 'topology' lens for TopologyView, got:\n%s", header)
 	}
 }
 
@@ -2327,10 +2337,16 @@ func TestLensEdit_HeaderShowsLensShortcut(t *testing.T) {
 
 func TestLensCommandNames(t *testing.T) {
 	names := LensCommandNames()
-	if len(names) != 2 {
-		t.Fatalf("expected 2 lens commands, got %d", len(names))
+	if len(names) != 9 {
+		t.Fatalf("expected 9 lens commands, got %d", len(names))
 	}
-	expected := map[string]bool{"forest": true, "topology": true}
+	expected := map[string]bool{
+		"forest": true, "topology": true,
+		"pcs": true, "podcliqueset": true,
+		"pc": true, "podclique": true,
+		"pcsg": true, "podcliquescalinggroup": true,
+		"pod": true,
+	}
 	for _, n := range names {
 		if !expected[n] {
 			t.Errorf("unexpected lens command name: %q", n)
@@ -3507,5 +3523,1258 @@ func TestYAMLOverlay_SearchEscClearsHighlights(t *testing.T) {
 	// Search text should be cleared
 	if m.yamlSearchText != "" {
 		t.Fatalf("expected search text cleared after Esc, got %q", m.yamlSearchText)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Resource Switching via `:` Command Tests
+// ---------------------------------------------------------------------------
+
+// --- 11b. Flat resource builder tests ---
+
+func TestFlatPodCliques_Basic(t *testing.T) {
+	mc := buildFullMockCache()
+	snap := mc.Snapshot()
+	result := flatPodCliques(snap)
+	if len(result) == 0 {
+		t.Fatal("expected non-empty flat PodCliques list")
+	}
+	// Verify all are PodClique type
+	for _, r := range result {
+		if r.Type != "PodClique" {
+			t.Errorf("expected Type=PodClique, got %q for %q", r.Type, r.Name)
+		}
+	}
+	// Verify sorted by name
+	for i := 1; i < len(result); i++ {
+		if result[i].Name < result[i-1].Name {
+			t.Errorf("expected sorted, but %q comes after %q", result[i].Name, result[i-1].Name)
+		}
+	}
+}
+
+func TestFlatPodCliques_Deduplication(t *testing.T) {
+	mc := buildFullMockCache()
+	snap := mc.Snapshot()
+	result := flatPodCliques(snap)
+	seen := make(map[string]bool)
+	for _, r := range result {
+		if seen[r.Name] {
+			t.Errorf("duplicate PodClique: %q", r.Name)
+		}
+		seen[r.Name] = true
+	}
+}
+
+func TestFlatPodCliques_EmptySnapshot(t *testing.T) {
+	result := flatPodCliques(&data.CacheSnapshot{})
+	if len(result) != 0 {
+		t.Errorf("expected empty list for empty snapshot, got %d", len(result))
+	}
+	// nil snapshot
+	result = flatPodCliques(nil)
+	if result != nil {
+		t.Errorf("expected nil for nil snapshot, got %v", result)
+	}
+}
+
+func TestFlatScalingGroups_Basic(t *testing.T) {
+	mc := buildFullMockCache()
+	snap := mc.Snapshot()
+	result := flatScalingGroups(snap)
+	if len(result) == 0 {
+		t.Fatal("expected non-empty flat ScalingGroups list")
+	}
+	for _, r := range result {
+		if r.Type != "PodCliqueScalingGroup" {
+			t.Errorf("expected Type=PodCliqueScalingGroup, got %q for %q", r.Type, r.Name)
+		}
+	}
+}
+
+func TestFlatScalingGroups_EmptySnapshot(t *testing.T) {
+	result := flatScalingGroups(&data.CacheSnapshot{})
+	if len(result) != 0 {
+		t.Errorf("expected empty list for empty snapshot, got %d", len(result))
+	}
+}
+
+func TestFlatPods_Basic(t *testing.T) {
+	mc := buildFullMockCache()
+	snap := mc.Snapshot()
+	result := flatPods(snap)
+	if len(result) == 0 {
+		t.Fatal("expected non-empty flat Pods list")
+	}
+	for _, r := range result {
+		if r.Type != "Pod" {
+			t.Errorf("expected Type=Pod, got %q for %q", r.Type, r.Name)
+		}
+	}
+}
+
+func TestFlatPods_Deduplication(t *testing.T) {
+	mc := buildFullMockCache()
+	snap := mc.Snapshot()
+	result := flatPods(snap)
+	seen := make(map[string]bool)
+	for _, r := range result {
+		if seen[r.Name] {
+			t.Errorf("duplicate Pod: %q", r.Name)
+		}
+		seen[r.Name] = true
+	}
+}
+
+func TestFlatPods_EmptySnapshot(t *testing.T) {
+	result := flatPods(&data.CacheSnapshot{})
+	if len(result) != 0 {
+		t.Errorf("expected empty list for empty snapshot, got %d", len(result))
+	}
+}
+
+// --- 11c. Command execution for resource types ---
+
+func TestExecuteCommand_PCS_ExactMatch(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, ':')
+	for _, r := range "pcs" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.forestResourceType != "pcs" {
+		t.Fatalf("expected forestResourceType=pcs, got %q", m.forestResourceType)
+	}
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestExecuteCommand_PC_ExactMatch(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, ':')
+	for _, r := range "pc" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	// "pc" is not a unique prefix (matches pc, pcs, pcsg, podclique, podcliqueset, podcliquescalinggroup)
+	// but it IS an exact match for the "pc" command, so it should match
+	if m.forestResourceType != "pc" {
+		t.Fatalf("expected forestResourceType=pc, got %q", m.forestResourceType)
+	}
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestExecuteCommand_PCSG_ExactMatch(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, ':')
+	for _, r := range "pcsg" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.forestResourceType != "pcsg" {
+		t.Fatalf("expected forestResourceType=pcsg, got %q", m.forestResourceType)
+	}
+}
+
+func TestExecuteCommand_Pod_ExactMatch(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, ':')
+	for _, r := range "pod" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.forestResourceType != "pod" {
+		t.Fatalf("expected forestResourceType=pod, got %q", m.forestResourceType)
+	}
+}
+
+func TestExecuteCommand_LongForm_PodCliqueSet(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, ':')
+	for _, r := range "podcliqueset" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.forestResourceType != "pcs" {
+		t.Fatalf("expected forestResourceType=pcs (normalized), got %q", m.forestResourceType)
+	}
+}
+
+func TestExecuteCommand_LongForm_PodClique(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, ':')
+	for _, r := range "podclique" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.forestResourceType != "pc" {
+		t.Fatalf("expected forestResourceType=pc (normalized), got %q", m.forestResourceType)
+	}
+}
+
+func TestExecuteCommand_LongForm_PodCliqueScalingGroup(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, ':')
+	for _, r := range "podcliquescalinggroup" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.forestResourceType != "pcsg" {
+		t.Fatalf("expected forestResourceType=pcsg (normalized), got %q", m.forestResourceType)
+	}
+}
+
+func TestExecuteCommand_ResourceType_ClearsViewState(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Drill into a PCS first
+	m = sendKey(m, tea.KeyEnter)
+	if m.viewState.SelectedPodCliqueSet == "" {
+		t.Fatal("expected SelectedPodCliqueSet to be set after drill")
+	}
+
+	// Switch to :pc
+	m = sendRune(m, ':')
+	for _, r := range "pc" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.SelectedPodCliqueSet != "" {
+		t.Fatalf("expected SelectedPodCliqueSet cleared, got %q", m.viewState.SelectedPodCliqueSet)
+	}
+	if m.viewState.SelectedReplicaIndex != "" {
+		t.Fatalf("expected SelectedReplicaIndex cleared, got %q", m.viewState.SelectedReplicaIndex)
+	}
+}
+
+func TestExecuteCommand_ResourceType_PreservesFilter(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set a filter
+	m.filterText = "alpha"
+	m.filterInput.SetValue("alpha")
+
+	// Switch to :pod
+	m = sendRune(m, ':')
+	for _, r := range "pod" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.filterText != "alpha" {
+		t.Fatalf("expected filter preserved after resource type switch, got %q", m.filterText)
+	}
+}
+
+func TestExecuteCommand_Forest_StillWorks(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to topology first
+	m = sendRune(m, 't')
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// :forest should go back to ForestView
+	m = sendRune(m, ':')
+	for _, r := range "forest" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after :forest, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.forestResourceType != "pcs" {
+		t.Fatalf("expected forestResourceType=pcs after :forest, got %q", m.forestResourceType)
+	}
+}
+
+func TestExecuteCommand_Topology_StillWorks(t *testing.T) {
+	mc := buildFullMockCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	mc.SetSnapshot(snap)
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, ':')
+	for _, r := range "topology" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView after :topology, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+// --- 11d. Autocomplete with expanded candidates ---
+
+func TestAutocompleter_UniqueMatch_WithResourceTypes(t *testing.T) {
+	ac := NewAutocompleter(LensCommandNames())
+
+	tests := []struct {
+		prefix      string
+		expectMatch bool
+		expected    string
+	}{
+		{"for", true, "forest"},
+		{"top", true, "topology"},
+		{"pcsg", true, "pcsg"}, // only "pcsg" starts with "pcsg"
+		{"pod", false, ""},     // "pod", "podclique", "podcliqueset", "podcliquescalinggroup" all match
+		{"pcs", false, ""},     // "pcs" and "pcsg" both match (prefix)
+		{"pc", false, ""},      // many matches
+		{"p", false, ""},       // many matches
+	}
+
+	for _, tt := range tests {
+		name, ok := ac.UniqueMatch(tt.prefix)
+		if ok != tt.expectMatch {
+			t.Errorf("UniqueMatch(%q): got ok=%v, want ok=%v (name=%q)", tt.prefix, ok, tt.expectMatch, name)
+		}
+		if ok && name != tt.expected {
+			t.Errorf("UniqueMatch(%q): got name=%q, want %q", tt.prefix, name, tt.expected)
+		}
+	}
+}
+
+// --- 11e. Navigation from flat lists ---
+
+func TestFlatPC_DrillInto_ShowsPods(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pc (flat PodClique list)
+	m.forestResourceType = "pc"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	// Verify we have PodCliques in the forest
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected PodCliques in forest view")
+	}
+	if forest[0].Type != "PodClique" {
+		t.Fatalf("expected first resource to be PodClique, got %q", forest[0].Type)
+	}
+
+	// Drill into the first PodClique
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView after drilling into PodClique, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestFlatPCSG_DrillInto(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pcsg (flat PCSG list)
+	m.forestResourceType = "pcsg"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected PCSGs in forest view")
+	}
+	if forest[0].Type != "PodCliqueScalingGroup" {
+		t.Fatalf("expected first resource to be PodCliqueScalingGroup, got %q", forest[0].Type)
+	}
+}
+
+func TestFlatPod_DrillInto_ShowsPodView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pod (flat Pod list)
+	m.forestResourceType = "pod"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected Pods in forest view")
+	}
+	if forest[0].Type != "Pod" {
+		t.Fatalf("expected first resource to be Pod, got %q", forest[0].Type)
+	}
+
+	// Drill into the first Pod
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.viewState.ViewType != data.PodView {
+		t.Fatalf("expected PodView after drilling into Pod, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+// --- 11f. Back navigation from flat-list drill-ins ---
+
+func TestNavigateBack_PodCliqueView_NoPCSContext_GoesToForest(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set up PodCliqueView with no PCS context (as if from flat PC list)
+	m.viewState.ViewType = data.PodCliqueView
+	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
+	m.viewState.SelectedPodCliqueSet = "" // no PCS context
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc from PodCliqueView with no PCS context, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestNavigateBack_PodView_NoPCContext_GoesToForest(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set up PodView with no PodClique context (as if from flat Pod list)
+	m.viewState.ViewType = data.PodView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.viewState.SelectedPodClique = "" // no PodClique context
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc from PodView with no PC context, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestNavigateBack_PCSGView_NoPCSContext_GoesToForest(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.PodCliqueScalingGroupView
+	m.viewState.SelectedScalingGroup = "alpha-pcs-0-sg-prefill"
+	m.viewState.SelectedPodCliqueSet = "" // no PCS context
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc from PCSGView with no PCS context, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestNavigateBack_PCSGReplicaView_NoPCSContext_GoesToForest(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.PodCliqueScalingGroupReplicaView
+	m.viewState.SelectedScalingGroup = "alpha-pcs-0-sg-prefill"
+	m.viewState.SelectedPCSGReplicaIndex = "0"
+	m.viewState.SelectedPodCliqueSet = "" // no PCS context
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc from PCSGReplicaView with no PCS context, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestNavigateBack_PreservesForestResourceType(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set forest resource type to "pc" and drill into a PodClique from flat list
+	m.forestResourceType = "pc"
+	m.viewState.ViewType = data.PodCliqueView
+	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
+	m.viewState.SelectedPodCliqueSet = "" // no PCS context
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.forestResourceType != "pc" {
+		t.Fatalf("expected forestResourceType to be preserved as 'pc', got %q", m.forestResourceType)
+	}
+}
+
+// --- 11g. Filter preservation tests ---
+
+func TestFilterPreserved_OnNavigateBack(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Drill into alpha-pcs
+	m = sendKey(m, tea.KeyEnter)
+
+	// Set a filter
+	m.filterText = "alpha"
+	m.filterInput.SetValue("alpha")
+
+	// Navigate back
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.filterText != "alpha" {
+		t.Fatalf("expected filter preserved after back navigation, got %q", m.filterText)
+	}
+}
+
+func TestFilterCleared_OnNavigateInto(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set a filter
+	m.filterText = "alpha"
+	m.filterInput.SetValue("alpha")
+	m.rebuildResourcesTable()
+
+	// Navigate into (drill in clears filter)
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.filterText != "" {
+		t.Fatalf("expected filter cleared after drill-in, got %q", m.filterText)
+	}
+}
+
+func TestFilterPreserved_OnResourceTypeSwitch(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set a filter
+	m.filterText = "alpha"
+	m.filterInput.SetValue("alpha")
+
+	// Switch resource type via command
+	m = sendRune(m, ':')
+	for _, r := range "pod" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.filterText != "alpha" {
+		t.Fatalf("expected filter preserved after resource type switch, got %q", m.filterText)
+	}
+	if m.forestResourceType != "pod" {
+		t.Fatalf("expected forestResourceType=pod, got %q", m.forestResourceType)
+	}
+}
+
+// --- 11h. Rendering tests ---
+
+func TestViewDisplayName_ForestAlwaysShowsForest(t *testing.T) {
+	m := newTestModel(nil)
+
+	// Even with different forestResourceType values, the lens should say "forest"
+	for _, rt := range []string{"pcs", "pc", "pcsg", "pod"} {
+		m.forestResourceType = rt
+		got := m.viewDisplayName()
+		if got != "forest" {
+			t.Errorf("viewDisplayName() with forestResourceType=%q = %q, want %q", rt, got, "forest")
+		}
+	}
+
+	// Even when drilled into sub-views, the lens should say "forest"
+	for _, vt := range []data.ViewType{
+		data.PodCliqueSetView,
+		data.PodCliqueView,
+		data.PodView,
+	} {
+		m.viewState.ViewType = vt
+		got := m.viewDisplayName()
+		if got != "forest" {
+			t.Errorf("viewDisplayName() for %s = %q, want %q",
+				data.ViewTypeName(vt), got, "forest")
+		}
+	}
+}
+
+func TestRenderBreadcrumb_ForestPC(t *testing.T) {
+	m := newTestModel(nil)
+	m.forestResourceType = "pc"
+	breadcrumb := m.renderBreadcrumb()
+	if !strings.Contains(breadcrumb, "PodCliques") {
+		t.Errorf("expected breadcrumb to contain 'PodCliques', got %q", breadcrumb)
+	}
+}
+
+func TestRenderBreadcrumb_ForestPCSG(t *testing.T) {
+	m := newTestModel(nil)
+	m.forestResourceType = "pcsg"
+	breadcrumb := m.renderBreadcrumb()
+	if !strings.Contains(breadcrumb, "PodCliqueScalingGroups") {
+		t.Errorf("expected breadcrumb to contain 'PodCliqueScalingGroups', got %q", breadcrumb)
+	}
+}
+
+func TestRenderBreadcrumb_ForestPod(t *testing.T) {
+	m := newTestModel(nil)
+	m.forestResourceType = "pod"
+	breadcrumb := m.renderBreadcrumb()
+	if !strings.Contains(breadcrumb, "Pods") {
+		t.Errorf("expected breadcrumb to contain 'Pods', got %q", breadcrumb)
+	}
+}
+
+func TestRenderBreadcrumb_ForestPCS(t *testing.T) {
+	m := newTestModel(nil)
+	m.forestResourceType = "pcs"
+	breadcrumb := m.renderBreadcrumb()
+	if !strings.Contains(breadcrumb, "Forest") {
+		t.Errorf("expected breadcrumb to contain 'Forest', got %q", breadcrumb)
+	}
+}
+
+// --- WithForestResourceType option test ---
+
+func TestWithForestResourceType(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	m := NewModel(mc, WithForestResourceType("podclique"))
+	if m.forestResourceType != "pc" {
+		t.Errorf("expected forestResourceType=pc after WithForestResourceType(podclique), got %q", m.forestResourceType)
+	}
+}
+
+func TestWithFilter(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	m := NewModel(mc, WithFilter("test"))
+	if m.filterText != "test" {
+		t.Errorf("expected filterText=test after WithFilter, got %q", m.filterText)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Events update correctly for non-PCS forest resource types
+// ---------------------------------------------------------------------------
+
+func TestForestPC_EventsUpdateOnSelection(t *testing.T) {
+	// Build a cache where different PodCliques have different events
+	mc := buildMockCacheWithEvents(map[string][]data.Event{
+		"PodClique/alpha-pcs-0-standalone-pc": {
+			{Type: "Normal", Kind: "PodClique", Reason: "ScaledUp", Age: "1m", From: "controller", Message: "standalone scaled", Parent: "alpha-pcs-0-standalone-pc"},
+		},
+		"PodClique/alpha-pcs-0-sg-prefill-0-worker": {
+			{Type: "Warning", Kind: "PodClique", Reason: "Degraded", Age: "2m", From: "controller", Message: "prefill worker degraded", Parent: "alpha-pcs-0-sg-prefill-0-worker"},
+		},
+	})
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pc (flat PodClique list)
+	m.forestResourceType = "pc"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	// Verify we have PodCliques in the forest
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected PodCliques in forest")
+	}
+
+	// Rebuild events for the current selection — should dispatch based on selected row type
+	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
+	m.rebuildEventsTable()
+
+	// The selected PodClique should determine which events are shown.
+	// The first row (cursor=0) is the first sorted PodClique.
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 3 {
+		t.Fatal("no selected row in resources table")
+	}
+	selectedPC := selectedRow[2]
+
+	// Events should be for the selected PodClique, not for a PCS
+	foundMatchingEvent := false
+	for _, e := range m.allEvents {
+		if e.Parent == selectedPC {
+			foundMatchingEvent = true
+		}
+	}
+	if len(m.allEvents) > 0 && !foundMatchingEvent {
+		t.Errorf("events do not match selected PodClique %q; got %d events with parents: %v",
+			selectedPC, len(m.allEvents), eventParents(m.allEvents))
+	}
+
+	// Navigate down and verify events change
+	eventsBefore := len(m.allEvents)
+	firstParent := ""
+	if len(m.allEvents) > 0 {
+		firstParent = m.allEvents[0].Parent
+	}
+
+	m = sendKey(m, tea.KeyDown)
+
+	selectedRow = m.resourcesTable.SelectedRow()
+	if len(selectedRow) >= 3 {
+		newSelectedPC := selectedRow[2]
+		if newSelectedPC == selectedPC {
+			t.Skip("only one PodClique, can't test navigation")
+		}
+
+		// After navigation, events should have been rebuilt for the new selection
+		newParent := ""
+		if len(m.allEvents) > 0 {
+			newParent = m.allEvents[0].Parent
+		}
+
+		// Either the events changed, or both have zero events, or the parent changed
+		if eventsBefore > 0 && len(m.allEvents) > 0 && firstParent == newParent && firstParent == selectedPC {
+			t.Errorf("events did not update after navigating to different PodClique: still showing events for %q", firstParent)
+		}
+	}
+}
+
+func TestForestPod_EventsUpdateOnSelection(t *testing.T) {
+	mc := buildMockCacheWithEvents(map[string][]data.Event{
+		"Pod/alpha-pcs-0-pc-worker-0": {
+			{Type: "Normal", Kind: "Pod", Reason: "Scheduled", Age: "1m", From: "scheduler", Message: "pod-0 scheduled", Parent: "alpha-pcs-0-pc-worker-0"},
+		},
+		"Pod/alpha-pcs-0-pc-worker-1": {
+			{Type: "Warning", Kind: "Pod", Reason: "BackOff", Age: "30s", From: "kubelet", Message: "pod-1 backoff", Parent: "alpha-pcs-0-pc-worker-1"},
+		},
+	})
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pod (flat Pod list)
+	m.forestResourceType = "pod"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected Pods in forest")
+	}
+
+	// Rebuild events for current selection
+	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
+	m.rebuildEventsTable()
+
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 3 {
+		t.Fatal("no selected row in resources table")
+	}
+	selectedPod := selectedRow[2]
+
+	// Events should be for the selected Pod
+	for _, e := range m.allEvents {
+		if e.Parent != selectedPod {
+			t.Errorf("event parent %q doesn't match selected pod %q", e.Parent, selectedPod)
+		}
+	}
+}
+
+func TestForestPCSG_EventsMatchSelection(t *testing.T) {
+	mc := buildMockCacheWithEvents(map[string][]data.Event{
+		"PodCliqueScalingGroup/alpha-pcs-0-sg-prefill": {
+			{Type: "Normal", Kind: "PodCliqueScalingGroup", Reason: "ScaledUp", Age: "3m", From: "controller", Message: "sg scaled", Parent: "alpha-pcs-0-sg-prefill"},
+		},
+	})
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pcsg (flat PCSG list)
+	m.forestResourceType = "pcsg"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected PCSGs in forest")
+	}
+
+	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
+	m.rebuildEventsTable()
+
+	// Should have the PCSG event
+	if len(m.allEvents) == 0 {
+		t.Fatal("expected events for selected PCSG, got none")
+	}
+	if m.allEvents[0].Parent != "alpha-pcs-0-sg-prefill" {
+		t.Errorf("expected event for alpha-pcs-0-sg-prefill, got parent=%q", m.allEvents[0].Parent)
+	}
+}
+
+// eventParents returns a slice of event Parent values for debugging.
+func eventParents(events []data.Event) []string {
+	parents := make([]string, len(events))
+	for i, e := range events {
+		parents[i] = e.Parent
+	}
+	return parents
+}
+
+// Test that Lens stays "forest" when drilling from a flat list
+// ---------------------------------------------------------------------------
+// Comprehensive flat-list drill-in tests
+// These verify that drilling from :pc, :pcsg, :pod actually populates child
+// resources, shows correct breadcrumbs, and the lens stays "forest".
+// ---------------------------------------------------------------------------
+
+func TestFlatPC_DrillIn_PopulatesPodsAndBreadcrumb(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pc
+	m.forestResourceType = "pc"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	// Lens should say "forest" at top level
+	if got := m.viewDisplayName(); got != "forest" {
+		t.Fatalf("expected lens='forest', got %q", got)
+	}
+
+	// Verify we have PodCliques
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected PodCliques in forest")
+	}
+
+	// Find the PodClique that has pods and select it
+	pcWithPods := ""
+	for _, r := range forest {
+		if _, ok := mc.Snapshot().PodsByPodClique[r.Name]; ok {
+			pcWithPods = r.Name
+			break
+		}
+	}
+	if pcWithPods == "" {
+		t.Fatal("no PodClique with pods found in test data")
+	}
+
+	// Select and drill into it
+	for i, r := range forest {
+		if r.Name == pcWithPods {
+			m.resourcesTable.SetCursor(i)
+			break
+		}
+	}
+	m = sendKey(m, tea.KeyEnter)
+
+	// Should be in PodCliqueView
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Lens should still say "forest"
+	if got := m.viewDisplayName(); got != "forest" {
+		t.Fatalf("expected lens='forest' after drill, got %q", got)
+	}
+
+	// Resources table should have pods (not be empty!)
+	viewKey := m.getCurrentViewKey()
+	resources := m.allResources[viewKey]
+	if len(resources) == 0 {
+		t.Fatalf("expected pods in %q after drilling from flat PC list, got 0 resources", viewKey)
+	}
+	for _, r := range resources {
+		if r.Type != "Pod" {
+			t.Errorf("expected Pod type in PodClique drill-in, got %q", r.Type)
+		}
+	}
+
+	// Breadcrumb should NOT contain empty PCS segments
+	bc := m.renderBreadcrumb()
+	if strings.Contains(bc, "replica-") {
+		t.Errorf("breadcrumb should not contain 'replica-' for flat-list drill-in, got: %s", bc)
+	}
+	// Should contain the PodClique name
+	if !strings.Contains(bc, pcWithPods) {
+		t.Errorf("breadcrumb should contain PodClique name %q, got: %s", pcWithPods, bc)
+	}
+
+	// Navigate back — should return to ForestView with pc list
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.forestResourceType != "pc" {
+		t.Fatalf("expected forestResourceType='pc' preserved, got %q", m.forestResourceType)
+	}
+}
+
+func TestFlatPCSG_DrillIn_PopulatesReplicasAndBreadcrumb(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pcsg
+	m.forestResourceType = "pcsg"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected PCSGs in forest")
+	}
+
+	// Drill into the first PCSG
+	m = sendKey(m, tea.KeyEnter)
+
+	// Should be in PCSGView or PCSGReplicaView (auto-skip if single replica)
+	validView := m.viewState.ViewType == data.PodCliqueScalingGroupView ||
+		m.viewState.ViewType == data.PodCliqueScalingGroupReplicaView
+	if !validView {
+		t.Fatalf("expected PCSGView or PCSGReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Lens should say "forest"
+	if got := m.viewDisplayName(); got != "forest" {
+		t.Fatalf("expected lens='forest' after PCSG drill, got %q", got)
+	}
+
+	// Resources table should have content (replicas or PodCliques)
+	viewKey := m.getCurrentViewKey()
+	resources := m.allResources[viewKey]
+	if len(resources) == 0 {
+		t.Fatalf("expected resources in %q after drilling from flat PCSG list, got 0", viewKey)
+	}
+
+	// Breadcrumb should contain the PCSG name, not empty PCS segments
+	bc := m.renderBreadcrumb()
+	if !strings.Contains(bc, m.viewState.SelectedScalingGroup) {
+		t.Errorf("breadcrumb should contain PCSG name %q, got: %s", m.viewState.SelectedScalingGroup, bc)
+	}
+
+	// Navigate back
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestFlatPCSG_DeepDrill_IntoPodClique(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pcsg and drill into a PCSG
+	m.forestResourceType = "pcsg"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+	m = sendKey(m, tea.KeyEnter) // into PCSG (auto-skip to replica if single, else PCSGView)
+
+	// If we landed on PCSGView (multi-replica), drill into a replica first
+	if m.viewState.ViewType == data.PodCliqueScalingGroupView {
+		viewKey := m.getCurrentViewKey()
+		resources := m.allResources[viewKey]
+		if len(resources) == 0 {
+			t.Skip("no PCSG replicas, skipping deep drill test")
+		}
+		m = sendKey(m, tea.KeyEnter) // into PCSG replica
+	}
+
+	// Should now be in PCSGReplicaView
+	if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
+		t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Get PodCliques in this replica
+	viewKey := m.getCurrentViewKey()
+	resources := m.allResources[viewKey]
+	if len(resources) == 0 {
+		t.Skip("no PodCliques in PCSG replica, skipping deep drill test")
+	}
+
+	m = sendKey(m, tea.KeyEnter) // into PodClique
+
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView after deep drill, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Should have pods
+	viewKey = m.getCurrentViewKey()
+	resources = m.allResources[viewKey]
+	if len(resources) == 0 {
+		t.Fatalf("expected pods in %q after deep drill from PCSG, got 0", viewKey)
+	}
+
+	// Lens should still say "forest"
+	if got := m.viewDisplayName(); got != "forest" {
+		t.Fatalf("expected lens='forest' after deep drill, got %q", got)
+	}
+
+	// Breadcrumb should contain PCSG and PC names, but no empty PCS
+	bc := m.renderBreadcrumb()
+	if !strings.Contains(bc, m.viewState.SelectedPodClique) {
+		t.Errorf("breadcrumb should contain PodClique name, got: %s", bc)
+	}
+	if !strings.Contains(bc, m.viewState.SelectedScalingGroup) {
+		t.Errorf("breadcrumb should contain PCSG name, got: %s", bc)
+	}
+
+	// Back nav should go through the PCSG hierarchy back to forest
+	m = sendKey(m, tea.KeyEsc) // back to PCSG replica view
+	validBack := m.viewState.ViewType == data.PodCliqueScalingGroupReplicaView ||
+		m.viewState.ViewType == data.PodCliqueScalingGroupView
+	if !validBack {
+		t.Fatalf("expected PCSGReplicaView or PCSGView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Keep pressing Esc until we reach ForestView
+	for m.viewState.ViewType != data.ForestView {
+		m = sendKey(m, tea.KeyEsc)
+	}
+	if m.forestResourceType != "pcsg" {
+		t.Fatalf("expected forestResourceType='pcsg' preserved, got %q", m.forestResourceType)
+	}
+}
+
+func TestFlatPod_DrillIn_ShowsPodViewAndBreadcrumb(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pod
+	m.forestResourceType = "pod"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	forest := m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected Pods in forest")
+	}
+
+	// Drill into the first Pod
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.viewState.ViewType != data.PodView {
+		t.Fatalf("expected PodView after drilling from flat Pod list, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Lens should say "forest"
+	if got := m.viewDisplayName(); got != "forest" {
+		t.Fatalf("expected lens='forest' in PodView, got %q", got)
+	}
+
+	// Breadcrumb should show Pods > pod-name, not empty PCS segments
+	bc := m.renderBreadcrumb()
+	if !strings.Contains(bc, m.viewState.SelectedPod) {
+		t.Errorf("breadcrumb should contain pod name %q, got: %s", m.viewState.SelectedPod, bc)
+	}
+	if strings.Contains(bc, "replica-") {
+		t.Errorf("breadcrumb should not contain 'replica-' for flat pod drill, got: %s", bc)
+	}
+
+	// Should have returned a loadPodYAML command
+	if cmd == nil {
+		t.Error("expected loadPodYAMLCmd after drilling into Pod")
+	}
+
+	// Navigate back
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after Esc from Pod, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.forestResourceType != "pod" {
+		t.Fatalf("expected forestResourceType='pod' preserved, got %q", m.forestResourceType)
+	}
+}
+
+func TestFlatPC_DrillIntoPod_FullRoundTrip(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// :pc → drill PodClique → drill Pod → back → back
+	m.forestResourceType = "pc"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	// Find a PodClique with pods
+	forest := m.allResources["forest"]
+	for i, r := range forest {
+		if _, ok := mc.Snapshot().PodsByPodClique[r.Name]; ok {
+			m.resourcesTable.SetCursor(i)
+			break
+		}
+	}
+
+	// Drill into PodClique
+	m = sendKey(m, tea.KeyEnter)
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Verify pods are populated
+	viewKey := m.getCurrentViewKey()
+	pods := m.allResources[viewKey]
+	if len(pods) == 0 {
+		t.Fatal("expected pods after drilling from flat PC list")
+	}
+
+	// Drill into first Pod
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.viewState.ViewType != data.PodView {
+		t.Fatalf("expected PodView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Back to PodCliqueView
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView after Esc from PodView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Pods should still be there
+	viewKey = m.getCurrentViewKey()
+	pods = m.allResources[viewKey]
+	if len(pods) == 0 {
+		t.Fatal("expected pods still populated after back from PodView")
+	}
+
+	// Back to ForestView
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after second Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.forestResourceType != "pc" {
+		t.Fatalf("expected forestResourceType='pc', got %q", m.forestResourceType)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Esc from non-default forest resource type resets to PCS
+// ---------------------------------------------------------------------------
+
+func TestEscFromFlatPC_ResetsToPCS(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pc
+	m.forestResourceType = "pc"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	// Verify we're showing PodCliques
+	forest := m.allResources["forest"]
+	if len(forest) == 0 || forest[0].Type != "PodClique" {
+		t.Fatal("expected PodCliques in forest")
+	}
+
+	// Press Esc — should reset to PCS view
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.forestResourceType != "pcs" {
+		t.Fatalf("expected forestResourceType reset to 'pcs', got %q", m.forestResourceType)
+	}
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Forest should now contain PodCliqueSets
+	forest = m.allResources["forest"]
+	if len(forest) == 0 {
+		t.Fatal("expected PodCliqueSets in forest after reset")
+	}
+	if forest[0].Type != "PodCliqueSet" {
+		t.Fatalf("expected PodCliqueSet type after reset, got %q", forest[0].Type)
+	}
+}
+
+func TestEscFromFlatPCSG_ResetsToPCS(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.forestResourceType = "pcsg"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.forestResourceType != "pcs" {
+		t.Fatalf("expected forestResourceType reset to 'pcs', got %q", m.forestResourceType)
+	}
+	forest := m.allResources["forest"]
+	if len(forest) > 0 && forest[0].Type != "PodCliqueSet" {
+		t.Fatalf("expected PodCliqueSet type after reset, got %q", forest[0].Type)
+	}
+}
+
+func TestEscFromFlatPod_ResetsToPCS(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.forestResourceType = "pod"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.forestResourceType != "pcs" {
+		t.Fatalf("expected forestResourceType reset to 'pcs', got %q", m.forestResourceType)
+	}
+}
+
+func TestEscAtDefaultPCS_DoesNothing(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Already at default pcs
+	before := m.forestResourceType
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.forestResourceType != before {
+		t.Fatalf("expected forestResourceType unchanged at %q, got %q", before, m.forestResourceType)
+	}
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView unchanged, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestEscFromDrilledFlatPC_BackToPC_ThenToPCS(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// :pc, drill into a PodClique
+	m.forestResourceType = "pc"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	// Find a PC with pods
+	forest := m.allResources["forest"]
+	for i, r := range forest {
+		if _, ok := mc.Snapshot().PodsByPodClique[r.Name]; ok {
+			m.resourcesTable.SetCursor(i)
+			break
+		}
+	}
+	m = sendKey(m, tea.KeyEnter) // drill into PodClique
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Esc back to ForestView (still pc)
+	m = sendKey(m, tea.KeyEsc)
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.forestResourceType != "pc" {
+		t.Fatalf("expected forestResourceType='pc' after first Esc, got %q", m.forestResourceType)
+	}
+
+	// Esc again — should reset to pcs
+	m = sendKey(m, tea.KeyEsc)
+	if m.forestResourceType != "pcs" {
+		t.Fatalf("expected forestResourceType='pcs' after second Esc, got %q", m.forestResourceType)
+	}
+	if m.allResources["forest"][0].Type != "PodCliqueSet" {
+		t.Fatalf("expected PodCliqueSets after reset, got %q", m.allResources["forest"][0].Type)
 	}
 }

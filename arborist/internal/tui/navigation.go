@@ -374,6 +374,13 @@ type lensCommand struct {
 var lensCommands = []lensCommand{
 	{Name: "forest"},
 	{Name: "topology"},
+	{Name: "pcs"},
+	{Name: "podcliqueset"},
+	{Name: "pc"},
+	{Name: "podclique"},
+	{Name: "pcsg"},
+	{Name: "podcliquescalinggroup"},
+	{Name: "pod"},
 }
 
 // LensCommandNames returns the list of available command names.
@@ -412,30 +419,44 @@ func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
 
 	debugLogWithContext("command mode: executing %q (matched %q)", input, matched)
 
+	// Normalize long forms to short forms for resource type commands
+	normalized := normalizeResourceType(matched)
+
 	switch matched {
 	case "forest":
-		if m.viewState.ViewType != data.ForestView {
-			m.viewState.ViewType = data.ForestView
-			m.viewState.SelectedPodCliqueSet = ""
-			m.viewState.SelectedReplicaIndex = ""
-			m.viewState.SelectedScalingGroup = ""
-			m.viewState.SelectedPodClique = ""
-			m.viewState.SelectedPod = ""
-			m.cachedTopologyInfo = nil
-			m.activePane = data.ResourcesPane
-			m.updateTableFocus()
-			m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
-			m.rebuildEventsFromSnapshot(m.cachedSnapshot)
-			m.rebuildResourcesTable()
-			m.rebuildEventsTable()
-		}
+		// "forest" is equivalent to ":pcs"
+		normalized = "pcs"
+		m.switchToForestResourceType(normalized)
 		return m, nil
 
 	case "topology":
 		return m.toggleTopologyView()
+
+	case "pcs", "podcliqueset", "pc", "podclique", "pcsg", "podcliquescalinggroup", "pod":
+		m.switchToForestResourceType(normalized)
+		return m, nil
 	}
 
 	return m, nil
+}
+
+// switchToForestResourceType switches to ForestView with the given resource type,
+// clearing drill state but preserving the filter.
+func (m *Model) switchToForestResourceType(rt string) {
+	m.forestResourceType = rt
+	m.viewState.ViewType = data.ForestView
+	m.viewState.SelectedPodCliqueSet = ""
+	m.viewState.SelectedReplicaIndex = ""
+	m.viewState.SelectedScalingGroup = ""
+	m.viewState.SelectedPodClique = ""
+	m.viewState.SelectedPod = ""
+	m.cachedTopologyInfo = nil
+	m.activePane = data.ResourcesPane
+	m.updateTableFocus()
+	m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
+	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
+	m.rebuildResourcesTable()
+	m.rebuildEventsTable()
 }
 
 // topologyBreadcrumbString generates a breadcrumb like "region=us-east-1 > zone=us-east-1a".
@@ -456,17 +477,24 @@ func (m *Model) topologyBreadcrumbString() string {
 
 // navigateBack goes up one level in the hierarchy.
 // Navigation is now synchronous — data comes from the cached snapshot.
+// Filter is preserved across back navigation so users don't lose their filter context.
 func (m Model) navigateBack() (tea.Model, tea.Cmd) {
-	// Clear any active filter when navigating
-	m.filterText = ""
-	m.filterInput.SetValue("")
-
 	oldViewType := m.viewState.ViewType
 	debugLogWithContext("navigateBack: current viewType=%s", data.ViewTypeName(oldViewType))
 
 	switch m.viewState.ViewType {
 	case data.ForestView:
-		debugLogWithContext("navigateBack: already at ForestView, ignoring")
+		if m.forestResourceType != "pcs" {
+			// Non-default resource type — Esc resets to PCS view
+			debugLogWithContext("navigateBack: resetting forestResourceType from %q to pcs", m.forestResourceType)
+			m.forestResourceType = "pcs"
+			m.populateForestResources(m.cachedSnapshot)
+			m.rebuildResourcesTable()
+			m.rebuildEventsFromSnapshot(m.cachedSnapshot)
+			m.rebuildEventsTable()
+			return m, nil
+		}
+		debugLogWithContext("navigateBack: already at ForestView/pcs, ignoring")
 		return m, nil
 
 	case data.PodCliqueSetView:
@@ -504,31 +532,50 @@ func (m Model) navigateBack() (tea.Model, tea.Cmd) {
 		}
 
 	case data.PodCliqueScalingGroupView:
-		m.viewState.ViewType = data.PodCliqueSetReplicaView
-		m.viewState.SelectedScalingGroup = ""
-		m.viewState.SelectedPCSGReplicaIndex = ""
-		m.viewState.SelectedPodClique = ""
-		m.viewState.SelectedPod = ""
-
-		debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, "")
-
-	case data.PodCliqueScalingGroupReplicaView:
-		pcsgKey := "PodCliqueScalingGroup/" + m.viewState.SelectedScalingGroup
-		pcsgResources := m.allResources[pcsgKey]
-
-		if len(pcsgResources) == 1 {
-			m.viewState.ViewType = data.PodCliqueSetReplicaView
+		if m.viewState.SelectedPodCliqueSet == "" {
+			// Came from flat PCSG list — go back to forest
+			m.viewState.ViewType = data.ForestView
 			m.viewState.SelectedScalingGroup = ""
-			m.viewState.SelectedPCSGReplicaIndex = ""
-
-			debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, "single PCSG replica skip")
-		} else {
-			m.viewState.ViewType = data.PodCliqueScalingGroupView
 			m.viewState.SelectedPCSGReplicaIndex = ""
 			m.viewState.SelectedPodClique = ""
 			m.viewState.SelectedPod = ""
+			debugLogStateTransition(oldViewType, data.ForestView, "no PCS context")
+		} else {
+			m.viewState.ViewType = data.PodCliqueSetReplicaView
+			m.viewState.SelectedScalingGroup = ""
+			m.viewState.SelectedPCSGReplicaIndex = ""
+			m.viewState.SelectedPodClique = ""
+			m.viewState.SelectedPod = ""
+			debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, "")
+		}
 
-			debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupView, "")
+	case data.PodCliqueScalingGroupReplicaView:
+		if m.viewState.SelectedPodCliqueSet == "" {
+			// Came from flat list — go back to forest
+			m.viewState.ViewType = data.ForestView
+			m.viewState.SelectedScalingGroup = ""
+			m.viewState.SelectedPCSGReplicaIndex = ""
+			m.viewState.SelectedPodClique = ""
+			m.viewState.SelectedPod = ""
+			debugLogStateTransition(oldViewType, data.ForestView, "no PCS context")
+		} else {
+			pcsgKey := "PodCliqueScalingGroup/" + m.viewState.SelectedScalingGroup
+			pcsgResources := m.allResources[pcsgKey]
+
+			if len(pcsgResources) == 1 {
+				m.viewState.ViewType = data.PodCliqueSetReplicaView
+				m.viewState.SelectedScalingGroup = ""
+				m.viewState.SelectedPCSGReplicaIndex = ""
+
+				debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, "single PCSG replica skip")
+			} else {
+				m.viewState.ViewType = data.PodCliqueScalingGroupView
+				m.viewState.SelectedPCSGReplicaIndex = ""
+				m.viewState.SelectedPodClique = ""
+				m.viewState.SelectedPod = ""
+
+				debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupView, "")
+			}
 		}
 
 	case data.PodCliqueView:
@@ -537,20 +584,26 @@ func (m Model) navigateBack() (tea.Model, tea.Cmd) {
 			newViewType = data.PodCliqueScalingGroupReplicaView
 		} else if m.viewState.SelectedScalingGroup != "" {
 			newViewType = data.PodCliqueScalingGroupView
-		} else {
+		} else if m.viewState.SelectedPodCliqueSet != "" {
 			newViewType = data.PodCliqueSetReplicaView
+		} else {
+			// No parent context (flat PC list) — go to forest
+			newViewType = data.ForestView
 		}
 		m.viewState.ViewType = newViewType
 		m.viewState.SelectedPodClique = ""
 		m.viewState.SelectedPod = ""
-
 		debugLogStateTransition(oldViewType, newViewType, "")
 
 	case data.PodView:
-		m.viewState.ViewType = data.PodCliqueView
+		if m.viewState.SelectedPodClique != "" {
+			m.viewState.ViewType = data.PodCliqueView
+		} else {
+			// No PodClique context (flat Pod list) — go to forest
+			m.viewState.ViewType = data.ForestView
+		}
 		m.viewState.SelectedPod = ""
-
-		debugLogStateTransition(oldViewType, data.PodCliqueView, "")
+		debugLogStateTransition(oldViewType, m.viewState.ViewType, "")
 	}
 
 	// Rebuild from snapshot (synchronous)

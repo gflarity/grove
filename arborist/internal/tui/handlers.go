@@ -51,8 +51,8 @@ func (m *Model) applySnapshot() {
 	m.topologyViewData = snapshot.TopologyViewData
 	m.gpuSummary = snapshot.GPUSummary
 
-	// Rebuild forest data
-	m.allResources["forest"] = snapshot.PodCliqueSets
+	// Rebuild forest data based on the active resource type
+	m.populateForestResources(snapshot)
 
 	// Rebuild topology info for the currently selected PCS
 	if m.viewState.SelectedPodCliqueSet != "" {
@@ -98,10 +98,13 @@ func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
 	pcsgReplicaIndex := m.viewState.SelectedPCSGReplicaIndex
 	pcName := m.viewState.SelectedPodClique
 
-	// Always rebuild forest
-	m.allResources["forest"] = snapshot.PodCliqueSets
+	// Always rebuild forest based on active resource type
+	m.populateForestResources(snapshot)
 
 	if pcsName == "" {
+		// No PCS context — either at the forest top level, or drilled in from a flat list.
+		// Build only the resources needed for the current flat-list drill-in view.
+		m.rebuildFlatDrillInResources(snapshot)
 		return
 	}
 
@@ -318,11 +321,22 @@ func (m *Model) rebuildEventsFromSnapshot(snapshot *data.CacheSnapshot) {
 
 	switch m.viewState.ViewType {
 	case data.ForestView:
-		// Show events for the selected PCS
+		// Dispatch events based on the forest resource type
 		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 3 && selectedRow[1] == "PodCliqueSet" {
-			m.allEvents = snapshot.GetEventsForPCS(selectedRow[2])
-		} else if len(snapshot.PodCliqueSets) > 0 {
+		if len(selectedRow) >= 3 {
+			switch selectedRow[1] {
+			case "PodCliqueSet":
+				m.allEvents = snapshot.GetEventsForPCS(selectedRow[2])
+			case "PodCliqueScalingGroup":
+				m.allEvents = snapshot.GetEventsForPCSG(selectedRow[2])
+			case "PodClique":
+				m.allEvents = snapshot.GetEventsForPodClique(selectedRow[2])
+			case "Pod":
+				m.allEvents = snapshot.EventsByObject["Pod/"+selectedRow[2]]
+			default:
+				m.allEvents = nil
+			}
+		} else if m.forestResourceType == "pcs" && len(snapshot.PodCliqueSets) > 0 {
 			m.allEvents = snapshot.GetEventsForPCS(snapshot.PodCliqueSets[0].Name)
 		} else {
 			m.allEvents = nil
@@ -393,6 +407,186 @@ func (m Model) handlePodYAML(msg PodYAMLMsg) (tea.Model, tea.Cmd) {
 	}
 	m.updatePodViewport()
 	return m, nil
+}
+
+// rebuildFlatDrillInResources populates allResources for views reached by drilling
+// from a flat forest list (where SelectedPodCliqueSet is empty). Without PCS context,
+// the normal hierarchy builder returns early — this fills the gap.
+func (m *Model) rebuildFlatDrillInResources(snapshot *data.CacheSnapshot) {
+	if snapshot == nil {
+		return
+	}
+
+	pcsgName := m.viewState.SelectedScalingGroup
+	pcsgReplicaIndex := m.viewState.SelectedPCSGReplicaIndex
+	pcName := m.viewState.SelectedPodClique
+
+	// --- PCSG drill-in: build replica list and replica children ---
+	if pcsgName != "" {
+		// Resolve namespace from any matching PCSG resource in the snapshot
+		namespace := ""
+		for _, sgs := range snapshot.ScalingGroupsByReplica {
+			for _, sg := range sgs {
+				if sg.Name == pcsgName {
+					namespace = sg.Namespace
+					break
+				}
+			}
+			if namespace != "" {
+				break
+			}
+		}
+
+		// PCSG replicas (for PodCliqueScalingGroupView)
+		pcsgKey := "PodCliqueScalingGroup/" + pcsgName
+		pcsgReplicaIndexes := snapshot.ReplicaIndexesByPCSG[pcsgName]
+		if len(pcsgReplicaIndexes) > 0 {
+			pcsgReplicaResources := make([]data.Resource, 0, len(pcsgReplicaIndexes))
+			for _, ri := range pcsgReplicaIndexes {
+				var totalReady, totalScheduled, totalReplicas int
+				pcsgReplicaKey := pcsgName + "/" + ri
+				for _, pc := range snapshot.PodCliquesByPCSGReplica[pcsgReplicaKey] {
+					var ready, replicas int
+					fmt.Sscanf(pc.Ready, "%d/%d", &ready, &replicas)
+					totalReady += ready
+					totalReplicas += replicas
+					var scheduled, scheduledMax int
+					fmt.Sscanf(pc.Scheduled, "%d/%d", &scheduled, &scheduledMax)
+					totalScheduled += scheduled
+				}
+				pcsgReplicaResources = append(pcsgReplicaResources, data.Resource{
+					Name:       fmt.Sprintf("%s-replica-%s", pcsgName, ri),
+					Type:       "PodCliqueScalingGroupReplica",
+					Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
+					Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
+					Namespace:  namespace,
+					ParentType: "PodCliqueScalingGroup",
+					ParentName: pcsgName,
+					Topology:   "N/A",
+				})
+			}
+			m.allResources[pcsgKey] = pcsgReplicaResources
+		}
+
+		// PCSG replica children — PodCliques within a specific replica
+		if pcsgReplicaIndex != "" {
+			pcsgReplicaChildKey := "PodCliqueScalingGroupReplica/" + pcsgName + "/" + pcsgReplicaIndex
+			pcsgReplicaKey := pcsgName + "/" + pcsgReplicaIndex
+			var pcsgChildren []data.Resource
+			for _, pc := range snapshot.PodCliquesByPCSGReplica[pcsgReplicaKey] {
+				pc := pc // copy
+				pc.Topology = "N/A"
+				pcsgChildren = append(pcsgChildren, pc)
+			}
+			data.SortResourcesByName(pcsgChildren)
+			m.allResources[pcsgReplicaChildKey] = pcsgChildren
+		}
+	}
+
+	// --- PodClique drill-in: build pod list ---
+	if pcName != "" {
+		podCliqueKey := "PodClique/" + pcName
+		pods := snapshot.PodsByPodClique[pcName]
+		podResources := make([]data.Resource, len(pods))
+		for i, pod := range pods {
+			podResources[i] = pod
+			podResources[i].Topology = "N/A"
+		}
+		data.SortResourcesByName(podResources)
+		m.allResources[podCliqueKey] = podResources
+	}
+}
+
+// populateForestResources sets m.allResources["forest"] based on m.forestResourceType.
+func (m *Model) populateForestResources(snapshot *data.CacheSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	switch m.forestResourceType {
+	case "pc":
+		m.allResources["forest"] = flatPodCliques(snapshot)
+	case "pcsg":
+		m.allResources["forest"] = flatScalingGroups(snapshot)
+	case "pod":
+		m.allResources["forest"] = flatPods(snapshot)
+	default: // "pcs" or empty
+		m.allResources["forest"] = snapshot.PodCliqueSets
+	}
+}
+
+// flatPodCliques returns a deduplicated flat list of all PodCliques from the snapshot.
+func flatPodCliques(snapshot *data.CacheSnapshot) []data.Resource {
+	if snapshot == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var result []data.Resource
+
+	addPC := func(pc data.Resource) {
+		if !seen[pc.Name] {
+			seen[pc.Name] = true
+			result = append(result, pc)
+		}
+	}
+
+	// Standalone PodCliques (directly under PCS replicas)
+	for _, pcs := range snapshot.PodCliquesByReplica {
+		for _, pc := range pcs {
+			addPC(pc)
+		}
+	}
+
+	// PodCliques under PCSGs
+	for _, pcs := range snapshot.PodCliquesByPCSGReplica {
+		for _, pc := range pcs {
+			addPC(pc)
+		}
+	}
+
+	data.SortResourcesByName(result)
+	return result
+}
+
+// flatScalingGroups returns a deduplicated flat list of all PodCliqueScalingGroups from the snapshot.
+func flatScalingGroups(snapshot *data.CacheSnapshot) []data.Resource {
+	if snapshot == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var result []data.Resource
+
+	for _, sgs := range snapshot.ScalingGroupsByReplica {
+		for _, sg := range sgs {
+			if !seen[sg.Name] {
+				seen[sg.Name] = true
+				result = append(result, sg)
+			}
+		}
+	}
+
+	data.SortResourcesByName(result)
+	return result
+}
+
+// flatPods returns a deduplicated flat list of all Pods from the snapshot.
+func flatPods(snapshot *data.CacheSnapshot) []data.Resource {
+	if snapshot == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var result []data.Resource
+
+	for _, pods := range snapshot.PodsByPodClique {
+		for _, pod := range pods {
+			if !seen[pod.Name] {
+				seen[pod.Name] = true
+				result = append(result, pod)
+			}
+		}
+	}
+
+	data.SortResourcesByName(result)
+	return result
 }
 
 // validateTopologyDrillStack checks that the current drill stack is still valid.

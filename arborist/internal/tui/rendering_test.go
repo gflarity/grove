@@ -368,39 +368,39 @@ func TestRenderBreadcrumb_DefaultFallback(t *testing.T) {
 // Phase 4, Item 9: viewDisplayName
 // ===========================================================================
 
-func TestViewDisplayName_AllViewTypes(t *testing.T) {
-	tests := []struct {
-		viewType data.ViewType
-		expected string
-	}{
-		{data.ForestView, "forest"},
-		{data.PodCliqueSetView, "PodCliqueSet"},
-		{data.PodCliqueSetReplicaView, "PodCliqueSetReplica"},
-		{data.PodCliqueScalingGroupView, "PodCliqueScalingGroup"},
-		{data.PodCliqueScalingGroupReplicaView, "PodCliqueScalingGroupReplica"},
-		{data.PodCliqueView, "PodClique"},
-		{data.PodView, "Pod"},
-		{data.TopologyView, "topology"},
+func TestViewDisplayName_OnlyTwoLenses(t *testing.T) {
+	m := newTestModel(nil)
+
+	// All forest hierarchy views should return "forest"
+	forestViews := []data.ViewType{
+		data.ForestView,
+		data.PodCliqueSetView,
+		data.PodCliqueSetReplicaView,
+		data.PodCliqueScalingGroupView,
+		data.PodCliqueScalingGroupReplicaView,
+		data.PodCliqueView,
+		data.PodView,
+	}
+	for _, vt := range forestViews {
+		m.viewState.ViewType = vt
+		got := m.viewDisplayName()
+		if got != "forest" {
+			t.Errorf("viewDisplayName() for %s = %q, want %q",
+				data.ViewTypeName(vt), got, "forest")
+		}
 	}
 
-	m := newTestModel(nil)
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			m.viewState.ViewType = tt.viewType
-			got := m.viewDisplayName()
-			if got != tt.expected {
-				t.Errorf("viewDisplayName() for %s = %q, want %q",
-					data.ViewTypeName(tt.viewType), got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestViewDisplayName_UnknownViewType(t *testing.T) {
-	m := newTestModel(nil)
-	m.viewState.ViewType = data.ViewType(999)
+	// Topology view returns "topology"
+	m.viewState.ViewType = data.TopologyView
 	got := m.viewDisplayName()
-	if got != "Unknown" {
-		t.Errorf("viewDisplayName() for unknown type = %q, want %q", got, "Unknown")
+	if got != "topology" {
+		t.Errorf("viewDisplayName() for TopologyView = %q, want %q", got, "topology")
+	}
+
+	// Unknown view type still returns "forest" (it's the default)
+	m.viewState.ViewType = data.ViewType(999)
+	got = m.viewDisplayName()
+	if got != "forest" {
+		t.Errorf("viewDisplayName() for unknown type = %q, want %q", got, "forest")
 	}
 }

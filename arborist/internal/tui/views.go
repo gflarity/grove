@@ -86,28 +86,13 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 
-// viewDisplayName returns a short display name for the current view type.
+// viewDisplayName returns the lens name. There are only two lenses:
+// "forest" (all hierarchy views) and "topology".
 func (m Model) viewDisplayName() string {
-	switch m.viewState.ViewType {
-	case data.ForestView:
-		return "forest"
-	case data.PodCliqueSetView:
-		return "PodCliqueSet"
-	case data.PodCliqueSetReplicaView:
-		return "PodCliqueSetReplica"
-	case data.PodCliqueScalingGroupView:
-		return "PodCliqueScalingGroup"
-	case data.PodCliqueScalingGroupReplicaView:
-		return "PodCliqueScalingGroupReplica"
-	case data.PodCliqueView:
-		return "PodClique"
-	case data.PodView:
-		return "Pod"
-	case data.TopologyView:
+	if m.viewState.ViewType == data.TopologyView {
 		return "topology"
-	default:
-		return "Unknown"
 	}
+	return "forest"
 }
 
 // renderHeaderFrame renders the k9s-style header with context info on the left,
@@ -690,27 +675,59 @@ func (m Model) renderBreadcrumb() string {
 	podStyle := BreadcrumbStyles["Pod"]
 	sep := BreadcrumbSeparator.String()
 
+	// For flat-list drill-ins (no PCS parent context), build breadcrumb from
+	// the forest resource type label instead of the full PCS hierarchy.
+	hasPCS := m.viewState.SelectedPodCliqueSet != ""
+
 	switch m.viewState.ViewType {
 	case data.ForestView:
-		return forestStyle.Render("Forest")
+		label := forestResourceTypeLabel(m.forestResourceType)
+		return forestStyle.Render(label)
+
 	case data.PodCliqueSetView:
 		return forestStyle.Render("Forest") + sep + pcsStyle.Render(m.viewState.SelectedPodCliqueSet)
+
 	case data.PodCliqueSetReplicaView:
 		return forestStyle.Render("Forest") + sep +
 			pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
 			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex)
+
 	case data.PodCliqueScalingGroupView:
+		if !hasPCS {
+			label := forestResourceTypeLabel(m.forestResourceType)
+			return forestStyle.Render(label) + sep +
+				pcsgStyle.Render(m.viewState.SelectedScalingGroup)
+		}
 		return forestStyle.Render("Forest") + sep +
 			pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
 			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex) + sep +
 			pcsgStyle.Render(m.viewState.SelectedScalingGroup)
+
 	case data.PodCliqueScalingGroupReplicaView:
+		if !hasPCS {
+			label := forestResourceTypeLabel(m.forestResourceType)
+			return forestStyle.Render(label) + sep +
+				pcsgStyle.Render(m.viewState.SelectedScalingGroup) + sep +
+				pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
+		}
 		return forestStyle.Render("Forest") + sep +
 			pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
 			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex) + sep +
 			pcsgStyle.Render(m.viewState.SelectedScalingGroup) + sep +
 			pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
+
 	case data.PodCliqueView:
+		if !hasPCS {
+			label := forestResourceTypeLabel(m.forestResourceType)
+			bc := forestStyle.Render(label)
+			if m.viewState.SelectedScalingGroup != "" {
+				bc += sep + pcsgStyle.Render(m.viewState.SelectedScalingGroup)
+				if m.viewState.SelectedPCSGReplicaIndex != "" {
+					bc += sep + pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
+				}
+			}
+			return bc + sep + pcStyle.Render(m.viewState.SelectedPodClique)
+		}
 		parent := pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
 			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex)
 		if m.viewState.SelectedScalingGroup != "" {
@@ -720,7 +737,22 @@ func (m Model) renderBreadcrumb() string {
 			}
 		}
 		return forestStyle.Render("Forest") + sep + parent + sep + pcStyle.Render(m.viewState.SelectedPodClique)
+
 	case data.PodView:
+		if !hasPCS {
+			label := forestResourceTypeLabel(m.forestResourceType)
+			bc := forestStyle.Render(label)
+			if m.viewState.SelectedScalingGroup != "" {
+				bc += sep + pcsgStyle.Render(m.viewState.SelectedScalingGroup)
+				if m.viewState.SelectedPCSGReplicaIndex != "" {
+					bc += sep + pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
+				}
+			}
+			if m.viewState.SelectedPodClique != "" {
+				bc += sep + pcStyle.Render(m.viewState.SelectedPodClique)
+			}
+			return bc + sep + podStyle.Render(m.viewState.SelectedPod)
+		}
 		parent := pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
 			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex)
 		if m.viewState.SelectedScalingGroup != "" {
@@ -807,6 +839,22 @@ func (m Model) buildShortcutsString() string {
 	parts = append(parts, "<q>Quit")
 
 	return strings.Join(parts, "  ")
+}
+
+// forestResourceTypeLabel returns a human-readable label for a forest resource type.
+func forestResourceTypeLabel(rt string) string {
+	switch rt {
+	case "pc":
+		return "PodCliques"
+	case "pcsg":
+		return "PodCliqueScalingGroups"
+	case "pod":
+		return "Pods"
+	case "pcs", "":
+		return "Forest"
+	default:
+		return "Forest"
+	}
 }
 
 // colorizeResourceRow returns plain text for each column value.
