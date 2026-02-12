@@ -373,14 +373,14 @@ func TestViewDisplayName_AllViewTypes(t *testing.T) {
 		viewType data.ViewType
 		expected string
 	}{
-		{data.ForestView, "Forest"},
+		{data.ForestView, "forest"},
 		{data.PodCliqueSetView, "PodCliqueSet"},
 		{data.PodCliqueSetReplicaView, "PodCliqueSetReplica"},
 		{data.PodCliqueScalingGroupView, "PodCliqueScalingGroup"},
 		{data.PodCliqueScalingGroupReplicaView, "PodCliqueScalingGroupReplica"},
 		{data.PodCliqueView, "PodClique"},
 		{data.PodView, "Pod"},
-		{data.TopologyView, "Topology"},
+		{data.TopologyView, "topology"},
 	}
 
 	m := newTestModel(nil)

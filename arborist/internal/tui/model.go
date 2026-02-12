@@ -116,6 +116,10 @@ type Model struct {
 	commandActive bool
 	commandInput  textinput.Model
 
+	// Lens edit mode (inline editing in the header Lens line, triggered by 'l')
+	lensEditActive bool
+	lensInput      textinput.Model
+
 	// Data — all derived from the cache snapshot
 	allResources       map[string][]data.Resource
 	allEvents          []data.Event
@@ -244,6 +248,13 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 	ci.Prompt = ": "
 	ci.PromptStyle = CommandBarStyle
 
+	// Initialize lens edit input (inline in header, no prompt — the header label acts as prompt)
+	li := textinput.New()
+	li.Placeholder = ""
+	li.CharLimit = 256
+	li.Width = 30
+	li.Prompt = ""
+
 	// Initialize YAML search input
 	yi := textinput.New()
 	yi.Placeholder = ""
@@ -263,6 +274,7 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 		ctx:           context.Background(),
 		filterInput:   ti,
 		commandInput:  ci,
+		lensInput:     li,
 		yamlSearchInput: yi,
 	}
 

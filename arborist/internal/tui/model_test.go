@@ -1241,8 +1241,8 @@ func TestHeaderShowsClusterInfo(t *testing.T) {
 	if !strings.Contains(header, "v0.1.0") {
 		t.Errorf("expected header to contain Arborist version 'v0.1.0', got:\n%s", header)
 	}
-	if !strings.Contains(header, "Forest") {
-		t.Errorf("expected header to contain view name 'Forest', got:\n%s", header)
+	if !strings.Contains(header, "forest") {
+		t.Errorf("expected header to contain view name 'forest', got:\n%s", header)
 	}
 	for _, label := range []string{"Context:", "Cluster:", "User:", "Arborist Rev:", "K8s Rev:", "Lens:"} {
 		if !strings.Contains(header, label) {
@@ -2105,6 +2105,223 @@ func TestCommandMode_HeaderShowsCmdShortcut(t *testing.T) {
 	header := m.renderHeaderFrame()
 	if !strings.Contains(header, "Cmd") {
 		t.Errorf("expected header to contain 'Cmd' shortcut, got:\n%s", header)
+	}
+}
+
+// ===========================================================================
+// Lens Edit Mode Tests (inline header editing via 'l' key)
+// ===========================================================================
+
+func TestLensEdit_ActivateWithL(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	if m.lensEditActive {
+		t.Fatal("expected lens edit mode inactive initially")
+	}
+
+	m = sendRune(m, 'l')
+	if !m.lensEditActive {
+		t.Fatal("expected lens edit mode active after pressing l")
+	}
+}
+
+func TestLensEdit_EscCancels(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	m = sendRune(m, 'l')
+	if !m.lensEditActive {
+		t.Fatal("expected lens edit mode active")
+	}
+
+	// Type something first
+	m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+
+	m = sendKey(m, tea.KeyEsc)
+	if m.lensEditActive {
+		t.Fatal("expected lens edit mode deactivated after Esc")
+	}
+	if m.lensInput.Value() != "" {
+		t.Fatalf("expected lens input cleared after Esc, got %q", m.lensInput.Value())
+	}
+}
+
+func TestLensEdit_EnterExecutesTopology(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
+
+	m := newTestModelWithCache(mc)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	m = sendRune(m, 'l')
+	for _, r := range "topology" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.lensEditActive {
+		t.Fatal("expected lens edit mode deactivated after Enter")
+	}
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView after typing 'topology', got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestLensEdit_PrefixMatchTopology(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
+
+	m := newTestModelWithCache(mc)
+
+	m = sendRune(m, 'l')
+	for _, r := range "top" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView after prefix 'top', got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestLensEdit_PrefixMatchForest(t *testing.T) {
+	m := newTopologyTestModel()
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	m = sendRune(m, 'l')
+	for _, r := range "for" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.ForestView {
+		t.Fatalf("expected ForestView after prefix 'for', got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestLensEdit_TabCompletion(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	m = sendRune(m, 'l')
+	for _, r := range "top" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m.lensInput.Value() != "top" {
+		t.Fatalf("expected lens input 'top', got %q", m.lensInput.Value())
+	}
+
+	m = sendKey(m, tea.KeyTab)
+	if m.lensInput.Value() != "topology" {
+		t.Fatalf("expected lens input 'topology' after Tab, got %q", m.lensInput.Value())
+	}
+}
+
+func TestLensEdit_TabCompletionForest(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	m = sendRune(m, 'l')
+	for _, r := range "for" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	m = sendKey(m, tea.KeyTab)
+	if m.lensInput.Value() != "forest" {
+		t.Fatalf("expected lens input 'forest' after Tab, got %q", m.lensInput.Value())
+	}
+}
+
+func TestLensEdit_NoMatchDoesNothing(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	viewBefore := m.viewState.ViewType
+
+	m = sendRune(m, 'l')
+	for _, r := range "xyz" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != viewBefore {
+		t.Fatalf("expected view unchanged after unmatched input, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.lensEditActive {
+		t.Fatal("expected lens edit mode deactivated after Enter (even with no match)")
+	}
+}
+
+func TestLensEdit_EmptyInputDoesNothing(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	viewBefore := m.viewState.ViewType
+
+	m = sendRune(m, 'l')
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != viewBefore {
+		t.Fatalf("expected view unchanged after empty input, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+}
+
+func TestLensEdit_CtrlCQuitsFromLensEdit(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+	m = sendRune(m, 'l')
+	if !m.lensEditActive {
+		t.Fatal("expected lens edit active")
+	}
+
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("expected quit command even in lens edit mode")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+func TestLensEdit_HeaderShowsInlineInput(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	// Before activating, header should show the lens value
+	header := m.renderHeaderFrame()
+	if !strings.Contains(header, "forest") {
+		t.Errorf("expected header to contain 'forest' lens value, got:\n%s", header)
+	}
+
+	// Activate lens edit and type something
+	m = sendRune(m, 'l')
+	for _, r := range "top" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	header = m.renderHeaderFrame()
+	// The header should contain the typed text inline
+	if !strings.Contains(header, "top") {
+		t.Errorf("expected header to contain typed 'top' in lens input, got:\n%s", header)
+	}
+}
+
+func TestLensEdit_HeaderShowsLensShortcut(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	header := m.renderHeaderFrame()
+	if !strings.Contains(header, "Lens") {
+		t.Errorf("expected header to contain 'Lens' shortcut, got:\n%s", header)
 	}
 }
 

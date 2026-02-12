@@ -14,6 +14,7 @@ type KeyMap struct {
 	Down     key.Binding
 	Topology key.Binding
 	Command  key.Binding
+	Lens     key.Binding
 }
 
 // DefaultKeyMap returns the default key bindings matching the existing TUI behavior.
@@ -59,20 +60,24 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys(":"),
 			key.WithHelp(":", "command"),
 		),
+		Lens: key.NewBinding(
+			key.WithKeys("l", "L"),
+			key.WithHelp("l", "lens"),
+		),
 	}
 }
 
 // ShortHelp returns the key bindings shown in the short help view (status bar).
 func (k KeyMap) ShortHelp() []key.Binding {
 	return []key.Binding{
-		k.Command, k.Filter, k.Tab, k.Up, k.Down, k.Enter, k.Topology, k.Back, k.Quit,
+		k.Command, k.Lens, k.Filter, k.Tab, k.Up, k.Down, k.Enter, k.Topology, k.Back, k.Quit,
 	}
 }
 
 // FullHelp returns the full set of key bindings for the help view.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Command, k.Filter, k.Tab, k.Up, k.Down},
+		{k.Command, k.Lens, k.Filter, k.Tab, k.Up, k.Down},
 		{k.Enter, k.Topology, k.Back, k.Quit, k.CtrlC},
 	}
 }
