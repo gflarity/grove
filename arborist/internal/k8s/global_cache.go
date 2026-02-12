@@ -77,6 +77,20 @@ const (
 	eventMaxAge = 1 * time.Hour
 )
 
+// GlobalCacheOption configures an InformerGlobalCache.
+type GlobalCacheOption func(*InformerGlobalCache)
+
+// WithCacheNamespace scopes the cache's informers to a single namespace.
+// Namespace-scoped resources (Pods, Events, PCS, PCSG, PC) will only watch
+// the given namespace. Cluster-scoped resources (Nodes, ClusterTopology) are
+// always watched cluster-wide regardless of this option.
+// When ns is "" or this option is not provided, the cache watches all namespaces.
+func WithCacheNamespace(ns string) GlobalCacheOption {
+	return func(c *InformerGlobalCache) {
+		c.namespace = ns
+	}
+}
+
 // InformerGlobalCache implements data.GlobalCache using client-go informers.
 // It watches all resource types needed by the TUI: Nodes, Pods, Events,
 // PodCliqueSets, PodCliqueScalingGroups, PodCliques, and ClusterTopology.
@@ -84,9 +98,14 @@ type InformerGlobalCache struct {
 	clientset     kubernetes.Interface
 	dynamicClient dynamic.Interface
 
+	// namespace limits namespace-scoped informers to a single namespace.
+	// Empty string means all namespaces (cluster-wide).
+	namespace string
+
 	// Informer factories
-	coreFactory    informers.SharedInformerFactory
-	dynamicFactory dynamicinformer.DynamicSharedInformerFactory
+	coreFactory           informers.SharedInformerFactory
+	dynamicFactory        dynamicinformer.DynamicSharedInformerFactory
+	clusterDynamicFactory dynamicinformer.DynamicSharedInformerFactory
 
 	// Additional factories for filtered informers
 	podInformerFactory   informers.SharedInformerFactory
@@ -117,12 +136,16 @@ type InformerGlobalCache struct {
 
 // NewInformerGlobalCache creates a new InformerGlobalCache.
 // The cache is not started until Start() is called.
-func NewInformerGlobalCache(clientset kubernetes.Interface, dynamicClient dynamic.Interface) *InformerGlobalCache {
-	return &InformerGlobalCache{
+func NewInformerGlobalCache(clientset kubernetes.Interface, dynamicClient dynamic.Interface, opts ...GlobalCacheOption) *InformerGlobalCache {
+	c := &InformerGlobalCache{
 		clientset:     clientset,
 		dynamicClient: dynamicClient,
 		updatesCh:     make(chan struct{}, 1),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Start begins the informers and starts watching. Non-blocking.
@@ -130,43 +153,73 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
 
-	// Create core informer factory for Nodes.
+	// Create core informer factory for Nodes — always cluster-wide.
 	c.coreFactory = informers.NewSharedInformerFactoryWithOptions(
 		c.clientset,
 		0, // no resync period — we rely on watch events
 	)
 
-	// Create dynamic informer factory for CRDs (PCS, PCSG, PC, ClusterTopology).
-	c.dynamicFactory = dynamicinformer.NewDynamicSharedInformerFactory(
+	// Pod informer with label selector for PCS-managed pods.
+	// When a namespace is set, scope to that namespace.
+	podFactoryOpts := []informers.SharedInformerOption{
+		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.LabelSelector = globalPcsLabelSelector
+		}),
+	}
+	if c.namespace != "" {
+		podFactoryOpts = append(podFactoryOpts, informers.WithNamespace(c.namespace))
+	}
+	c.podInformerFactory = informers.NewSharedInformerFactoryWithOptions(
+		c.clientset,
+		0,
+		podFactoryOpts...,
+	)
+
+	// Event informer — when a namespace is set, scope to that namespace.
+	var eventFactoryOpts []informers.SharedInformerOption
+	if c.namespace != "" {
+		eventFactoryOpts = append(eventFactoryOpts, informers.WithNamespace(c.namespace))
+	}
+	c.eventInformerFactory = informers.NewSharedInformerFactoryWithOptions(
+		c.clientset,
+		0,
+		eventFactoryOpts...,
+	)
+
+	// Dynamic informer factory for namespace-scoped CRDs (PCS, PCSG, PC).
+	// When a namespace is set, use NewFilteredDynamicSharedInformerFactory to scope.
+	if c.namespace != "" {
+		c.dynamicFactory = dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+			c.dynamicClient,
+			0,
+			c.namespace,
+			nil,
+		)
+	} else {
+		c.dynamicFactory = dynamicinformer.NewDynamicSharedInformerFactory(
+			c.dynamicClient,
+			0,
+		)
+	}
+
+	// Cluster-scoped dynamic factory for ClusterTopology — always cluster-wide.
+	c.clusterDynamicFactory = dynamicinformer.NewDynamicSharedInformerFactory(
 		c.dynamicClient,
-		0, // no resync period
+		0,
 	)
 
 	// Set up core informers
 	c.nodeInformer = c.coreFactory.Core().V1().Nodes().Informer()
-
-	// Pod informer with label selector for PCS-managed pods
-	c.podInformerFactory = informers.NewSharedInformerFactoryWithOptions(
-		c.clientset,
-		0,
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.LabelSelector = globalPcsLabelSelector
-		}),
-	)
 	c.podInformer = c.podInformerFactory.Core().V1().Pods().Informer()
-
-	// Event informer — watches all events (namespace-scoped, filtered in-memory)
-	c.eventInformerFactory = informers.NewSharedInformerFactoryWithOptions(
-		c.clientset,
-		0,
-	)
 	c.eventInformer = c.eventInformerFactory.Core().V1().Events().Informer()
 
-	// Dynamic informers for CRDs
+	// Dynamic informers for namespace-scoped CRDs
 	c.pcsInformer = c.dynamicFactory.ForResource(globalPcsGVR).Informer()
 	c.pcsgInformer = c.dynamicFactory.ForResource(globalPcsgGVR).Informer()
 	c.pcInformer = c.dynamicFactory.ForResource(globalPcGVR).Informer()
-	c.ctInformer = c.dynamicFactory.ForResource(globalClusterTopologyGVR).Informer()
+
+	// ClusterTopology informer — always cluster-wide via the unfiltered factory
+	c.ctInformer = c.clusterDynamicFactory.ForResource(globalClusterTopologyGVR).Informer()
 
 	// Register event handlers on all informers
 	handler := cache.ResourceEventHandlerFuncs{
@@ -195,6 +248,7 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 	c.podInformerFactory.Start(ctx.Done())
 	c.eventInformerFactory.Start(ctx.Done())
 	c.dynamicFactory.Start(ctx.Done())
+	c.clusterDynamicFactory.Start(ctx.Done())
 
 	return nil
 }
@@ -338,17 +392,17 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 	pcsSpecs := c.readPCSSpecs()
 
 	// Read PCSG resources
-	pcsgsByReplica, pcsgObjects := c.readPCSGs()
+	pcsgsByReplica, _ := c.readPCSGs()
 
-	// Read PodClique resources
-	pcsByReplica, pcsByPCSG, pcsByPCSGReplica := c.readPodCliques()
-
-	// Read Pods
+	// Read Pods first — needed to build scheduledByPodClique before reading PodCliques.
 	pods := c.readPods()
 
-	// Build pod lookup (podName -> CachedPodInfo) and PodsByPodClique
+	// Build pod lookup (podName -> CachedPodInfo), PodsByPodClique, and scheduledByPodClique.
+	// scheduledByPodClique counts pods with NodeName != "" per PodClique — used to compute
+	// the Scheduled column bottom-up instead of reading status.scheduledReplicas from CRDs.
 	podInfos := make(map[string]data.CachedPodInfo, len(pods))
 	podsByPodClique := make(map[string][]data.Resource)
+	scheduledByPodClique := make(map[string]int32)
 	for _, pod := range pods {
 		podInfos[pod.Name] = data.CachedPodInfo{
 			NodeName: pod.NodeName,
@@ -357,6 +411,11 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 
 		podCliqueName := pod.Labels["grove.io/podclique"]
 		if podCliqueName != "" {
+			// Count scheduled pods (those assigned to a node)
+			if pod.NodeName != "" {
+				scheduledByPodClique[podCliqueName]++
+			}
+
 			// Determine ready status
 			ready := "0/1"
 			phase := pod.Phase
@@ -377,11 +436,14 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 		}
 	}
 
+	// Read PodClique resources (uses scheduledByPodClique computed from pods above)
+	pcsByReplica, pcsByPCSG, pcsByPCSGReplica, pcObjectsByPCSGReplica, standalonePCObjects := c.readPodCliques(scheduledByPodClique)
+
 	// Read Events
 	eventsByObject := c.readEvents()
 
-	// Build forest view (PodCliqueSet resources)
-	pcsResources := c.buildPCSResources(pcsSpecs)
+	// Build forest view (PodCliqueSet resources) — uses computed scheduled counts
+	pcsResources := c.buildPCSResources(pcsSpecs, scheduledByPodClique, pcObjectsByPCSGReplica, standalonePCObjects, pcsgsByReplica)
 
 	// Build replica indexes by PCS
 	replicaIndexesByPCS := make(map[string][]string)
@@ -440,7 +502,7 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 	scalingGroupsByReplica := func() map[string][]data.Resource {
 		result := make(map[string][]data.Resource)
 		for k, v := range pcsgsByReplica {
-			result[k] = c.convertPCSGsToResources(v)
+			result[k] = c.convertPCSGsToResources(v, scheduledByPodClique, pcObjectsByPCSGReplica)
 		}
 		return result
 	}()
@@ -468,8 +530,6 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 		PodInfos:             podInfos,
 		NodeGPUCapacity:      nodeResult.nodeGPUCapacity,
 	}
-
-	_ = pcsgObjects // used in convertPCSGsToResources
 
 	// Store and notify
 	c.mu.Lock()
@@ -530,12 +590,20 @@ func (c *InformerGlobalCache) readPCSGs() (map[string][]*corev1alpha1.PodCliqueS
 }
 
 // convertPCSGsToResources converts PCSG objects to Resource display objects.
-func (c *InformerGlobalCache) convertPCSGsToResources(pcsgs []*corev1alpha1.PodCliqueScalingGroup) []data.Resource {
+// It computes the Scheduled count bottom-up: a PCSG replica is "scheduled" when
+// all its constituent PodCliques have scheduledPods >= minAvailable.
+func (c *InformerGlobalCache) convertPCSGsToResources(
+	pcsgs []*corev1alpha1.PodCliqueScalingGroup,
+	scheduledByPodClique map[string]int32,
+	pcObjectsByPCSGReplica map[string][]*corev1alpha1.PodClique,
+) []data.Resource {
 	resources := make([]data.Resource, 0, len(pcsgs))
 	for _, pcsg := range pcsgs {
 		replicas := pcsg.Status.Replicas
 		availableReplicas := pcsg.Status.AvailableReplicas
-		scheduledReplicas := pcsg.Status.ScheduledReplicas
+
+		// Compute scheduled replicas bottom-up from PodClique data
+		scheduledReplicas := computePCSGScheduledReplicas(pcsg, scheduledByPodClique, pcObjectsByPCSGReplica)
 
 		pcsName := pcsg.Labels["app.kubernetes.io/part-of"]
 		replicaIndex := pcsg.Labels["grove.io/podcliqueset-replica-index"]
@@ -554,16 +622,60 @@ func (c *InformerGlobalCache) convertPCSGsToResources(pcsgs []*corev1alpha1.PodC
 	return resources
 }
 
+// computePCSGScheduledReplicas computes how many PCSG replicas are "scheduled".
+// A PCSG replica is scheduled when ALL its constituent PodCliques have
+// scheduledPods >= minAvailable (where minAvailable defaults to replicas if nil).
+func computePCSGScheduledReplicas(
+	pcsg *corev1alpha1.PodCliqueScalingGroup,
+	scheduledByPodClique map[string]int32,
+	pcObjectsByPCSGReplica map[string][]*corev1alpha1.PodClique,
+) int32 {
+	totalReplicas := pcsg.Spec.Replicas
+	var scheduled int32
+	for i := int32(0); i < totalReplicas; i++ {
+		replicaKey := fmt.Sprintf("%s/%d", pcsg.Name, i)
+		pcs := pcObjectsByPCSGReplica[replicaKey]
+		if isPCSGReplicaScheduled(pcs, scheduledByPodClique) {
+			scheduled++
+		}
+	}
+	return scheduled
+}
+
+// isPCSGReplicaScheduled returns true if all PodCliques in a PCSG replica
+// have scheduledPods >= minAvailable.
+func isPCSGReplicaScheduled(pcs []*corev1alpha1.PodClique, scheduledByPodClique map[string]int32) bool {
+	if len(pcs) == 0 {
+		return false
+	}
+	for _, pc := range pcs {
+		minAvail := pc.Spec.Replicas
+		if pc.Spec.MinAvailable != nil {
+			minAvail = *pc.Spec.MinAvailable
+		}
+		if scheduledByPodClique[pc.Name] < minAvail {
+			return false
+		}
+	}
+	return true
+}
+
 // readPodCliques reads all PodCliques from the informer cache and groups them.
-func (c *InformerGlobalCache) readPodCliques() (
+// It uses scheduledByPodClique (computed from pod NodeName) instead of status.ScheduledReplicas.
+// It also returns pcObjectsByPCSGReplica for PCSG scheduled-count roll-up.
+func (c *InformerGlobalCache) readPodCliques(scheduledByPodClique map[string]int32) (
 	byReplica map[string][]data.Resource, // "pcsName/replicaIndex" -> standalone PodCliques
 	byPCSG map[string][]data.Resource, // pcsgName -> PodCliques
 	byPCSGReplica map[string][]data.Resource, // "pcsgName/replicaIndex" -> PodCliques
+	pcObjectsByPCSGReplica map[string][]*corev1alpha1.PodClique, // "pcsgName/replicaIndex" -> PodClique objects
+	standalonePCObjects map[string][]*corev1alpha1.PodClique, // "pcsName/replicaIndex" -> standalone PodClique objects
 ) {
 	items := c.pcInformer.GetStore().List()
 	byReplica = make(map[string][]data.Resource)
 	byPCSG = make(map[string][]data.Resource)
 	byPCSGReplica = make(map[string][]data.Resource)
+	pcObjectsByPCSGReplica = make(map[string][]*corev1alpha1.PodClique)
+	standalonePCObjects = make(map[string][]*corev1alpha1.PodClique)
 
 	for _, item := range items {
 		uns, ok := item.(*unstructured.Unstructured)
@@ -583,7 +695,7 @@ func (c *InformerGlobalCache) readPodCliques() (
 
 		replicas := pc.Spec.Replicas
 		readyReplicas := pc.Status.ReadyReplicas
-		scheduledReplicas := pc.Status.ScheduledReplicas
+		scheduledReplicas := scheduledByPodClique[pc.Name]
 
 		resource := data.Resource{
 			Name:      pc.Name,
@@ -593,6 +705,8 @@ func (c *InformerGlobalCache) readPodCliques() (
 			Status:    "",
 			Namespace: pc.Namespace,
 		}
+
+		pcCopy := pc // copy for storing in object maps
 
 		if pcsgName != "" {
 			// PodClique belongs to a PCSG
@@ -606,6 +720,8 @@ func (c *InformerGlobalCache) readPodCliques() (
 				replicaResource.ParentType = "PodCliqueScalingGroupReplica"
 				replicaResource.ParentName = fmt.Sprintf("%s-replica-%s", pcsgName, pcsgReplicaIndex)
 				byPCSGReplica[pcsgReplicaKey] = append(byPCSGReplica[pcsgReplicaKey], replicaResource)
+
+				pcObjectsByPCSGReplica[pcsgReplicaKey] = append(pcObjectsByPCSGReplica[pcsgReplicaKey], &pcCopy)
 			}
 		} else if pcsName != "" && replicaIndex != "" {
 			// Standalone PodClique directly under PCS replica
@@ -613,10 +729,12 @@ func (c *InformerGlobalCache) readPodCliques() (
 			resource.ParentName = fmt.Sprintf("%s-replica-%s", pcsName, replicaIndex)
 			key := pcsName + "/" + replicaIndex
 			byReplica[key] = append(byReplica[key], resource)
+
+			standalonePCObjects[key] = append(standalonePCObjects[key], &pcCopy)
 		}
 	}
 
-	return byReplica, byPCSG, byPCSGReplica
+	return byReplica, byPCSG, byPCSGReplica, pcObjectsByPCSGReplica, standalonePCObjects
 }
 
 // readPods reads all pods from the informer cache and converts them to TopologyPodInput.
@@ -678,13 +796,24 @@ func (c *InformerGlobalCache) readEvents() map[string][]data.Event {
 }
 
 // buildPCSResources constructs Resource display objects for PodCliqueSets.
-func (c *InformerGlobalCache) buildPCSResources(pcsSpecs map[string]*corev1alpha1.PodCliqueSet) []data.Resource {
+// It computes the Scheduled count bottom-up: a PCS replica is "scheduled" when
+// all its standalone PodCliques have scheduledPods >= minAvailable AND all its
+// PCSGs are fully scheduled (all PCSG replicas meet minAvailable).
+func (c *InformerGlobalCache) buildPCSResources(
+	pcsSpecs map[string]*corev1alpha1.PodCliqueSet,
+	scheduledByPodClique map[string]int32,
+	pcObjectsByPCSGReplica map[string][]*corev1alpha1.PodClique,
+	standalonePCObjects map[string][]*corev1alpha1.PodClique,
+	pcsgsByReplica map[string][]*corev1alpha1.PodCliqueScalingGroup,
+) []data.Resource {
 	resources := make([]data.Resource, 0, len(pcsSpecs))
 
 	for _, pcs := range pcsSpecs {
 		replicas := pcs.Spec.Replicas
 		availableReplicas := pcs.Status.AvailableReplicas
-		scheduledReplicas := pcs.Status.ScheduledReplicas
+
+		// Compute scheduled replicas bottom-up
+		scheduledReplicas := computePCSScheduledReplicas(pcs, scheduledByPodClique, pcObjectsByPCSGReplica, standalonePCObjects, pcsgsByReplica)
 
 		topology := "N/A"
 		if pcs.Spec.Template.TopologyConstraint != nil {
@@ -706,6 +835,69 @@ func (c *InformerGlobalCache) buildPCSResources(pcsSpecs map[string]*corev1alpha
 	data.SortResourcesByName(resources)
 
 	return resources
+}
+
+// computePCSScheduledReplicas computes how many PCS replicas are "scheduled".
+// A PCS replica is scheduled when:
+//  1. All standalone PodCliques in that replica have scheduledPods >= minAvailable
+//  2. All PCSGs in that replica are fully scheduled (every PCSG replica meets minAvailable)
+func computePCSScheduledReplicas(
+	pcs *corev1alpha1.PodCliqueSet,
+	scheduledByPodClique map[string]int32,
+	pcObjectsByPCSGReplica map[string][]*corev1alpha1.PodClique,
+	standalonePCObjects map[string][]*corev1alpha1.PodClique,
+	pcsgsByReplica map[string][]*corev1alpha1.PodCliqueScalingGroup,
+) int32 {
+	var scheduled int32
+	for i := int32(0); i < pcs.Spec.Replicas; i++ {
+		replicaKey := fmt.Sprintf("%s/%d", pcs.Name, i)
+		if isPCSReplicaScheduled(replicaKey, scheduledByPodClique, pcObjectsByPCSGReplica, standalonePCObjects, pcsgsByReplica) {
+			scheduled++
+		}
+	}
+	return scheduled
+}
+
+// isPCSReplicaScheduled checks whether a single PCS replica is fully scheduled.
+func isPCSReplicaScheduled(
+	replicaKey string,
+	scheduledByPodClique map[string]int32,
+	pcObjectsByPCSGReplica map[string][]*corev1alpha1.PodClique,
+	standalonePCObjects map[string][]*corev1alpha1.PodClique,
+	pcsgsByReplica map[string][]*corev1alpha1.PodCliqueScalingGroup,
+) bool {
+	// Check standalone PodCliques
+	for _, pc := range standalonePCObjects[replicaKey] {
+		minAvail := pc.Spec.Replicas
+		if pc.Spec.MinAvailable != nil {
+			minAvail = *pc.Spec.MinAvailable
+		}
+		if scheduledByPodClique[pc.Name] < minAvail {
+			return false
+		}
+	}
+
+	// Check PCSGs in this replica
+	for _, pcsg := range pcsgsByReplica[replicaKey] {
+		pcsgScheduled := computePCSGScheduledReplicas(pcsg, scheduledByPodClique, pcObjectsByPCSGReplica)
+		pcsgMinAvail := pcsg.Spec.Replicas
+		if pcsg.Spec.MinAvailable != nil {
+			pcsgMinAvail = *pcsg.Spec.MinAvailable
+		}
+		if pcsgScheduled < pcsgMinAvail {
+			return false
+		}
+	}
+
+	// A replica with no standalone PCs and no PCSGs has nothing to schedule,
+	// so we consider it scheduled only if at least one component exists.
+	standalones := standalonePCObjects[replicaKey]
+	pcsgs := pcsgsByReplica[replicaKey]
+	if len(standalones) == 0 && len(pcsgs) == 0 {
+		return false
+	}
+
+	return true
 }
 
 // Helper functions

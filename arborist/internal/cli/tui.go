@@ -82,8 +82,12 @@ func (c *ForestCmd) Run(globals *CLI) error {
 		// globalCache stays nil — the TUI will show empty data
 	} else {
 		tui.DebugLog("Kubernetes client initialized successfully")
-		globalCache = k8sClient.NewGlobalCache()
-		tui.DebugLog("global cache created")
+		var cacheOpts []k8s.GlobalCacheOption
+		if namespace != "" {
+			cacheOpts = append(cacheOpts, k8s.WithCacheNamespace(namespace))
+		}
+		globalCache = k8sClient.NewGlobalCache(cacheOpts...)
+		tui.DebugLog("global cache created (namespace=%q)", namespace)
 	}
 
 	// Resolve kubeconfig context/cluster/user for the header display
