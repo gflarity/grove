@@ -722,7 +722,7 @@ func (m *Model) rebuildTopologyDomainsTable() {
 			{Title: "VALUE", Weight: 2},
 		}
 		for _, gpuType := range gpuSummary.GPUTypes {
-			specs = append(specs, ColumnSpec{Title: gpuType + "¹", Weight: 1})
+			specs = append(specs, ColumnSpec{Title: gpuType + "¹", Weight: 3})
 		}
 		specs = append(specs,
 			ColumnSpec{Title: "GPU PODS", Weight: 1},
@@ -741,14 +741,14 @@ func (m *Model) rebuildTopologyDomainsTable() {
 		for _, v := range values {
 			pc := podCounts[v]
 			row := table.Row{v}
-			// GPU columns: grove/other/total
+			// GPU columns: bar graph + grove/other/total
 			valueCounts := gpuSummary.ByValue[v]
 			for _, gpuType := range gpuSummary.GPUTypes {
 				if valueCounts != nil {
 					counts := valueCounts[gpuType]
-					row = append(row, data.FormatGPUGroveOtherTotal(counts.Grove, counts.Other, counts.Total))
+					row = append(row, data.FormatGPUBar(counts.Grove, counts.Other, counts.Total, 20))
 				} else {
-					row = append(row, "0/0/0")
+					row = append(row, data.FormatGPUBar(0, 0, 0, 20))
 				}
 			}
 			// GPU PODS, PODS

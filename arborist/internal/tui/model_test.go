@@ -1913,6 +1913,84 @@ func TestTopologyView_SecondToggleUsesWarmCache(t *testing.T) {
 	}
 }
 
+func TestTopologyView_QuitWithQ(t *testing.T) {
+	m := newTopologyTestModel()
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Press 'q' — should quit immediately, NOT navigate back to forest
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd == nil {
+		t.Fatal("expected quit command from topology view")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg from topology view, got %T", msg)
+	}
+}
+
+func TestTopologyView_QuitWithCtrlC(t *testing.T) {
+	m := newTopologyTestModel()
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Press Ctrl+C — should quit immediately
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("expected quit command from topology view with Ctrl+C")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg from topology view, got %T", msg)
+	}
+}
+
+func TestTopologyView_QuitAfterCommandMode(t *testing.T) {
+	// Reproduce the exact user scenario: :topology then q
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.TopologyViewData = sampleTopologyViewData()
+	snap.PodCliqueSets = samplePCSResources()
+	mc.SetSnapshot(snap)
+
+	m := newTestModelWithCache(mc)
+
+	// Enter command mode with ':'
+	m = sendRune(m, ':')
+	if !m.commandActive {
+		t.Fatal("expected command mode active")
+	}
+
+	// Type "topology"
+	for _, r := range "topology" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Press Enter to execute
+	m = sendKey(m, tea.KeyEnter)
+
+	if m.viewState.ViewType != data.TopologyView {
+		t.Fatalf("expected TopologyView after :topology, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.commandActive {
+		t.Fatal("expected command mode deactivated")
+	}
+
+	// Now press 'q' — should quit immediately
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd == nil {
+		t.Fatal("expected quit command after :topology + q")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg after :topology + q, got %T", msg)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Command Mode Tests (vim-style ":" lens switching)
 // ---------------------------------------------------------------------------
@@ -2448,11 +2526,11 @@ func TestTopologyView_GPUColumnsAppearWhenDrilledIn(t *testing.T) {
 	if rows[0][0] != "block-01" {
 		t.Errorf("expected first value 'block-01', got %q", rows[0][0])
 	}
-	if rows[0][1] != "0/0/0" {
-		t.Errorf("block-01 B200¹ = %q, want '0/0/0'", rows[0][1])
+	if rows[0][1] != "[                    ] (0/0/0)" {
+		t.Errorf("block-01 B200¹ = %q, want bar format with '(0/0/0)'", rows[0][1])
 	}
-	if rows[0][2] != "0/6/16" {
-		t.Errorf("block-01 H200¹ = %q, want '0/6/16'", rows[0][2])
+	if rows[0][2] != "[░░░░░░░             ] (0/6/16)" {
+		t.Errorf("block-01 H200¹ = %q, want bar format with '(0/6/16)'", rows[0][2])
 	}
 	if rows[0][3] != "2" {
 		t.Errorf("block-01 GPU PODS = %q, want '2'", rows[0][3])
@@ -2466,11 +2544,11 @@ func TestTopologyView_GPUColumnsAppearWhenDrilledIn(t *testing.T) {
 	if rows[1][0] != "block-02" {
 		t.Errorf("expected second value 'block-02', got %q", rows[1][0])
 	}
-	if rows[1][1] != "0/8/16" {
-		t.Errorf("block-02 B200¹ = %q, want '0/8/16'", rows[1][1])
+	if rows[1][1] != "[░░░░░░░░░░          ] (0/8/16)" {
+		t.Errorf("block-02 B200¹ = %q, want bar format with '(0/8/16)'", rows[1][1])
 	}
-	if rows[1][2] != "0/0/0" {
-		t.Errorf("block-02 H200¹ = %q, want '0/0/0'", rows[1][2])
+	if rows[1][2] != "[                    ] (0/0/0)" {
+		t.Errorf("block-02 H200¹ = %q, want bar format with '(0/0/0)'", rows[1][2])
 	}
 	if rows[1][3] != "1" {
 		t.Errorf("block-02 GPU PODS = %q, want '1'", rows[1][3])
@@ -2624,8 +2702,8 @@ func TestTopologyView_FootnoteAppearsWithGPUColumns(t *testing.T) {
 	m = sendKey(m, tea.KeyEnter)
 
 	view := m.View()
-	if !strings.Contains(view, "¹ GPU: Grove/Other/Total") {
-		t.Errorf("expected footnote '¹ GPU: Grove/Other/Total' in view when GPU columns are present.\nview:\n%s", view)
+	if !strings.Contains(view, "¹ GPU: ▓▓ Grove  ░░ Other  (grove/other/total)") {
+		t.Errorf("expected footnote with bar legend in view when GPU columns are present.\nview:\n%s", view)
 	}
 }
 
@@ -2649,14 +2727,14 @@ func TestTopologyView_FootnoteHiddenWithoutGPU(t *testing.T) {
 
 	// At top level, no footnote
 	view := m.View()
-	if strings.Contains(view, "Grove/Other/Total") {
+	if strings.Contains(view, "grove/other/total)") {
 		t.Errorf("expected no footnote at top level without GPU data.\nview:\n%s", view)
 	}
 
 	// Drill into region — still no GPU columns
 	m = sendKey(m, tea.KeyEnter)
 	view = m.View()
-	if strings.Contains(view, "Grove/Other/Total") {
+	if strings.Contains(view, "grove/other/total)") {
 		t.Errorf("expected no footnote when drilled in without GPU data.\nview:\n%s", view)
 	}
 }
@@ -2724,8 +2802,8 @@ func TestTopologyView_ThreeWaySplit_MixedWorkloads(t *testing.T) {
 	if rows[0][0] != "block-01" {
 		t.Errorf("value = %q, want 'block-01'", rows[0][0])
 	}
-	if rows[0][1] != "7/2/16" {
-		t.Errorf("block-01 H200¹ = %q, want '7/2/16'", rows[0][1])
+	if rows[0][1] != "[▓▓▓▓▓▓▓▓░░          ] (7/2/16)" {
+		t.Errorf("block-01 H200¹ = %q, want bar format with '(7/2/16)'", rows[0][1])
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ai-dynamo/grove/arborist/internal/data"
 	"github.com/ai-dynamo/grove/arborist/internal/k8s"
 )
 
@@ -360,9 +361,13 @@ func computeThreeWayGPUUsage(
 	return result
 }
 
-// printGPUMiniTable renders a free-style aligned mini table of GPU usage under a block header.
+// printGPUMiniTable renders a bar-graph mini table of GPU usage under a block header.
 // Lines are prefixed with "│  " (tree continuation).
 // Does nothing when entries is empty.
+//
+// Example output:
+//
+//	│  H200 [██████░░░░░░░░░░░░░░] 7/0/56
 func printGPUMiniTable(w io.Writer, entries []gpuUsageEntry) {
 	if len(entries) == 0 {
 		return
@@ -370,44 +375,9 @@ func printGPUMiniTable(w io.Writer, entries []gpuUsageEntry) {
 
 	prefix := "│  "
 
-	// Compute type column width
-	typeW := 0
 	for _, e := range entries {
-		if len(e.Type) > typeW {
-			typeW = len(e.Type)
-		}
-	}
-
-	// Column definitions: header label and minimum width
-	headers := [4]string{"total", "grove", "other", "free"}
-	colW := [4]int{}
-	for i, h := range headers {
-		colW[i] = len(h)
-	}
-	for _, e := range entries {
-		vals := [4]int64{e.Total, e.ThisPCS, e.Other, e.Free}
-		for i, v := range vals {
-			if vw := len(fmt.Sprintf("%d", v)); vw > colW[i] {
-				colW[i] = vw
-			}
-		}
-	}
-
-	// Header row
-	fmt.Fprintf(w, "%s%*s", prefix, typeW, "")
-	for i, h := range headers {
-		fmt.Fprintf(w, "  %*s", colW[i], h)
-	}
-	fmt.Fprintln(w)
-
-	// Data rows
-	for _, e := range entries {
-		vals := [4]int64{e.Total, e.ThisPCS, e.Other, e.Free}
-		fmt.Fprintf(w, "%s%*s", prefix, typeW, e.Type)
-		for i, v := range vals {
-			fmt.Fprintf(w, "  %*d", colW[i], v)
-		}
-		fmt.Fprintln(w)
+		bar := data.FormatGPUBar(e.ThisPCS, e.Other, e.Total, 20)
+		fmt.Fprintf(w, "%s%s %s\n", prefix, e.Type, bar)
 	}
 }
 

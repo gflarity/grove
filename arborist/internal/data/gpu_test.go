@@ -17,7 +17,9 @@
 package data
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseGPUProductShortName(t *testing.T) {
@@ -442,6 +444,159 @@ func TestComputeDomainGPUSummary_ThreeWaySplit(t *testing.T) {
 	// Total: 8 + 8 = 16
 	if b01.Total != 16 {
 		t.Errorf("block-01 H200 Total = %d, want 16", b01.Total)
+	}
+}
+
+func TestFormatGPUBar(t *testing.T) {
+	tests := []struct {
+		name     string
+		grove    int64
+		other    int64
+		total    int64
+		barWidth int
+		wantBar  string // the bar portion between [ and ]
+		wantSuf  string // the numeric suffix after "] "
+	}{
+		{
+			name:     "normal grove only",
+			grove:    7,
+			other:    0,
+			total:    56,
+			barWidth: 20,
+			wantSuf:  "(7/0/56)",
+		},
+		{
+			name:     "mixed grove and other",
+			grove:    7,
+			other:    3,
+			total:    56,
+			barWidth: 20,
+			wantSuf:  "(7/3/56)",
+		},
+		{
+			name:     "all free",
+			grove:    0,
+			other:    0,
+			total:    56,
+			barWidth: 20,
+			wantSuf:  "(0/0/56)",
+		},
+		{
+			name:     "fully used by grove",
+			grove:    56,
+			other:    0,
+			total:    56,
+			barWidth: 20,
+			wantSuf:  "(56/0/56)",
+		},
+		{
+			name:     "overcommit",
+			grove:    60,
+			other:    0,
+			total:    56,
+			barWidth: 20,
+			wantSuf:  "(60/0/56)",
+		},
+		{
+			name:     "total zero",
+			grove:    0,
+			other:    0,
+			total:    0,
+			barWidth: 20,
+			wantSuf:  "(0/0/0)",
+		},
+		{
+			name:     "small bar width 1",
+			grove:    7,
+			other:    3,
+			total:    56,
+			barWidth: 1,
+			wantSuf:  "(7/3/56)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatGPUBar(tt.grove, tt.other, tt.total, tt.barWidth)
+
+			// Verify suffix
+			if !strings.HasSuffix(got, tt.wantSuf) {
+				t.Errorf("FormatGPUBar(%d, %d, %d, %d) = %q, want suffix %q",
+					tt.grove, tt.other, tt.total, tt.barWidth, got, tt.wantSuf)
+			}
+
+			// Verify bar is wrapped in brackets
+			if !strings.HasPrefix(got, "[") {
+				t.Errorf("bar should start with '[', got %q", got)
+			}
+			closeBracket := strings.Index(got, "]")
+			if closeBracket < 0 {
+				t.Fatalf("bar should contain ']', got %q", got)
+			}
+
+			// Extract bar content between brackets
+			barContent := got[len("["):closeBracket]
+			barRunes := utf8.RuneCountInString(barContent)
+			if barRunes != tt.barWidth {
+				t.Errorf("bar width = %d runes, want %d; bar=%q", barRunes, tt.barWidth, barContent)
+			}
+
+			// Count character types
+			groveCount := strings.Count(barContent, "▓")
+			otherCount := strings.Count(barContent, "░")
+			freeCount := strings.Count(barContent, " ")
+			if groveCount+otherCount+freeCount != tt.barWidth {
+				t.Errorf("bar segments sum = %d, want %d; bar=%q",
+					groveCount+otherCount+freeCount, tt.barWidth, barContent)
+			}
+		})
+	}
+}
+
+func TestFormatGPUBar_SegmentWidths(t *testing.T) {
+	// Verify rounding: segments must always sum to exactly barWidth
+	testCases := [][3]int64{
+		{1, 1, 3},
+		{1, 0, 3},
+		{0, 1, 3},
+		{33, 33, 100},
+		{1, 1, 100},
+		{99, 0, 100},
+		{0, 0, 100},
+	}
+	for _, tc := range testCases {
+		grove, other, total := tc[0], tc[1], tc[2]
+		for _, barWidth := range []int{1, 5, 10, 20, 30, 50} {
+			got := FormatGPUBar(grove, other, total, barWidth)
+			closeBracket := strings.Index(got, "]")
+			barContent := got[len("["):closeBracket]
+			barRunes := utf8.RuneCountInString(barContent)
+			if barRunes != barWidth {
+				t.Errorf("FormatGPUBar(%d, %d, %d, %d): bar width = %d, want %d; bar=%q",
+					grove, other, total, barWidth, barRunes, barWidth, barContent)
+			}
+		}
+	}
+}
+
+func TestFormatGPUBar_AllFreeWhenTotalZero(t *testing.T) {
+	got := FormatGPUBar(0, 0, 0, 10)
+	closeBracket := strings.Index(got, "]")
+	barContent := got[len("["):closeBracket]
+	// All should be free characters (space)
+	freeCount := strings.Count(barContent, " ")
+	if freeCount != 10 {
+		t.Errorf("expected 10 free chars for total=0, got %d; bar=%q", freeCount, barContent)
+	}
+}
+
+func TestFormatGPUBar_OvercommitNoFree(t *testing.T) {
+	got := FormatGPUBar(60, 10, 56, 20)
+	closeBracket := strings.Index(got, "]")
+	barContent := got[len("["):closeBracket]
+	freeCount := strings.Count(barContent, " ")
+	if freeCount != 0 {
+		t.Errorf("expected 0 free chars for overcommit, got %d; bar=%q", freeCount, barContent)
 	}
 }
 
