@@ -597,7 +597,7 @@ func TestPrintGPUMiniTable(t *testing.T) {
 			entries: []gpuUsageEntry{
 				{Type: "H200", ThisPCS: 2, Total: 8, Other: 1, Free: 5},
 			},
-			want: "│  H200 [▓▓▓▓▓░░             ] (2/1/8)\n",
+			want: "│  H200 [▓▓▓▓▓░░             ]¹ (2/1/8)²\n",
 		},
 		{
 			name: "multiple types",
@@ -605,8 +605,8 @@ func TestPrintGPUMiniTable(t *testing.T) {
 				{Type: "B200", ThisPCS: 7, Total: 56, Other: 3, Free: 46},
 				{Type: "H200", ThisPCS: 7, Total: 56, Other: 3, Free: 46},
 			},
-			want: "│  B200 [▓▓░                 ] (7/3/56)\n" +
-				"│  H200 [▓▓░                 ] (7/3/56)\n",
+			want: "│  B200 [▓▓░                 ]¹ (7/3/56)²\n" +
+				"│  H200 [▓▓░                 ]¹ (7/3/56)²\n",
 		},
 	}
 
@@ -649,10 +649,13 @@ func TestPrintTopologyTree_WithGPU(t *testing.T) {
 		"PodCliqueSets: my-pcs",
 		"",
 		"┌ block: block-0",
-		"│  H200 [▓▓▓▓▓░░             ] (2/1/8)",
+		"│  H200 [▓▓▓▓▓░░             ]¹ (2/1/8)²",
 		"├─ pcs-0-router-6whz7              [H200: 1]",
 		"├─ pcs-0-workers-0-worker-8szft    [H200: 1]",
 		"└─ pcs-1-coordinator-abc12",
+		"",
+		"  ¹ ▓ = grove  ░ = other  space = free",
+		"  ² (grove/other/total)",
 	}
 
 	if len(gotLines) != len(wantLines) {
@@ -834,9 +837,9 @@ func TestPrintGPUMiniTable_LargeNumbers(t *testing.T) {
 	printGPUMiniTable(&buf, entries)
 	got := buf.String()
 
-	// Should contain the numeric suffix with all values
-	if !strings.Contains(got, "(128/256/1024)") {
-		t.Errorf("expected '(128/256/1024)' in output, got:\n%s", got)
+	// Should contain the numeric suffix with all values and superscript
+	if !strings.Contains(got, "(128/256/1024)²") {
+		t.Errorf("expected '(128/256/1024)²' in output, got:\n%s", got)
 	}
 	// Should contain bar graph brackets
 	if !strings.Contains(got, "[") || !strings.Contains(got, "]") {
@@ -852,9 +855,9 @@ func TestPrintGPUMiniTable_ZeroValues(t *testing.T) {
 	printGPUMiniTable(&buf, entries)
 	got := buf.String()
 
-	// All free: bar should be all · (middle dots)
-	if !strings.Contains(got, "(0/0/8)") {
-		t.Errorf("expected '(0/0/8)' in output, got:\n%s", got)
+	// All free: bar should be all spaces
+	if !strings.Contains(got, "(0/0/8)²") {
+		t.Errorf("expected '(0/0/8)²' in output, got:\n%s", got)
 	}
 	if !strings.Contains(got, " ") {
 		t.Errorf("expected free characters (space) in bar, got:\n%s", got)
