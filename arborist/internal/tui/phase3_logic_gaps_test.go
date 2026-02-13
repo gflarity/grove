@@ -293,7 +293,7 @@ func TestRebuildEventsFromSnapshot_PodCliqueScalingGroupView_PCSGReplicaRow(t *t
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 	m.resourcesTable.SetRows([]table.Row{
-		{"default", "PodCliqueScalingGroupReplica", "my-pcsg-replica-0", "N/A", "1/1", "1/1"},
+		{"default", "(PodCliqueScalingGroup replica)", "my-pcsg-replica-0", "N/A", "1/1", "1/1"},
 	})
 	m.resourcesTable.SetCursor(0)
 
@@ -490,8 +490,8 @@ func TestRebuildEventsFromSnapshot_NilSnapshot(t *testing.T) {
 func TestGpuCountsForResource_PodCliqueScalingGroupReplica_Valid(t *testing.T) {
 	summary := &data.GPUSummary{
 		GPUTypes: []string{"H100"},
-		ByPCSG: map[string]data.GPUCounts{
-			"my-pcsg-replica-0": {"H100": 4},
+		ByPCSGReplica: map[string]data.GPUCounts{
+			"my-pcsg/0": {"H100": 4},
 		},
 	}
 
@@ -504,7 +504,7 @@ func TestGpuCountsForResource_PodCliqueScalingGroupReplica_Valid(t *testing.T) {
 
 	counts := m.gpuCountsForResource(data.Resource{
 		Name: "my-pcsg-replica-0",
-		Type: "PodCliqueScalingGroupReplica",
+		Type: "(PodCliqueScalingGroup replica)",
 	})
 
 	if counts == nil {
@@ -518,8 +518,8 @@ func TestGpuCountsForResource_PodCliqueScalingGroupReplica_Valid(t *testing.T) {
 func TestGpuCountsForResource_PodCliqueScalingGroupReplica_EmptyPCSGName(t *testing.T) {
 	summary := &data.GPUSummary{
 		GPUTypes: []string{"H100"},
-		ByPCSG: map[string]data.GPUCounts{
-			"my-pcsg-replica-0": {"H100": 4},
+		ByPCSGReplica: map[string]data.GPUCounts{
+			"my-pcsg/0": {"H100": 4},
 		},
 	}
 
@@ -532,23 +532,20 @@ func TestGpuCountsForResource_PodCliqueScalingGroupReplica_EmptyPCSGName(t *test
 
 	counts := m.gpuCountsForResource(data.Resource{
 		Name: "my-pcsg-replica-0",
-		Type: "PodCliqueScalingGroupReplica",
+		Type: "(PodCliqueScalingGroup replica)",
 	})
 
-	// Even with empty pcsgName, the code falls back to ByPCSG[r.Name]
-	if counts == nil {
-		t.Fatal("expected non-nil counts (fallback to ByPCSG[r.Name])")
-	}
-	if counts["H100"] != 4 {
-		t.Errorf("expected fallback H100=4, got %d", counts["H100"])
+	// With empty pcsgName, key construction fails — returns nil
+	if counts != nil {
+		t.Fatal("expected nil counts when SelectedScalingGroup is empty")
 	}
 }
 
 func TestGpuCountsForResource_PodCliqueScalingGroupReplica_BadReplicaIndex(t *testing.T) {
 	summary := &data.GPUSummary{
 		GPUTypes: []string{"H100"},
-		ByPCSG: map[string]data.GPUCounts{
-			"my-pcsg-no-replica-suffix": {"H100": 2},
+		ByPCSGReplica: map[string]data.GPUCounts{
+			"my-pcsg/0": {"H100": 2},
 		},
 	}
 
@@ -562,15 +559,12 @@ func TestGpuCountsForResource_PodCliqueScalingGroupReplica_BadReplicaIndex(t *te
 	// Name without "-replica-" suffix — extractReplicaIndex returns ""
 	counts := m.gpuCountsForResource(data.Resource{
 		Name: "my-pcsg-no-replica-suffix",
-		Type: "PodCliqueScalingGroupReplica",
+		Type: "(PodCliqueScalingGroup replica)",
 	})
 
-	// Falls back to ByPCSG[r.Name]
-	if counts == nil {
-		t.Fatal("expected non-nil counts (fallback)")
-	}
-	if counts["H100"] != 2 {
-		t.Errorf("expected fallback H100=2, got %d", counts["H100"])
+	// With bad replica index, key construction fails — returns nil
+	if counts != nil {
+		t.Fatal("expected nil counts when replica index cannot be extracted")
 	}
 }
 
@@ -589,7 +583,7 @@ func TestGpuCountsForResource_PodCliqueSetReplica_EmptyPCSName(t *testing.T) {
 
 	counts := m.gpuCountsForResource(data.Resource{
 		Name: "pcs-a-replica-0",
-		Type: "PodCliqueSetReplica",
+		Type: "(PodCliqueSet replica)",
 	})
 
 	// pcsName is "" so the lookup key is "/0" → no match → nil
@@ -614,7 +608,7 @@ func TestGpuCountsForResource_PodCliqueSetReplica_BadReplicaIndex(t *testing.T) 
 	// Name without "-replica-" => replicaIndex = "" => short-circuit, return nil
 	counts := m.gpuCountsForResource(data.Resource{
 		Name: "pcs-a-no-replica",
-		Type: "PodCliqueSetReplica",
+		Type: "(PodCliqueSet replica)",
 	})
 
 	if counts != nil {

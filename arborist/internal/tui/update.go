@@ -416,10 +416,10 @@ func (m Model) openYAMLOverlay() (tea.Model, tea.Cmd) {
 	actualType := resourceType
 	actualName := resourceName
 	switch resourceType {
-	case "PodCliqueSetReplica":
+	case "(PodCliqueSet replica)":
 		actualType = "PodCliqueSet"
 		actualName = m.viewState.SelectedPodCliqueSet
-	case "PodCliqueScalingGroupReplica":
+	case "(PodCliqueScalingGroup replica)":
 		actualType = "PodCliqueScalingGroup"
 		actualName = m.viewState.SelectedScalingGroup
 	}

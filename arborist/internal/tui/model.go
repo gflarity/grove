@@ -595,7 +595,7 @@ func (m *Model) gpuCountsForResource(r data.Resource) data.GPUCounts {
 	switch r.Type {
 	case "PodCliqueSet":
 		return m.gpuSummary.ByPCS[r.Name]
-	case "PodCliqueSetReplica":
+	case "(PodCliqueSet replica)":
 		// Name format: "pcsName-replica-INDEX" — extract pcsName and index
 		pcsName := m.viewState.SelectedPodCliqueSet
 		replicaIndex := extractReplicaIndex(r.Name)
@@ -604,16 +604,13 @@ func (m *Model) gpuCountsForResource(r data.Resource) data.GPUCounts {
 		}
 	case "PodCliqueScalingGroup":
 		return m.gpuSummary.ByPCSG[r.Name]
-	case "PodCliqueScalingGroupReplica":
-		// For PCSG replicas, aggregate from PodCliques within the replica
-		// The PCSG name is the parent
+	case "(PodCliqueScalingGroup replica)":
+		// Name format: "pcsgName-replica-INDEX" — extract pcsgName and index
 		pcsgName := m.viewState.SelectedScalingGroup
 		replicaIndex := extractReplicaIndex(r.Name)
 		if pcsgName != "" && replicaIndex != "" {
-			return m.gpuSummary.ByPCSG[r.Name]
+			return m.gpuSummary.ByPCSGReplica[pcsgName+"/"+replicaIndex]
 		}
-		// Fall back to PCSG-level if we can't decompose
-		return m.gpuSummary.ByPCSG[r.Name]
 	case "PodClique":
 		return m.gpuSummary.ByPodClique[r.Name]
 	case "Pod":

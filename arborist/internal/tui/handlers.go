@@ -162,7 +162,7 @@ func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
 
 			replicaResources = append(replicaResources, data.Resource{
 				Name:       fmt.Sprintf("%s-replica-%s", pcsName, ri),
-				Type:       "PodCliqueSetReplica",
+				Type:       "(PodCliqueSet replica)",
 				Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
 				Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
 				Namespace:  namespace,
@@ -241,7 +241,7 @@ func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
 				}
 				pcsgReplicaResources = append(pcsgReplicaResources, data.Resource{
 					Name:       fmt.Sprintf("%s-replica-%s", pcsgName, ri),
-					Type:       "PodCliqueScalingGroupReplica",
+					Type:       "(PodCliqueScalingGroup replica)",
 					Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
 					Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
 					Namespace:  namespace,
@@ -352,7 +352,7 @@ func (m *Model) rebuildEventsFromSnapshot(snapshot *data.CacheSnapshot) {
 	case data.PodCliqueSetView:
 		// Show events for the selected replica
 		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 3 && selectedRow[1] == "PodCliqueSetReplica" {
+		if len(selectedRow) >= 3 && selectedRow[1] == "(PodCliqueSet replica)" {
 			replicaIndex := extractReplicaIndex(selectedRow[2])
 			m.allEvents = snapshot.GetEventsForReplica(m.viewState.SelectedPodCliqueSet, replicaIndex)
 		} else {
@@ -377,7 +377,7 @@ func (m *Model) rebuildEventsFromSnapshot(snapshot *data.CacheSnapshot) {
 
 	case data.PodCliqueScalingGroupView:
 		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 3 && selectedRow[1] == "PodCliqueScalingGroupReplica" {
+		if len(selectedRow) >= 3 && selectedRow[1] == "(PodCliqueScalingGroup replica)" {
 			replicaIndex := extractReplicaIndex(selectedRow[2])
 			m.allEvents = snapshot.GetEventsForPCSGReplica(m.viewState.SelectedScalingGroup, replicaIndex)
 		} else {
@@ -463,7 +463,7 @@ func (m *Model) rebuildFlatDrillInResources(snapshot *data.CacheSnapshot) {
 				}
 				pcsgReplicaResources = append(pcsgReplicaResources, data.Resource{
 					Name:       fmt.Sprintf("%s-replica-%s", pcsgName, ri),
-					Type:       "PodCliqueScalingGroupReplica",
+					Type:       "(PodCliqueScalingGroup replica)",
 					Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
 					Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
 					Namespace:  namespace,

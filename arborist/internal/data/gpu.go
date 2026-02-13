@@ -35,6 +35,8 @@ type GPUSummary struct {
 	ByPodClique map[string]GPUCounts
 	// ByPCSG maps pcsgName -> GPUCounts
 	ByPCSG map[string]GPUCounts
+	// ByPCSGReplica maps "pcsgName/replicaIndex" -> GPUCounts
+	ByPCSGReplica map[string]GPUCounts
 	// ByReplica maps "pcsName/replicaIndex" -> GPUCounts
 	ByReplica map[string]GPUCounts
 	// ByPCS maps pcsName -> GPUCounts
@@ -72,6 +74,7 @@ func BuildGPUSummary(pods []TopologyPodInput, nodeGPUProduct map[string]string) 
 		ByPod:          make(map[string]GPUCounts),
 		ByPodClique:    make(map[string]GPUCounts),
 		ByPCSG:         make(map[string]GPUCounts),
+		ByPCSGReplica:  make(map[string]GPUCounts),
 		ByReplica:      make(map[string]GPUCounts),
 		ByPCS:          make(map[string]GPUCounts),
 		PendingGPUPods: make(map[string]int64),
@@ -131,6 +134,13 @@ func BuildGPUSummary(pods []TopologyPodInput, nodeGPUProduct map[string]string) 
 		// Attribute to PCSG level
 		if pcsgName != "" {
 			addGPUCount(summary.ByPCSG, pcsgName, gpuType, count)
+		}
+
+		// Attribute to PCSG Replica level (pcsgName/pcsgReplicaIndex)
+		pcsgReplicaIndex := pod.Labels["grove.io/podcliquescalinggroup-replica-index"]
+		if pcsgName != "" && pcsgReplicaIndex != "" {
+			pcsgReplicaKey := pcsgName + "/" + pcsgReplicaIndex
+			addGPUCount(summary.ByPCSGReplica, pcsgReplicaKey, gpuType, count)
 		}
 
 		// Attribute to Replica level (pcsName/replicaIndex)

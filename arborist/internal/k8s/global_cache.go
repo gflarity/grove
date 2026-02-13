@@ -532,6 +532,17 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 			}
 		}
 	}
+	// Also populate from PCS specs — ensures replicas are visible even when
+	// child resources (PCSGs/PodCliques) haven't been created yet or haven't
+	// synced to the informer cache.
+	for pcsName, pcs := range pcsSpecs {
+		for i := int32(0); i < pcs.Spec.Replicas; i++ {
+			ri := fmt.Sprintf("%d", i)
+			if !containsString(replicaIndexesByPCS[pcsName], ri) {
+				replicaIndexesByPCS[pcsName] = append(replicaIndexesByPCS[pcsName], ri)
+			}
+		}
+	}
 	for k, v := range replicaIndexesByPCS {
 		sort.Strings(v)
 		replicaIndexesByPCS[k] = v
@@ -692,7 +703,7 @@ func (c *InformerGlobalCache) convertPCSGsToResources(
 			Scheduled:  fmt.Sprintf("%d/%d", scheduledReplicas, replicas),
 			Status:     "",
 			Namespace:  pcsg.Namespace,
-			ParentType: "PodCliqueSetReplica",
+			ParentType: "(PodCliqueSet replica)",
 			ParentName: fmt.Sprintf("%s-replica-%s", pcsName, replicaIndex),
 		})
 	}
@@ -799,7 +810,7 @@ func (c *InformerGlobalCache) readPodCliques(scheduledByPodClique map[string]int
 			if pcsgReplicaIndex != "" {
 				pcsgReplicaKey := pcsgName + "/" + pcsgReplicaIndex
 				replicaResource := resource
-				replicaResource.ParentType = "PodCliqueScalingGroupReplica"
+				replicaResource.ParentType = "(PodCliqueScalingGroup replica)"
 				replicaResource.ParentName = fmt.Sprintf("%s-replica-%s", pcsgName, pcsgReplicaIndex)
 				byPCSGReplica[pcsgReplicaKey] = append(byPCSGReplica[pcsgReplicaKey], replicaResource)
 
@@ -807,7 +818,7 @@ func (c *InformerGlobalCache) readPodCliques(scheduledByPodClique map[string]int
 			}
 		} else if pcsName != "" && replicaIndex != "" {
 			// Standalone PodClique directly under PCS replica
-			resource.ParentType = "PodCliqueSetReplica"
+			resource.ParentType = "(PodCliqueSet replica)"
 			resource.ParentName = fmt.Sprintf("%s-replica-%s", pcsName, replicaIndex)
 			key := pcsName + "/" + replicaIndex
 			byReplica[key] = append(byReplica[key], resource)

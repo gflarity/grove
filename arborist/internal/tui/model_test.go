@@ -913,7 +913,7 @@ func TestViewStateNavigationFullCycle(t *testing.T) {
 	// PodCliqueSetReplicaView -> Esc -> ForestView (single replica)
 	// Need allResources with single replica entry for the skip logic
 	m.allResources["PodCliqueSet/alpha-pcs"] = []data.Resource{{
-		Name: "alpha-pcs-replica-0", Type: "PodCliqueSetReplica", Namespace: "default",
+		Name: "alpha-pcs-replica-0", Type: "(PodCliqueSet replica)", Namespace: "default",
 	}}
 	m = sendKey(m, tea.KeyEsc)
 	if m.viewState.ViewType != data.ForestView {
@@ -1002,8 +1002,8 @@ func TestNavigateBackFromPCSGReplicaView_MultiReplica(t *testing.T) {
 	}
 	// Store 2 PCSG replicas (so it won't skip back)
 	m.allResources["PodCliqueScalingGroup/my-pcsg"] = []data.Resource{
-		{Name: "my-pcsg-replica-0", Type: "PodCliqueScalingGroupReplica", Namespace: "default"},
-		{Name: "my-pcsg-replica-1", Type: "PodCliqueScalingGroupReplica", Namespace: "default"},
+		{Name: "my-pcsg-replica-0", Type: "(PodCliqueScalingGroup replica)", Namespace: "default"},
+		{Name: "my-pcsg-replica-1", Type: "(PodCliqueScalingGroup replica)", Namespace: "default"},
 	}
 
 	m = sendKey(m, tea.KeyEsc)
@@ -3183,7 +3183,7 @@ func TestYAMLOverlay_VirtualTypeResolvesToParent(t *testing.T) {
 
 	// First row should be a PodCliqueSetReplica
 	selectedRow := m.resourcesTable.SelectedRow()
-	if len(selectedRow) < 2 || selectedRow[1] != "PodCliqueSetReplica" {
+	if len(selectedRow) < 2 || selectedRow[1] != "(PodCliqueSet replica)" {
 		t.Fatalf("expected PodCliqueSetReplica selected, got %v", selectedRow)
 	}
 
@@ -3195,7 +3195,7 @@ func TestYAMLOverlay_VirtualTypeResolvesToParent(t *testing.T) {
 	}
 	// yamlResourceType records the table's type (for display), but the actual
 	// fetch resolves to the parent PodCliqueSet
-	if m.yamlResourceType != "PodCliqueSetReplica" {
+	if m.yamlResourceType != "(PodCliqueSet replica)" {
 		t.Fatalf("expected yamlResourceType='PodCliqueSetReplica', got %q", m.yamlResourceType)
 	}
 	if cmd == nil {

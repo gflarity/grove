@@ -51,7 +51,7 @@ type GlobalCache interface {
 
 	// GetResourceYAML fetches any resource's YAML by type and name.
 	// Supported types: "PodCliqueSet", "PodCliqueScalingGroup", "PodClique", "Pod".
-	// For virtual types like "PodCliqueSetReplica", callers should resolve to the parent.
+	// For virtual types like "(PodCliqueSet replica)", callers should resolve to the parent.
 	GetResourceYAML(ctx context.Context, resourceType, name, namespace string) (string, error)
 }
 
