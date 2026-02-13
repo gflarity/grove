@@ -90,6 +90,29 @@ func (k *K8sClient) NewGlobalCache(opts ...GlobalCacheOption) data.GlobalCache {
 	return NewInformerGlobalCache(k.clientset, k.dynamicClient, opts...)
 }
 
+// CheckGroveCRDs verifies that the core Grove CRDs (PodCliqueSet, PodCliqueScalingGroup,
+// PodClique) are registered on the API server. Returns a list of missing resource names,
+// or nil if all are present.
+func (k *K8sClient) CheckGroveCRDs() []string {
+	required := []string{"podcliquesets", "podcliquescalinggroups", "podcliques"}
+	resourceList, err := k.clientset.Discovery().ServerResourcesForGroupVersion("grove.io/v1alpha1")
+	if err != nil {
+		// API group not found at all — all CRDs missing
+		return required
+	}
+	found := make(map[string]bool)
+	for _, r := range resourceList.APIResources {
+		found[r.Name] = true
+	}
+	var missing []string
+	for _, name := range required {
+		if !found[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 // GetServerVersion returns the Kubernetes server version string (e.g. "v1.33.5+k3s1").
 // Returns "(unknown)" if the version cannot be determined.
 func (k *K8sClient) GetServerVersion() string {

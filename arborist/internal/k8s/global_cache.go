@@ -145,9 +145,11 @@ type InformerGlobalCache struct {
 	// Optional warning callback for non-fatal startup issues.
 	onWarning func(string)
 
-	// topologyCRDAvailable tracks whether the ClusterTopology CRD was found
-	// during Start(). When false, the ctInformer is nil and topology features
-	// are gracefully unavailable.
+	// CRD availability flags — set during Start() by checking the Discovery API.
+	// When false, the corresponding informer is nil and features degrade gracefully.
+	pcsAvailable         bool
+	pcsgAvailable        bool
+	pcAvailable          bool
 	topologyCRDAvailable bool
 }
 
@@ -229,24 +231,42 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 	c.podInformer = c.podInformerFactory.Core().V1().Pods().Informer()
 	c.eventInformer = c.eventInformerFactory.Core().V1().Events().Informer()
 
-	// Dynamic informers for namespace-scoped CRDs
-	c.pcsInformer = c.dynamicFactory.ForResource(globalPcsGVR).Informer()
-	c.pcsgInformer = c.dynamicFactory.ForResource(globalPcsgGVR).Informer()
-	c.pcInformer = c.dynamicFactory.ForResource(globalPcGVR).Informer()
+	// Check which Grove CRDs are available before creating dynamic informers.
+	// All core CRDs share the grove.io/v1alpha1 group, so one Discovery call
+	// covers PCS, PCSG, PC, and ClusterTopology.
+	groveAvailable := c.checkGroveCRDsAvailable()
+	c.pcsAvailable = groveAvailable[globalPcsGVR.Resource]
+	c.pcsgAvailable = groveAvailable[globalPcsgGVR.Resource]
+	c.pcAvailable = groveAvailable[globalPcGVR.Resource]
+	c.topologyCRDAvailable = groveAvailable[globalClusterTopologyGVR.Resource]
 
-	// ClusterTopology informer — check if the CRD exists first to avoid
-	// noisy reflector errors when it doesn't.
-	c.topologyCRDAvailable = c.checkCRDExists(globalClusterTopologyGVR)
+	// Dynamic informers for namespace-scoped CRDs — only create if CRD exists
+	// to avoid noisy reflector errors when CRDs aren't installed.
+	if c.pcsAvailable {
+		c.pcsInformer = c.dynamicFactory.ForResource(globalPcsGVR).Informer()
+	} else if c.onWarning != nil {
+		c.onWarning("PodCliqueSet CRD not found — PCS data unavailable")
+	}
+	if c.pcsgAvailable {
+		c.pcsgInformer = c.dynamicFactory.ForResource(globalPcsgGVR).Informer()
+	} else if c.onWarning != nil {
+		c.onWarning("PodCliqueScalingGroup CRD not found — PCSG data unavailable")
+	}
+	if c.pcAvailable {
+		c.pcInformer = c.dynamicFactory.ForResource(globalPcGVR).Informer()
+	} else if c.onWarning != nil {
+		c.onWarning("PodClique CRD not found — PC data unavailable")
+	}
+
+	// ClusterTopology informer — cluster-scoped, needs its own factory.
 	if c.topologyCRDAvailable {
 		c.clusterDynamicFactory = dynamicinformer.NewDynamicSharedInformerFactory(
 			c.dynamicClient,
 			0,
 		)
 		c.ctInformer = c.clusterDynamicFactory.ForResource(globalClusterTopologyGVR).Informer()
-	} else {
-		if c.onWarning != nil {
-			c.onWarning("ClusterTopology CRD not found — topology view unavailable")
-		}
+	} else if c.onWarning != nil {
+		c.onWarning("ClusterTopology CRD not found — topology view unavailable")
 	}
 
 	// Register event handlers on all informers
@@ -262,12 +282,18 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 	c.podInformer.AddEventHandler(handler)
 	//nolint:errcheck
 	c.eventInformer.AddEventHandler(handler)
-	//nolint:errcheck
-	c.pcsInformer.AddEventHandler(handler)
-	//nolint:errcheck
-	c.pcsgInformer.AddEventHandler(handler)
-	//nolint:errcheck
-	c.pcInformer.AddEventHandler(handler)
+	if c.pcsInformer != nil {
+		//nolint:errcheck
+		c.pcsInformer.AddEventHandler(handler)
+	}
+	if c.pcsgInformer != nil {
+		//nolint:errcheck
+		c.pcsgInformer.AddEventHandler(handler)
+	}
+	if c.pcInformer != nil {
+		//nolint:errcheck
+		c.pcInformer.AddEventHandler(handler)
+	}
 	if c.ctInformer != nil {
 		//nolint:errcheck
 		c.ctInformer.AddEventHandler(handler)
@@ -293,9 +319,15 @@ func (c *InformerGlobalCache) WaitForSync(ctx context.Context) bool {
 		c.nodeInformer.HasSynced,
 		c.podInformer.HasSynced,
 		c.eventInformer.HasSynced,
-		c.pcsInformer.HasSynced,
-		c.pcsgInformer.HasSynced,
-		c.pcInformer.HasSynced,
+	}
+	if c.pcsInformer != nil {
+		syncFuncs = append(syncFuncs, c.pcsInformer.HasSynced)
+	}
+	if c.pcsgInformer != nil {
+		syncFuncs = append(syncFuncs, c.pcsgInformer.HasSynced)
+	}
+	if c.pcInformer != nil {
+		syncFuncs = append(syncFuncs, c.pcInformer.HasSynced)
 	}
 	if c.ctInformer != nil {
 		syncFuncs = append(syncFuncs, c.ctInformer.HasSynced)
@@ -596,11 +628,17 @@ func (c *InformerGlobalCache) readNodeLabels(topologyKeys map[string]bool) nodeR
 
 // readPCSSpecs reads all PodCliqueSet specs from the informer cache.
 func (c *InformerGlobalCache) readPCSSpecs() map[string]*corev1alpha1.PodCliqueSet {
+	if c.pcsInformer == nil {
+		return nil
+	}
 	return readPCSSpecsFromInformer(c.pcsInformer)
 }
 
 // readPCSGs reads all PodCliqueScalingGroups from the informer cache and groups them by PCS replica.
 func (c *InformerGlobalCache) readPCSGs() (map[string][]*corev1alpha1.PodCliqueScalingGroup, []*corev1alpha1.PodCliqueScalingGroup) {
+	if c.pcsgInformer == nil {
+		return nil, nil
+	}
 	items := c.pcsgInformer.GetStore().List()
 	byReplica := make(map[string][]*corev1alpha1.PodCliqueScalingGroup)
 	var allPCSGs []*corev1alpha1.PodCliqueScalingGroup
@@ -709,6 +747,11 @@ func (c *InformerGlobalCache) readPodCliques(scheduledByPodClique map[string]int
 	pcObjectsByPCSGReplica map[string][]*corev1alpha1.PodClique, // "pcsgName/replicaIndex" -> PodClique objects
 	standalonePCObjects map[string][]*corev1alpha1.PodClique, // "pcsName/replicaIndex" -> standalone PodClique objects
 ) {
+	if c.pcInformer == nil {
+		return make(map[string][]data.Resource), make(map[string][]data.Resource),
+			make(map[string][]data.Resource), make(map[string][]*corev1alpha1.PodClique),
+			make(map[string][]*corev1alpha1.PodClique)
+	}
 	items := c.pcInformer.GetStore().List()
 	byReplica = make(map[string][]data.Resource)
 	byPCSG = make(map[string][]data.Resource)
@@ -957,6 +1000,21 @@ func containsString(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// checkGroveCRDsAvailable makes a single Discovery call for the grove.io/v1alpha1
+// API group and returns a map of resource name → available for all resources found.
+func (c *InformerGlobalCache) checkGroveCRDsAvailable() map[string]bool {
+	result := make(map[string]bool)
+	resourceList, err := c.clientset.Discovery().ServerResourcesForGroupVersion("grove.io/v1alpha1")
+	if err != nil {
+		// API group not found — no Grove CRDs installed
+		return result
+	}
+	for _, r := range resourceList.APIResources {
+		result[r.Name] = true
+	}
+	return result
 }
 
 // checkCRDExists uses the discovery API to check whether a given GVR's resource

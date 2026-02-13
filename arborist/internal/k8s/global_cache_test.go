@@ -34,6 +34,22 @@ func newGlobalFakeScheme() *runtime.Scheme {
 	return scheme
 }
 
+// newFakeClientset creates a kubefake.Clientset with the Grove CRD resources
+// registered in the fake discovery so that checkGroveCRDsAvailable() finds them.
+func newFakeClientset(objects ...runtime.Object) *kubefake.Clientset {
+	cs := kubefake.NewSimpleClientset(objects...)
+	cs.Resources = append(cs.Resources, &metav1.APIResourceList{
+		GroupVersion: "grove.io/v1alpha1",
+		APIResources: []metav1.APIResource{
+			{Name: "podcliquesets", Kind: "PodCliqueSet", Namespaced: true},
+			{Name: "podcliquescalinggroups", Kind: "PodCliqueScalingGroup", Namespaced: true},
+			{Name: "podcliques", Kind: "PodClique", Namespaced: true},
+			{Name: "clustertopologies", Kind: "ClusterTopology"},
+		},
+	})
+	return cs
+}
+
 // toUnstructuredObj converts a typed object to Unstructured with the given GVK.
 func toUnstructuredObj(obj interface{}, group, version, kind string) *unstructured.Unstructured {
 	raw, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
@@ -47,7 +63,7 @@ func toUnstructuredObj(obj interface{}, group, version, kind string) *unstructur
 // ---------------------------------------------------------------------------
 
 func TestInformerGlobalCache_StartAndSync(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
+	clientset := newFakeClientset()
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient)
@@ -66,7 +82,7 @@ func TestInformerGlobalCache_StartAndSync(t *testing.T) {
 }
 
 func TestInformerGlobalCache_SnapshotNilBeforeStart(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
+	clientset := newFakeClientset()
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient)
@@ -77,7 +93,7 @@ func TestInformerGlobalCache_SnapshotNilBeforeStart(t *testing.T) {
 }
 
 func TestInformerGlobalCache_StopClosesChannel(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
+	clientset := newFakeClientset()
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient)
@@ -106,7 +122,7 @@ func TestInformerGlobalCache_StopClosesChannel(t *testing.T) {
 }
 
 func TestInformerGlobalCache_DoubleStopSafe(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
+	clientset := newFakeClientset()
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient)
@@ -125,7 +141,7 @@ func TestInformerGlobalCache_DoubleStopSafe(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestInformerGlobalCache_EmptyCluster(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
+	clientset := newFakeClientset()
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient)
@@ -206,7 +222,7 @@ func TestInformerGlobalCache_RebuildSnapshot(t *testing.T) {
 		LastTimestamp: metav1.NewTime(time.Now().Add(-10 * time.Second)),
 	}
 
-	clientset := kubefake.NewSimpleClientset(node1, pod1, event1)
+	clientset := newFakeClientset(node1, pod1, event1)
 
 	ct := &corev1alpha1.ClusterTopology{
 		ObjectMeta: metav1.ObjectMeta{Name: corev1alpha1.DefaultClusterTopologyName},
@@ -423,7 +439,7 @@ func TestInformerGlobalCache_GetPodYAML(t *testing.T) {
 		},
 	}
 
-	clientset := kubefake.NewSimpleClientset(pod)
+	clientset := newFakeClientset(pod)
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient)
@@ -459,7 +475,7 @@ func TestInformerGlobalCache_GetPodYAML(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestInformerGlobalCache_DebounceCoalesces(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
+	clientset := newFakeClientset()
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient)
@@ -530,7 +546,7 @@ func TestInformerGlobalCache_PendingPodStatus(t *testing.T) {
 		Spec:       corev1alpha1.PodCliqueSetSpec{Replicas: 1},
 	}
 
-	clientset := kubefake.NewSimpleClientset(pod)
+	clientset := newFakeClientset(pod)
 	dynClient := dynamicfake.NewSimpleDynamicClient(
 		newGlobalFakeScheme(),
 		toUnstructuredObj(pcs, "grove.io", "v1alpha1", "PodCliqueSet"),
@@ -606,7 +622,7 @@ func TestInformerGlobalCache_OldEventsFiltered(t *testing.T) {
 		LastTimestamp: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
 	}
 
-	clientset := kubefake.NewSimpleClientset(oldEvent, recentEvent)
+	clientset := newFakeClientset(oldEvent, recentEvent)
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient)
@@ -896,7 +912,7 @@ func TestComputePCSScheduledReplicas(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWithCacheNamespace_SetsField(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
+	clientset := newFakeClientset()
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	gc := NewInformerGlobalCache(clientset, dynClient, WithCacheNamespace("test-ns"))
@@ -906,7 +922,7 @@ func TestWithCacheNamespace_SetsField(t *testing.T) {
 }
 
 func TestWithCacheNamespace_EmptyIsClusterWide(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
+	clientset := newFakeClientset()
 	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 
 	// No options
@@ -1004,7 +1020,7 @@ func newNamespacedTestData() namespacedTestData {
 		LastTimestamp:   metav1.NewTime(time.Now().Add(-5 * time.Second)),
 	}
 
-	clientset := kubefake.NewSimpleClientset(node1, podTestNS, podOtherNS, eventTestNS, eventOtherNS)
+	clientset := newFakeClientset(node1, podTestNS, podOtherNS, eventTestNS, eventOtherNS)
 
 	// ClusterTopology (cluster-scoped)
 	ct := &corev1alpha1.ClusterTopology{
@@ -1423,7 +1439,7 @@ func TestBuildCacheOptions_NamespacePassedToGlobalCache(t *testing.T) {
 				opts = append(opts, WithCacheNamespace(tt.namespace))
 			}
 
-			clientset := kubefake.NewSimpleClientset()
+			clientset := newFakeClientset()
 			dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
 			gc := NewInformerGlobalCache(clientset, dynClient, opts...)
 
