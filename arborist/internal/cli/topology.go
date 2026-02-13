@@ -377,6 +377,9 @@ func printGPUMiniTable(w io.Writer, entries []gpuUsageEntry) {
 
 	for _, e := range entries {
 		bar := data.FormatGPUBar(e.ThisPCS, e.Other, e.Total, 20)
+		// Add superscript annotations: ¹ after bar graph, ² after numbers
+		bar = strings.Replace(bar, "] (", "]¹ (", 1)
+		bar += "²"
 		fmt.Fprintf(w, "%s%s %s\n", prefix, e.Type, bar)
 	}
 }
@@ -415,6 +418,20 @@ func printTopologyTree(
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "┌ <unscheduled>\n")
 		printPodListWithGPU(w, unscheduled)
+	}
+
+	// Legend for GPU bar graph annotations
+	hasGPU := false
+	for _, g := range groups {
+		if len(g.GPUUsage) > 0 {
+			hasGPU = true
+			break
+		}
+	}
+	if hasGPU {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  ¹ ▓ = grove  ░ = other  space = free")
+		fmt.Fprintln(w, "  ² (grove/other/total)")
 	}
 }
 
