@@ -66,6 +66,10 @@ func (c *ForestCmd) Run(globals *CLI) error {
 		allNamespaces = false
 	}
 
+	// Resolve kubeconfig context/cluster/user for the header display
+	contextName, clusterName := k8s.ResolveCurrentContext()
+	userName := k8s.ResolveCurrentUser()
+
 	// Initialize Kubernetes client
 	tui.DebugLog("initializing Kubernetes client")
 	var globalCache data.GlobalCache
@@ -75,6 +79,19 @@ func (c *ForestCmd) Run(globals *CLI) error {
 		// globalCache stays nil — the TUI will show empty data
 	} else {
 		tui.DebugLog("Kubernetes client initialized successfully")
+
+		// Pre-flight: verify Grove CRDs are installed before starting the TUI.
+		// Without this, missing CRDs cause client-go reflector errors that
+		// interleave with alt-screen rendering, producing unreadable output.
+		if missing := k8sClient.CheckGroveCRDs(); len(missing) > 0 {
+			fmt.Fprintf(os.Stderr, "Error: Grove CRDs not found on cluster %q:\n", clusterName)
+			for _, name := range missing {
+				fmt.Fprintf(os.Stderr, "  - %s.grove.io not found\n", name)
+			}
+			fmt.Fprintln(os.Stderr, "\nPlease install Grove operator CRDs before using arborist.")
+			return fmt.Errorf("missing Grove CRDs")
+		}
+
 		var cacheOpts []k8s.GlobalCacheOption
 		if namespace != "" {
 			cacheOpts = append(cacheOpts, k8s.WithCacheNamespace(namespace))
@@ -82,10 +99,6 @@ func (c *ForestCmd) Run(globals *CLI) error {
 		globalCache = k8sClient.NewGlobalCache(cacheOpts...)
 		tui.DebugLog("global cache created (namespace=%q)", namespace)
 	}
-
-	// Resolve kubeconfig context/cluster/user for the header display
-	contextName, clusterName := k8s.ResolveCurrentContext()
-	userName := k8s.ResolveCurrentUser()
 	tui.DebugLog("resolved kubeconfig context=%s cluster=%s user=%s", contextName, clusterName, userName)
 
 	// Resolve K8s server version
