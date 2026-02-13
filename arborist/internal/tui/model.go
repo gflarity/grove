@@ -525,10 +525,10 @@ func (m *Model) rebuildResourcesTable() {
 }
 
 // buildResourceColumnSpecs builds the column spec for the resources table,
-// inserting dynamic GPU columns between READY and SCHEDULED/PHASE.
+// inserting dynamic GPU columns between TOPOLOGY and READY.
 // The TOPOLOGY column is only included when topology data is available.
 func (m *Model) buildResourceColumnSpecs(gpuTypes []string, lastColTitle string) []ColumnSpec {
-	// Base columns: NAMESPACE, TYPE, NAME, [TOPOLOGY], READY
+	// Base columns: NAMESPACE, TYPE, NAME, [TOPOLOGY], [GPU types], READY
 	specs := []ColumnSpec{
 		{Title: "NAMESPACE", Weight: 2},
 		{Title: "TYPE", Weight: 3},
@@ -537,12 +537,13 @@ func (m *Model) buildResourceColumnSpecs(gpuTypes []string, lastColTitle string)
 	if m.topologyColumnVisible() {
 		specs = append(specs, ColumnSpec{Title: "TOPOLOGY", Weight: 3})
 	}
-	specs = append(specs, ColumnSpec{Title: "READY", Weight: 2})
 
 	// GPU type columns (one per discovered GPU type)
 	for _, gpuType := range gpuTypes {
 		specs = append(specs, ColumnSpec{Title: gpuType, Weight: 1})
 	}
+
+	specs = append(specs, ColumnSpec{Title: "READY", Weight: 2})
 
 	// Final column: SCHEDULED or PHASE
 	specs = append(specs, ColumnSpec{Title: lastColTitle, Weight: 2})
@@ -551,14 +552,13 @@ func (m *Model) buildResourceColumnSpecs(gpuTypes []string, lastColTitle string)
 }
 
 // colorizeResourceRowWithGPU returns plain text for each column value including GPU columns.
-// The row format is: [Namespace, Type, Name, [Topology], Ready, <gpu1>, <gpu2>, ..., Scheduled]
+// The row format is: [Namespace, Type, Name, [Topology], <gpu1>, <gpu2>, ..., Ready, Scheduled]
 // The Topology field is only included when topology data is available.
 func (m *Model) colorizeResourceRowWithGPU(r data.Resource, gpuTypes []string) []string {
 	row := []string{r.Namespace, r.Type, r.Name}
 	if m.topologyColumnVisible() {
 		row = append(row, r.Topology)
 	}
-	row = append(row, r.Ready)
 
 	// Add GPU count values
 	if len(gpuTypes) > 0 {
@@ -581,6 +581,7 @@ func (m *Model) colorizeResourceRowWithGPU(r data.Resource, gpuTypes []string) [
 		}
 	}
 
+	row = append(row, r.Ready)
 	row = append(row, r.Scheduled)
 	return row
 }
