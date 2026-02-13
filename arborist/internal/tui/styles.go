@@ -168,7 +168,7 @@ var (
 
 var TypeColors = map[string]lipgloss.Color{
 	"PodCliqueSet":          ColorDodgerBlue,    // dodgerblue
-	"PodCliqueSetReplica":   ColorLightSkyBlue,  // lightskyblue
+	"(PodCliqueSet replica)":   ColorLightSkyBlue,  // lightskyblue
 	"PodCliqueScalingGroup": ColorMediumPurple,   // mediumpurple
 	"PodClique":             ColorDarkTurquoise,  // darkturquoise
 	"Pod":                   ColorGreenYellow,    // greenyellow
@@ -250,7 +250,7 @@ var BreadcrumbSeparator = lipgloss.NewStyle().
 var BreadcrumbStyles = map[string]lipgloss.Style{
 	"Forest":                lipgloss.NewStyle().Foreground(ColorWhite),
 	"PodCliqueSet":          lipgloss.NewStyle().Foreground(ColorAqua),
-	"PodCliqueSetReplica":   lipgloss.NewStyle().Foreground(ColorAqua),
+	"(PodCliqueSet replica)":   lipgloss.NewStyle().Foreground(ColorAqua),
 	"PodCliqueScalingGroup": lipgloss.NewStyle().Foreground(ColorMediumPurple),
 	"PodClique":             lipgloss.NewStyle().Foreground(ColorDarkTurquoise),
 	"Pod":                   lipgloss.NewStyle().Foreground(ColorGreenYellow),

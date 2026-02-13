@@ -208,8 +208,8 @@ func TestGpuCountsForResource(t *testing.T) {
 		}
 	})
 
-	t.Run("PodCliqueSetReplica", func(t *testing.T) {
-		counts := m.gpuCountsForResource(data.Resource{Name: "pcs-a-replica-0", Type: "PodCliqueSetReplica"})
+	t.Run("(PodCliqueSet replica)", func(t *testing.T) {
+		counts := m.gpuCountsForResource(data.Resource{Name: "pcs-a-replica-0", Type: "(PodCliqueSet replica)"})
 		if counts["H100"] != 8 {
 			t.Errorf("replica counts = %v, want H100:8", counts)
 		}
