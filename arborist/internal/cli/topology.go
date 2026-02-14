@@ -67,17 +67,11 @@ type topologyGroup struct {
 
 // runTopology implements the "arborist topology <domain> [pcs]" CLI command.
 // Uses 3 targeted API calls instead of the full GlobalCache informer machinery.
-func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string) error {
-	// Resolve namespace from kubeconfig if not specified
-	ns := namespace
-	if allNamespaces {
-		ns = ""
-	} else if ns == "" {
-		resolved, err := k8s.ResolveCurrentNamespace()
-		if err != nil {
-			return fmt.Errorf("failed to resolve namespace: %w", err)
-		}
-		ns = resolved
+func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string) (retErr error) {
+	defer recoverPanic()
+	ns, err := resolveNamespace(namespace, allNamespaces)
+	if err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

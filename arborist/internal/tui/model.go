@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ErrorEntry represents a single error entry in the error log.
@@ -22,6 +23,27 @@ type ErrorEntry struct {
 
 // maxErrorLogEntries is the maximum number of errors kept in the error log.
 const maxErrorLogEntries = 3
+
+// replicaSeparator is the separator between a resource name and its replica index
+// in display names like "my-pcs-replica-0". Used consistently across navigation,
+// handlers, and model logic to avoid magic string duplication.
+const replicaSeparator = "-replica-"
+
+// replicaDisplayName constructs a display name for a virtual replica resource.
+func replicaDisplayName(baseName, index string) string {
+	return baseName + replicaSeparator + index
+}
+
+// newSearchInput creates a textinput.Model with standard defaults.
+func newSearchInput(prompt string, width int, promptStyle lipgloss.Style) textinput.Model {
+	ti := textinput.New()
+	ti.Placeholder = ""
+	ti.CharLimit = 256
+	ti.Width = width
+	ti.Prompt = prompt
+	ti.PromptStyle = promptStyle
+	return ti
+}
 
 // ColumnSpec defines a table column's title and relative weight for width calculation.
 // This is the single source of truth for a table's column layout — inspired by K9s's
@@ -157,28 +179,18 @@ type Model struct {
 	podViewport          viewport.Model
 
 	// YAML overlay (shown when user presses 'y' on any resource)
-	yamlOverlayActive bool
-	yamlViewport      viewport.Model
-	yamlContent       string // raw YAML content
-	yamlResourceName  string // name of the resource being viewed
-	yamlResourceType  string // type of the resource being viewed
-	yamlSearchActive  bool
-	yamlSearchInput   textinput.Model
-	yamlSearchText    string
+	yamlOverlay      OverlayModel
+	yamlResourceName string // name of the resource being viewed
+	yamlResourceType string // type of the resource being viewed
 
 	// Logs overlay (shown when user presses 'l' on a pod/container)
-	logsOverlayActive bool
-	logsViewport      viewport.Model
-	logsContent       string // raw log content
-	logsPodName       string
-	logsContainerName string
-	logsSearchActive  bool
-	logsSearchInput   textinput.Model
-	logsSearchText    string
-	logsWrapEnabled   bool
-	logsNamespace     string // namespace for re-fetching logs (autoscroll)
-	logsAutoScroll       bool // autoscroll (tail -f) toggle state
-	logsHorizontalOffset int  // horizontal scroll offset (rune count from left)
+	logsOverlay          OverlayModel
+	logsPodName          string
+	logsContainerName    string
+	logsWrapEnabled      bool
+	logsNamespace        string // namespace for re-fetching logs (autoscroll)
+	logsAutoScroll       bool   // autoscroll (tail -f) toggle state
+	logsHorizontalOffset int    // horizontal scroll offset (rune count from left)
 
 	// Container view state
 	containerInfos []data.ContainerInfo
@@ -325,44 +337,9 @@ func normalizeResourceType(rt string) string {
 
 // NewModel creates a new Model with the given GlobalCache and options.
 func NewModel(cache data.GlobalCache, opts ...Option) Model {
-	// Initialize filter input
-	ti := textinput.New()
-	ti.Placeholder = ""
-	ti.CharLimit = 256
-	ti.Width = 40
-	ti.Prompt = "/ "
-	ti.PromptStyle = FilterBarStyle
-
-	// Initialize command input (vim-style ":" prompt)
-	ci := textinput.New()
-	ci.Placeholder = ""
-	ci.CharLimit = 256
-	ci.Width = 40
-	ci.Prompt = ": "
-	ci.PromptStyle = CommandBarStyle
-
-	// Initialize lens edit input (inline in header, no prompt — the header label acts as prompt)
-	li := textinput.New()
-	li.Placeholder = ""
-	li.CharLimit = 256
-	li.Width = 30
-	li.Prompt = ""
-
-	// Initialize YAML search input
-	yi := textinput.New()
-	yi.Placeholder = ""
-	yi.CharLimit = 256
-	yi.Width = 40
-	yi.Prompt = "/ "
-	yi.PromptStyle = FilterBarStyle
-
-	// Initialize logs search input
-	lsi := textinput.New()
-	lsi.Placeholder = ""
-	lsi.CharLimit = 256
-	lsi.Width = 40
-	lsi.Prompt = "/ "
-	lsi.PromptStyle = FilterBarStyle
+	ti := newSearchInput("/ ", 40, FilterBarStyle)
+	ci := newSearchInput(": ", 40, CommandBarStyle)
+	li := newSearchInput("", 30, lipgloss.NewStyle())
 
 	// Initialize autocomplete for lens/command inputs
 	ac := NewAutocompleter(LensCommandNames())
@@ -381,8 +358,8 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 		filterInput:        ti,
 		commandInput:       ci,
 		lensInput:          li,
-		yamlSearchInput:    yi,
-		logsSearchInput:    lsi,
+		yamlOverlay:        OverlayModel{SearchInput: newSearchInput("/ ", 40, FilterBarStyle)},
+		logsOverlay:        OverlayModel{SearchInput: newSearchInput("/ ", 40, FilterBarStyle)},
 		lensAutocomplete:   ac,
 		forestResourceType: "pcs", // default resource type
 		allNamespaces:      true,  // default: show all namespaces
@@ -409,6 +386,38 @@ func resizeTable(t *table.Model, width, height int) {
 	t.SetWidth(width)
 	t.SetHeight(height)
 	t.SetStyles(ArboristTableStylesWithWidth(width))
+}
+
+// saveCursorState saves the name at nameCol and the current cursor index for later restoration.
+func saveCursorState(t *table.Model, nameCol int) (string, int) {
+	prevName := ""
+	if row := t.SelectedRow(); len(row) > nameCol {
+		prevName = row[nameCol]
+	}
+	return prevName, t.Cursor()
+}
+
+// restoreCursorState tries to find the row with prevName at nameCol, otherwise clamps
+// the cursor to valid range.
+func restoreCursorState(t *table.Model, rows []table.Row, prevName string, prevCursor, nameCol int) {
+	if len(rows) == 0 {
+		return
+	}
+	if prevName != "" {
+		for i, row := range rows {
+			if len(row) > nameCol && row[nameCol] == prevName {
+				t.SetCursor(i)
+				return
+			}
+		}
+	}
+	if prevCursor >= len(rows) {
+		t.SetCursor(len(rows) - 1)
+	} else if prevCursor >= 0 {
+		t.SetCursor(prevCursor)
+	} else {
+		t.SetCursor(0)
+	}
 }
 
 // createTableModel creates a table.Model with the given column spec and focus state.
@@ -472,11 +481,7 @@ func (m *Model) topologyColumnVisible() bool {
 
 // rebuildContainersTable rebuilds the resources table for the ContainersView.
 func (m *Model) rebuildContainersTable() {
-	prevSelectedName := ""
-	if selectedRow := m.resourcesTable.SelectedRow(); len(selectedRow) > 0 {
-		prevSelectedName = selectedRow[0]
-	}
-	prevCursor := m.resourcesTable.Cursor()
+	prevName, prevCursor := saveCursorState(&m.resourcesTable, 0)
 
 	// Clear and set columns
 	m.resourcesTable.SetRows([]table.Row{})
@@ -500,29 +505,7 @@ func (m *Model) rebuildContainersTable() {
 	}
 
 	m.resourcesTable.SetRows(rows)
-
-	// Restore cursor
-	if len(rows) > 0 {
-		restored := false
-		if prevSelectedName != "" {
-			for i, row := range rows {
-				if len(row) > 0 && row[0] == prevSelectedName {
-					m.resourcesTable.SetCursor(i)
-					restored = true
-					break
-				}
-			}
-		}
-		if !restored {
-			if prevCursor >= len(rows) {
-				m.resourcesTable.SetCursor(len(rows) - 1)
-			} else if prevCursor >= 0 {
-				m.resourcesTable.SetCursor(prevCursor)
-			} else {
-				m.resourcesTable.SetCursor(0)
-			}
-		}
-	}
+	restoreCursorState(&m.resourcesTable, rows, prevName, prevCursor, 0)
 }
 
 // rebuildResourcesTable rebuilds the resources table from current data with color-coded cells.
@@ -532,13 +515,9 @@ func (m *Model) rebuildResourcesTable() {
 		return
 	}
 
-	// Remember the currently selected row's name so we can restore it after rebuild.
+	// Save cursor state for restoration after rebuild.
 	// The NAME column is at index 2 (NAMESPACE=0, TYPE=1, NAME=2).
-	prevSelectedName := ""
-	if selectedRow := m.resourcesTable.SelectedRow(); len(selectedRow) > 2 {
-		prevSelectedName = selectedRow[2]
-	}
-	prevCursor := m.resourcesTable.Cursor()
+	prevName, prevCursor := saveCursorState(&m.resourcesTable, 2)
 
 	viewKey := m.getCurrentViewKey()
 	resources, exists := m.allResources[viewKey]
@@ -591,31 +570,7 @@ func (m *Model) rebuildResourcesTable() {
 	}
 
 	m.resourcesTable.SetRows(rows)
-
-	// Restore cursor position: try to find the previously selected row by name,
-	// otherwise fall back to the same numeric position (clamped to valid range).
-	if len(rows) > 0 {
-		restored := false
-		if prevSelectedName != "" {
-			for i, row := range rows {
-				if len(row) > 2 && row[2] == prevSelectedName {
-					m.resourcesTable.SetCursor(i)
-					restored = true
-					break
-				}
-			}
-		}
-		if !restored {
-			// Fall back to previous cursor index, clamped to valid range
-			if prevCursor >= len(rows) {
-				m.resourcesTable.SetCursor(len(rows) - 1)
-			} else if prevCursor >= 0 {
-				m.resourcesTable.SetCursor(prevCursor)
-			} else {
-				m.resourcesTable.SetCursor(0)
-			}
-		}
-	}
+	restoreCursorState(&m.resourcesTable, rows, prevName, prevCursor, 2)
 }
 
 // buildResourceColumnSpecs builds the column spec for the resources table,
@@ -732,7 +687,7 @@ func (m *Model) isResourcePending(r data.Resource) bool {
 
 // extractReplicaIndex extracts the replica index from a name like "foo-replica-0".
 func extractReplicaIndex(name string) string {
-	parts := strings.Split(name, "-replica-")
+	parts := strings.Split(name, replicaSeparator)
 	if len(parts) == 2 {
 		return parts[1]
 	}
@@ -814,11 +769,8 @@ func (m *Model) rebuildTopologyDomainsTable() {
 		return
 	}
 
-	// Remember what the user was looking at for cursor restoration
-	prevSelectedName := ""
-	if row := m.topologyDomainsTable.SelectedRow(); len(row) >= 1 {
-		prevSelectedName = row[0]
-	}
+	// Save cursor state for restoration after rebuild
+	prevName, prevCursor := saveCursorState(&m.topologyDomainsTable, 0)
 
 	if len(m.topologyDrillStack) == 0 {
 		// Top-level: show domain rows (DOMAIN, KEY, VALUES)
@@ -912,24 +864,8 @@ func (m *Model) rebuildTopologyDomainsTable() {
 		_ = currentDomain // used for title rendering
 	}
 
-	// Restore cursor by name
-	rows := m.topologyDomainsTable.Rows()
-	if prevSelectedName != "" {
-		for i, row := range rows {
-			if len(row) >= 1 && row[0] == prevSelectedName {
-				m.topologyDomainsTable.SetCursor(i)
-				return
-			}
-		}
-	}
-	// Ensure cursor is valid (bubbles/table doesn't auto-reset cursor when rows
-	// go from 0→N, so we must explicitly set it).
-	if len(rows) > 0 {
-		cursor := m.topologyDomainsTable.Cursor()
-		if cursor < 0 || cursor >= len(rows) {
-			m.topologyDomainsTable.SetCursor(0)
-		}
-	}
+	// Restore cursor by name or clamp to valid range
+	restoreCursorState(&m.topologyDomainsTable, m.topologyDomainsTable.Rows(), prevName, prevCursor, 0)
 }
 
 // rebuildTopologyPodsTable rebuilds the bottom pane of the Topology view.
@@ -940,11 +876,8 @@ func (m *Model) rebuildTopologyPodsTable() {
 		return
 	}
 
-	// Remember what the user was looking at for cursor restoration
-	prevSelectedName := ""
-	if row := m.topologyPodsTable.SelectedRow(); len(row) >= 3 {
-		prevSelectedName = row[2] // NAME column
-	}
+	// Save cursor state for restoration after rebuild
+	prevName, prevCursor := saveCursorState(&m.topologyPodsTable, 2)
 
 	// Get matching nodes based on breadcrumb
 	matchingNodes := data.FilterNodesByBreadcrumb(m.topologyViewData.NodeLabels, m.topologyDrillStack)
@@ -996,23 +929,8 @@ func (m *Model) rebuildTopologyPodsTable() {
 	w := tableContentWidth(m.width, len(topologyPodColumnSpecs))
 	m.topologyPodsTable.SetColumns(computeWeightedColumns(topologyPodColumnSpecs, w))
 
-	// Restore cursor by name
-	if prevSelectedName != "" {
-		for i, row := range rows {
-			if len(row) >= 3 && row[2] == prevSelectedName {
-				m.topologyPodsTable.SetCursor(i)
-				return
-			}
-		}
-	}
-	// Ensure cursor is valid (bubbles/table doesn't auto-reset cursor when rows
-	// go from 0→N, so we must explicitly set it).
-	if len(rows) > 0 {
-		cursor := m.topologyPodsTable.Cursor()
-		if cursor < 0 || cursor >= len(rows) {
-			m.topologyPodsTable.SetCursor(0)
-		}
-	}
+	// Restore cursor by name or clamp to valid range
+	restoreCursorState(&m.topologyPodsTable, rows, prevName, prevCursor, 2)
 }
 
 // currentTopologyDomain returns the domain name and label key for the current

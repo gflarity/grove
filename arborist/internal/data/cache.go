@@ -27,8 +27,7 @@ import (
 )
 
 // GlobalCache provides a single, informer-backed cache of all cluster state
-// needed by the TUI. It replaces both DataProvider (direct API calls) and
-// TopologyCache (informer-based topology data) with a unified interface.
+// needed by the TUI.
 //
 // All read operations are served from local informer caches — zero on-demand
 // API calls except for GetPodYAML which is a single GET for a specific pod.
@@ -195,23 +194,11 @@ func (s *CacheSnapshot) GetEventsForReplica(pcsName, replicaIndex string) []Even
 	// PCSGs in this replica
 	for _, pcsg := range s.ScalingGroupsByReplica[replicaKey] {
 		addUniqueEvents(&result, s.EventsByObject["PodCliqueScalingGroup/"+pcsg.Name], seen)
-		// PodCliques within this PCSG
-		for _, pc := range s.PodCliquesByPCSG[pcsg.Name] {
-			addUniqueEvents(&result, s.EventsByObject["PodClique/"+pc.Name], seen)
-			// Pods within this PodClique
-			for _, pod := range s.PodsByPodClique[pc.Name] {
-				addUniqueEvents(&result, s.EventsByObject["Pod/"+pod.Name], seen)
-			}
-		}
+		s.gatherPodCliqueEvents(&result, s.PodCliquesByPCSG[pcsg.Name], seen)
 	}
 
 	// Standalone PodCliques in this replica
-	for _, pc := range s.PodCliquesByReplica[replicaKey] {
-		addUniqueEvents(&result, s.EventsByObject["PodClique/"+pc.Name], seen)
-		for _, pod := range s.PodsByPodClique[pc.Name] {
-			addUniqueEvents(&result, s.EventsByObject["Pod/"+pod.Name], seen)
-		}
-	}
+	s.gatherPodCliqueEvents(&result, s.PodCliquesByReplica[replicaKey], seen)
 
 	sortEventsByTimestamp(result)
 	return result
@@ -229,23 +216,13 @@ func (s *CacheSnapshot) GetEventsForPCSG(pcsgName string) []Event {
 	// PCSG itself
 	addUniqueEvents(&result, s.EventsByObject["PodCliqueScalingGroup/"+pcsgName], seen)
 
-	// PodCliques within this PCSG
-	for _, pc := range s.PodCliquesByPCSG[pcsgName] {
-		addUniqueEvents(&result, s.EventsByObject["PodClique/"+pc.Name], seen)
-		for _, pod := range s.PodsByPodClique[pc.Name] {
-			addUniqueEvents(&result, s.EventsByObject["Pod/"+pod.Name], seen)
-		}
-	}
+	// PodCliques within this PCSG (by PCSG name)
+	s.gatherPodCliqueEvents(&result, s.PodCliquesByPCSG[pcsgName], seen)
 
 	// Also check PCSG replica PodCliques
 	for key, pcResources := range s.PodCliquesByPCSGReplica {
 		if strings.HasPrefix(key, pcsgName+"/") {
-			for _, pc := range pcResources {
-				addUniqueEvents(&result, s.EventsByObject["PodClique/"+pc.Name], seen)
-				for _, pod := range s.PodsByPodClique[pc.Name] {
-					addUniqueEvents(&result, s.EventsByObject["Pod/"+pod.Name], seen)
-				}
-			}
+			s.gatherPodCliqueEvents(&result, pcResources, seen)
 		}
 	}
 
@@ -263,14 +240,7 @@ func (s *CacheSnapshot) GetEventsForPCSGReplica(pcsgName, replicaIndex string) [
 	var result []Event
 
 	replicaKey := pcsgName + "/" + replicaIndex
-
-	// PodCliques in this PCSG replica
-	for _, pc := range s.PodCliquesByPCSGReplica[replicaKey] {
-		addUniqueEvents(&result, s.EventsByObject["PodClique/"+pc.Name], seen)
-		for _, pod := range s.PodsByPodClique[pc.Name] {
-			addUniqueEvents(&result, s.EventsByObject["Pod/"+pod.Name], seen)
-		}
-	}
+	s.gatherPodCliqueEvents(&result, s.PodCliquesByPCSGReplica[replicaKey], seen)
 
 	sortEventsByTimestamp(result)
 	return result
@@ -285,13 +255,7 @@ func (s *CacheSnapshot) GetEventsForPodClique(pcName string) []Event {
 	seen := make(map[string]bool)
 	var result []Event
 
-	// PodClique itself
-	addUniqueEvents(&result, s.EventsByObject["PodClique/"+pcName], seen)
-
-	// Pods within this PodClique
-	for _, pod := range s.PodsByPodClique[pcName] {
-		addUniqueEvents(&result, s.EventsByObject["Pod/"+pod.Name], seen)
-	}
+	s.gatherPodCliqueEvents(&result, []Resource{{Name: pcName}}, seen)
 
 	sortEventsByTimestamp(result)
 	return result
@@ -331,4 +295,16 @@ func sortEventsByTimestamp(events []Event) {
 	sort.Slice(events, func(i, j int) bool {
 		return events[i].Timestamp.After(events[j].Timestamp)
 	})
+}
+
+// gatherPodCliqueEvents collects events for a list of PodCliques and their child pods.
+// This is the common pattern shared by GetEventsForReplica, GetEventsForPCSG,
+// GetEventsForPCSGReplica, and GetEventsForPodClique.
+func (s *CacheSnapshot) gatherPodCliqueEvents(result *[]Event, pcs []Resource, seen map[string]bool) {
+	for _, pc := range pcs {
+		addUniqueEvents(result, s.EventsByObject["PodClique/"+pc.Name], seen)
+		for _, pod := range s.PodsByPodClique[pc.Name] {
+			addUniqueEvents(result, s.EventsByObject["Pod/"+pod.Name], seen)
+		}
+	}
 }

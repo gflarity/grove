@@ -722,8 +722,9 @@ func TestValidateTopologyDrillStack_DomainRemoved_StackResets(t *testing.T) {
 
 	m.validateTopologyDrillStack()
 
-	if m.topologyDrillStack != nil {
-		t.Errorf("expected drill stack to be nil after domain removal, got %v", m.topologyDrillStack)
+	// Stack should be truncated to depth 1 (region preserved, rack removed)
+	if len(m.topologyDrillStack) != 1 || m.topologyDrillStack[0].Domain != "region" {
+		t.Errorf("expected drill stack truncated to [region], got %v", m.topologyDrillStack)
 	}
 }
 
@@ -766,9 +767,9 @@ func TestValidateTopologyDrillStack_PartiallyStale(t *testing.T) {
 
 	m.validateTopologyDrillStack()
 
-	// "zone" no longer exists → stack should be reset
-	if m.topologyDrillStack != nil {
-		t.Errorf("expected drill stack to be nil after partial stale, got %v", m.topologyDrillStack)
+	// "zone" no longer exists → stack should be truncated to [region]
+	if len(m.topologyDrillStack) != 1 || m.topologyDrillStack[0].Domain != "region" {
+		t.Errorf("expected drill stack truncated to [region], got %v", m.topologyDrillStack)
 	}
 }
 

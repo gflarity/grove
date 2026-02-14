@@ -46,17 +46,7 @@ type ForestCmd struct {
 
 // Run executes the ForestCmd (TUI forest view).
 func (c *ForestCmd) Run(globals *CLI) error {
-	// Recover from panics so we can log the stack trace and restore the
-	// terminal before exiting.
-	defer func() {
-		if r := recover(); r != nil {
-			stack := rtdebug.Stack()
-			tui.DebugLog("PANIC: %v\n%s", r, stack)
-			tui.CloseDebugLog()
-			fmt.Fprintf(os.Stderr, "arborist panic: %v\n%s", r, stack)
-			os.Exit(1)
-		}
-	}()
+	defer recoverPanic()
 
 	// Resolve namespace: if -n is set, use it (override -A); otherwise all namespaces.
 	namespace := ""
@@ -66,9 +56,10 @@ func (c *ForestCmd) Run(globals *CLI) error {
 		allNamespaces = false
 	}
 
-	// Resolve kubeconfig context/cluster/user for the header display
-	contextName, clusterName := k8s.ResolveCurrentContext()
-	userName := k8s.ResolveCurrentUser()
+	// Resolve kubeconfig context/cluster/user for the header display (single load)
+	kubeInfo := k8s.ResolveKubeConfigInfo()
+	contextName, clusterName := kubeInfo.ContextName, kubeInfo.ClusterName
+	userName := kubeInfo.UserName
 
 	// Initialize Kubernetes client
 	tui.DebugLog("initializing Kubernetes client")

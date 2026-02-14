@@ -929,9 +929,13 @@ func TestC10_TopologyViewDrillStackValidation(t *testing.T) {
 			snap.TopologyViewData.Domains = kept
 		})
 
-		// Drill stack should be reset because "zone" was in it
-		if len(m.topologyDrillStack) != 0 {
-			t.Fatalf("expected drill stack reset when zone removed, got depth %d: %+v", len(m.topologyDrillStack), m.topologyDrillStack)
+		// Drill stack should be truncated to depth 1 (region entry preserved,
+		// zone entry removed since the domain no longer exists).
+		if len(m.topologyDrillStack) != 1 {
+			t.Fatalf("expected drill stack truncated to depth 1 when zone removed, got depth %d: %+v", len(m.topologyDrillStack), m.topologyDrillStack)
+		}
+		if m.topologyDrillStack[0].Domain != "region" {
+			t.Fatalf("expected first entry to be region, got %+v", m.topologyDrillStack[0])
 		}
 	})
 

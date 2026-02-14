@@ -35,17 +35,11 @@ type DiagnosticsCmd struct {
 }
 
 // Run executes the diagnostics command.
-func (c *DiagnosticsCmd) Run(globals *CLI) error {
-	// Resolve namespace: -A means all, -n overrides, otherwise use kubeconfig default
-	ns := c.Namespace
-	if c.AllNamespaces {
-		ns = ""
-	} else if ns == "" {
-		resolved, err := k8s.ResolveCurrentNamespace()
-		if err != nil {
-			return fmt.Errorf("failed to resolve namespace: %w", err)
-		}
-		ns = resolved
+func (c *DiagnosticsCmd) Run(globals *CLI) (retErr error) {
+	defer recoverPanic()
+	ns, err := resolveNamespace(c.Namespace, c.AllNamespaces)
+	if err != nil {
+		return err
 	}
 
 	// Create Kubernetes clients

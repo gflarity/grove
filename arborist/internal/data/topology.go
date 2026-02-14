@@ -85,11 +85,19 @@ func BuildTopologyInfo(pcs *corev1alpha1.PodCliqueSet) *TopologyInfo {
 //   - If inherited is non-empty, return it in parentheses (e.g. "(rack)").
 //   - Otherwise, return "N/A".
 func ResolveTopologyDisplay(explicit, inherited string) string {
+	return resolveWithFallbacks(explicit, inherited)
+}
+
+// resolveWithFallbacks returns the explicit value if non-empty, otherwise returns
+// the first non-empty fallback wrapped in parentheses (inherited), or "N/A" if none.
+func resolveWithFallbacks(explicit string, fallbacks ...string) string {
 	if explicit != "" {
 		return explicit
 	}
-	if inherited != "" {
-		return fmt.Sprintf("(%s)", inherited)
+	for _, fb := range fallbacks {
+		if fb != "" {
+			return fmt.Sprintf("(%s)", fb)
+		}
 	}
 	return "N/A"
 }
@@ -101,25 +109,11 @@ func (t *TopologyInfo) ResolveCliqueTopology(cliqueName string) string {
 	if t == nil {
 		return "N/A"
 	}
-
-	explicit := t.CliquePackDomains[cliqueName]
-	if explicit != "" {
-		return explicit
-	}
-
-	// Check if this clique belongs to a PCSG
+	pcsgDomain := ""
 	if pcsgName, ok := t.CliqueToScalingGroup[cliqueName]; ok {
-		if pcsgDomain := t.PCSGPackDomains[pcsgName]; pcsgDomain != "" {
-			return fmt.Sprintf("(%s)", pcsgDomain)
-		}
+		pcsgDomain = t.PCSGPackDomains[pcsgName]
 	}
-
-	// Fall back to PCS-level
-	if t.PCSPackDomain != "" {
-		return fmt.Sprintf("(%s)", t.PCSPackDomain)
-	}
-
-	return "N/A"
+	return resolveWithFallbacks(t.CliquePackDomains[cliqueName], pcsgDomain, t.PCSPackDomain)
 }
 
 // ResolvePCSGTopology resolves the topology display for a PodCliqueScalingGroup given its config name.
@@ -128,9 +122,7 @@ func (t *TopologyInfo) ResolvePCSGTopology(pcsgName string) string {
 	if t == nil {
 		return "N/A"
 	}
-
-	explicit := t.PCSGPackDomains[pcsgName]
-	return ResolveTopologyDisplay(explicit, t.PCSPackDomain)
+	return resolveWithFallbacks(t.PCSGPackDomains[pcsgName], t.PCSPackDomain)
 }
 
 // ResolveStandaloneCliqueTopology resolves topology for a standalone PodClique (not in a PCSG).
@@ -139,9 +131,7 @@ func (t *TopologyInfo) ResolveStandaloneCliqueTopology(cliqueName string) string
 	if t == nil {
 		return "N/A"
 	}
-
-	explicit := t.CliquePackDomains[cliqueName]
-	return ResolveTopologyDisplay(explicit, t.PCSPackDomain)
+	return resolveWithFallbacks(t.CliquePackDomains[cliqueName], t.PCSPackDomain)
 }
 
 // ResolveCliqueInPCSGTopology resolves topology for a PodClique that belongs to a PCSG.
@@ -150,21 +140,7 @@ func (t *TopologyInfo) ResolveCliqueInPCSGTopology(cliqueName, pcsgName string) 
 	if t == nil {
 		return "N/A"
 	}
-
-	explicit := t.CliquePackDomains[cliqueName]
-	if explicit != "" {
-		return explicit
-	}
-
-	// Inherited: try PCSG first, then PCS
-	if pcsgDomain := t.PCSGPackDomains[pcsgName]; pcsgDomain != "" {
-		return fmt.Sprintf("(%s)", pcsgDomain)
-	}
-	if t.PCSPackDomain != "" {
-		return fmt.Sprintf("(%s)", t.PCSPackDomain)
-	}
-
-	return "N/A"
+	return resolveWithFallbacks(t.CliquePackDomains[cliqueName], t.PCSGPackDomains[pcsgName], t.PCSPackDomain)
 }
 
 // WrapInherited takes an effective topology display value and ensures it's shown as inherited.

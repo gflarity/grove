@@ -161,7 +161,7 @@ func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
 			}
 
 			replicaResources = append(replicaResources, data.Resource{
-				Name:       fmt.Sprintf("%s-replica-%s", pcsName, ri),
+				Name:       replicaDisplayName(pcsName, ri),
 				Type:       "(PodCliqueSet replica)",
 				Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
 				Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
@@ -240,7 +240,7 @@ func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
 					totalScheduled += scheduled
 				}
 				pcsgReplicaResources = append(pcsgReplicaResources, data.Resource{
-					Name:       fmt.Sprintf("%s-replica-%s", pcsgName, ri),
+					Name:       replicaDisplayName(pcsgName, ri),
 					Type:       "(PodCliqueScalingGroup replica)",
 					Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
 					Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
@@ -412,6 +412,7 @@ func (m Model) handlePodYAML(msg PodYAMLMsg) (tea.Model, tea.Cmd) {
 	if msg.Err != nil {
 		debugLogWithContext("ERROR loading Pod YAML: %v", msg.Err)
 		m.podYAMLData[msg.PodName] = fmt.Sprintf("# Error loading Pod YAML: %v", msg.Err)
+		m.addError(fmt.Sprintf("Failed to load YAML for Pod %s: %v", msg.PodName, msg.Err))
 	} else {
 		debugLogWithContext("loaded %d bytes of YAML for Pod %s", len(msg.YAML), msg.PodName)
 		m.podYAMLData[msg.PodName] = msg.YAML
@@ -466,7 +467,7 @@ func (m *Model) rebuildFlatDrillInResources(snapshot *data.CacheSnapshot) {
 					totalScheduled += scheduled
 				}
 				pcsgReplicaResources = append(pcsgReplicaResources, data.Resource{
-					Name:       fmt.Sprintf("%s-replica-%s", pcsgName, ri),
+					Name:       replicaDisplayName(pcsgName, ri),
 					Type:       "(PodCliqueScalingGroup replica)",
 					Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
 					Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
@@ -620,6 +621,9 @@ func flatPods(snapshot *data.CacheSnapshot) []data.Resource {
 }
 
 // validateTopologyDrillStack checks that the current drill stack is still valid.
+// It verifies both that each domain still exists and that each selected value
+// still exists within that domain. If any entry is stale, the stack is truncated
+// up to (but not including) the invalid entry.
 func (m *Model) validateTopologyDrillStack() {
 	if m.topologyViewData == nil || len(m.topologyDrillStack) == 0 {
 		return
@@ -630,11 +634,35 @@ func (m *Model) validateTopologyDrillStack() {
 		domainSet[d.Domain] = true
 	}
 
-	for _, entry := range m.topologyDrillStack {
+	for i, entry := range m.topologyDrillStack {
 		if !domainSet[entry.Domain] {
-			debugLogWithContext("drill stack domain %q no longer exists, resetting", entry.Domain)
-			m.topologyDrillStack = nil
+			debugLogWithContext("drill stack domain %q no longer exists, truncating at depth %d", entry.Domain, i)
+			m.topologyDrillStack = m.topologyDrillStack[:i]
+			if len(m.topologyDrillStack) == 0 {
+				m.topologyDrillStack = nil
+			}
 			return
+		}
+		// Also check that the selected value still exists in this domain.
+		// Only validate when NodeLabels are available (they may be nil in tests).
+		if entry.Value != "" && entry.Key != "" && len(m.topologyViewData.NodeLabels) > 0 {
+			matchingNodes := data.FilterNodesByBreadcrumb(m.topologyViewData.NodeLabels, m.topologyDrillStack[:i])
+			values := data.DistinctValuesForDomain(m.topologyViewData.NodeLabels, entry.Key, matchingNodes)
+			found := false
+			for _, v := range values {
+				if v == entry.Value {
+					found = true
+					break
+				}
+			}
+			if !found {
+				debugLogWithContext("drill stack value %q for domain %q no longer exists, truncating at depth %d", entry.Value, entry.Domain, i)
+				m.topologyDrillStack = m.topologyDrillStack[:i]
+				if len(m.topologyDrillStack) == 0 {
+					m.topologyDrillStack = nil
+				}
+				return
+			}
 		}
 	}
 }

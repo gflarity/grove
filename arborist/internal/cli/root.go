@@ -19,6 +19,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	rtdebug "runtime/debug"
 
 	"github.com/ai-dynamo/grove/arborist/internal/tui"
 )
@@ -55,4 +56,16 @@ func (c *CLI) AfterApply() error {
 // Cleanup closes the debug log.  The caller (main) should defer this.
 func (c *CLI) Cleanup() {
 	tui.CloseDebugLog()
+}
+
+// recoverPanic is a shared deferred panic handler for all CLI commands.
+// It logs the panic and stack trace to the debug log, prints to stderr, and exits.
+func recoverPanic() {
+	if r := recover(); r != nil {
+		stack := rtdebug.Stack()
+		tui.DebugLog("PANIC: %v\n%s", r, stack)
+		tui.CloseDebugLog()
+		fmt.Fprintf(os.Stderr, "arborist panic: %v\n%s", r, stack)
+		os.Exit(1)
+	}
 }

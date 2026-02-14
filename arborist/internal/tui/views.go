@@ -32,12 +32,12 @@ func (m Model) View() string {
 	}
 
 	// Logs overlay takes over the full screen
-	if m.logsOverlayActive {
+	if m.logsOverlay.Active {
 		return m.renderLogsOverlay()
 	}
 
 	// YAML overlay takes over the full screen
-	if m.yamlOverlayActive {
+	if m.yamlOverlay.Active {
 		return m.renderYAMLOverlay()
 	}
 
@@ -651,8 +651,8 @@ func (m Model) renderYAMLOverlay() string {
 
 	// Scroll position indicator
 	scrollPct := ""
-	if m.yamlViewport.TotalLineCount() > 0 {
-		pct := int(m.yamlViewport.ScrollPercent() * 100)
+	if m.yamlOverlay.Viewport.TotalLineCount() > 0 {
+		pct := int(m.yamlOverlay.Viewport.ScrollPercent() * 100)
 		scrollPct = fmt.Sprintf(" %d%%", pct)
 	}
 
@@ -660,26 +660,25 @@ func (m Model) renderYAMLOverlay() string {
 	hints := MenuKeyStyle.Render("<esc>") + MenuActionStyle.Render("Close") + "  " +
 		MenuKeyStyle.Render("<↑↓>") + MenuActionStyle.Render("Scroll") + "  " +
 		MenuKeyStyle.Render("</>") + MenuActionStyle.Render("Search")
-	if m.yamlSearchText != "" {
+	if m.yamlOverlay.SearchText != "" {
 		hints += "  " + MenuKeyStyle.Render("<n/N>") + MenuActionStyle.Render("Next/Prev")
 	}
 	hints += "  " + SectionCountStyle.Render(scrollPct)
 
 	// Add search bar if active
-	if m.yamlSearchActive {
-		searchFrame := m.renderYAMLSearchFrame()
-		sections = append(sections, searchFrame)
-	} else if m.yamlSearchText != "" {
+	if m.yamlOverlay.SearchActive {
+		sections = append(sections, m.yamlOverlay.RenderSearchFrame(m.width))
+	} else if m.yamlOverlay.SearchText != "" {
 		// Show persistent search indicator
-		searchIndicator := FilterBarStyle.Render("search: "+m.yamlSearchText)
+		searchIndicator := FilterBarStyle.Render("search: "+m.yamlOverlay.SearchText)
 		sections = append(sections, searchIndicator)
 	}
 
 	// Calculate content height: total height minus header, footer, frame borders, search
 	fixedLines := 4 // frame top + bottom + title line + hints line
-	if m.yamlSearchActive {
+	if m.yamlOverlay.SearchActive {
 		fixedLines += 3 // search frame
-	} else if m.yamlSearchText != "" {
+	} else if m.yamlOverlay.SearchText != "" {
 		fixedLines += 1 // search indicator
 	}
 
@@ -689,10 +688,10 @@ func (m Model) renderYAMLOverlay() string {
 	}
 
 	// Ensure viewport height matches
-	m.yamlViewport.Height = contentHeight
+	m.yamlOverlay.Viewport.Height = contentHeight
 
 	// Render the YAML viewport content inside a frame
-	content := m.yamlViewport.View()
+	content := m.yamlOverlay.Viewport.View()
 	frame := renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
 
 	// Build output: search (if any) + frame + hints
@@ -703,28 +702,6 @@ func (m Model) renderYAMLOverlay() string {
 	result += frame + "\n" + hints
 
 	return result
-}
-
-// renderYAMLSearchFrame renders the search input as a framed box in the YAML overlay.
-func (m Model) renderYAMLSearchFrame() string {
-	border := lipgloss.NormalBorder()
-	bc := lipgloss.NewStyle().Foreground(ColorBorderFocused)
-	contentWidth := m.width - 2
-
-	content := "🔍" + m.yamlSearchInput.View()
-	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
-
-	lineWidth := lipgloss.Width(content)
-	pad := contentWidth - lineWidth
-	if pad < 0 {
-		pad = 0
-	}
-
-	topLine := bc.Render(border.TopLeft + strings.Repeat(border.Top, contentWidth) + border.TopRight)
-	contentLine := bc.Render(border.Left) + content + strings.Repeat(" ", pad) + bc.Render(border.Right)
-	bottomLine := bc.Render(border.BottomLeft + strings.Repeat(border.Bottom, contentWidth) + border.BottomRight)
-
-	return topLine + "\n" + contentLine + "\n" + bottomLine
 }
 
 // renderLogsOverlay renders the full-screen logs overlay with framed viewport.
@@ -746,8 +723,8 @@ func (m Model) renderLogsOverlay() string {
 	}
 
 	scrollPct := ""
-	if m.logsViewport.TotalLineCount() > 0 {
-		pct := int(m.logsViewport.ScrollPercent() * 100)
+	if m.logsOverlay.Viewport.TotalLineCount() > 0 {
+		pct := int(m.logsOverlay.Viewport.ScrollPercent() * 100)
 		scrollPct = fmt.Sprintf(" %d%%", pct)
 	}
 
@@ -763,25 +740,24 @@ func (m Model) renderLogsOverlay() string {
 		MenuKeyStyle.Render("<w>") + MenuActionStyle.Render("Wrap:"+wrapStatus) + "  " +
 		MenuKeyStyle.Render("<s>") + MenuActionStyle.Render("AutoScroll:"+autoScrollStatus) + "  " +
 		MenuKeyStyle.Render("</>") + MenuActionStyle.Render("Search")
-	if m.logsSearchText != "" {
+	if m.logsOverlay.SearchText != "" {
 		hints += "  " + MenuKeyStyle.Render("<n/N>") + MenuActionStyle.Render("Next/Prev")
 	}
 	hints += "  " + SectionCountStyle.Render(scrollPct+colIndicator)
 
 	// Add search bar if active
-	if m.logsSearchActive {
-		searchFrame := m.renderLogsSearchFrame()
-		sections = append(sections, searchFrame)
-	} else if m.logsSearchText != "" {
-		searchIndicator := FilterBarStyle.Render("search: " + m.logsSearchText)
+	if m.logsOverlay.SearchActive {
+		sections = append(sections, m.logsOverlay.RenderSearchFrame(m.width))
+	} else if m.logsOverlay.SearchText != "" {
+		searchIndicator := FilterBarStyle.Render("search: " + m.logsOverlay.SearchText)
 		sections = append(sections, searchIndicator)
 	}
 
 	// Calculate content height
 	fixedLines := 4 // frame top + bottom + title line + hints line
-	if m.logsSearchActive {
+	if m.logsOverlay.SearchActive {
 		fixedLines += 3
-	} else if m.logsSearchText != "" {
+	} else if m.logsOverlay.SearchText != "" {
 		fixedLines += 1
 	}
 
@@ -790,9 +766,9 @@ func (m Model) renderLogsOverlay() string {
 		contentHeight = 3
 	}
 
-	m.logsViewport.Height = contentHeight
+	m.logsOverlay.Viewport.Height = contentHeight
 
-	content := m.logsViewport.View()
+	content := m.logsOverlay.Viewport.View()
 	frame := renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
 
 	result := ""
@@ -802,28 +778,6 @@ func (m Model) renderLogsOverlay() string {
 	result += frame + "\n" + hints
 
 	return result
-}
-
-// renderLogsSearchFrame renders the search input as a framed box in the logs overlay.
-func (m Model) renderLogsSearchFrame() string {
-	border := lipgloss.NormalBorder()
-	bc := lipgloss.NewStyle().Foreground(ColorBorderFocused)
-	contentWidth := m.width - 2
-
-	content := "🔍" + m.logsSearchInput.View()
-	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
-
-	lineWidth := lipgloss.Width(content)
-	pad := contentWidth - lineWidth
-	if pad < 0 {
-		pad = 0
-	}
-
-	topLine := bc.Render(border.TopLeft + strings.Repeat(border.Top, contentWidth) + border.TopRight)
-	contentLine := bc.Render(border.Left) + content + strings.Repeat(" ", pad) + bc.Render(border.Right)
-	bottomLine := bc.Render(border.BottomLeft + strings.Repeat(border.Bottom, contentWidth) + border.BottomRight)
-
-	return topLine + "\n" + contentLine + "\n" + bottomLine
 }
 
 // renderBreadcrumb returns the breadcrumb title for the current view with lipgloss styling.

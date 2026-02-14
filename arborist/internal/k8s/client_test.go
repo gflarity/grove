@@ -199,8 +199,8 @@ func TestFetchTopologyCLIData(t *testing.T) {
 	}
 
 	dynClient := dynamicfake.NewSimpleDynamicClient(
-		newFakeScheme(),
-		toUnstructuredClusterTopology(ct),
+		newGlobalFakeScheme(),
+		toUnstructuredObj(ct, "grove.io", "v1alpha1", "ClusterTopology"),
 	)
 
 	k8sClient := &K8sClient{

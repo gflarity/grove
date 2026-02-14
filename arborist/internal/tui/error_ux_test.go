@@ -294,9 +294,9 @@ func TestErrorsMenuHint_AlwaysPresent(t *testing.T) {
 func TestYAMLOverlay_RendersOverErrorLog(t *testing.T) {
 	m := newTestModel(nil)
 	m.addError("err")
-	m.yamlOverlayActive = true
-	m.yamlContent = "apiVersion: v1"
-	m.yamlViewport.SetContent(m.yamlContent)
+	m.yamlOverlay.Active = true
+	m.yamlOverlay.Content = "apiVersion: v1"
+	m.yamlOverlay.Viewport.SetContent(m.yamlOverlay.Content)
 
 	view := m.View()
 	// YAML overlay should render, error log should NOT be visible
@@ -837,12 +837,12 @@ func TestTopologyColumn_AppearsAfterCacheUpdateDeliversTopology(t *testing.T) {
 func newTestModelWithLogsOverlay() Model {
 	mc := data.NewMockGlobalCache()
 	m := newTestModelWithCache(mc)
-	m.logsOverlayActive = true
+	m.logsOverlay.Active = true
 	m.logsPodName = "test-pod"
 	m.logsContainerName = "main"
 	m.logsNamespace = "default"
-	m.logsContent = "line 1\nline 2\nline 3"
-	m.logsViewport.SetContent(m.logsContent)
+	m.logsOverlay.Content = "line 1\nline 2\nline 3"
+	m.logsOverlay.Viewport.SetContent(m.logsOverlay.Content)
 	return m
 }
 
@@ -891,7 +891,7 @@ func TestLogsAutoScroll_ResetOnEsc(t *testing.T) {
 	if m.logsAutoScroll {
 		t.Error("expected logsAutoScroll to be false after closing overlay with Esc")
 	}
-	if m.logsOverlayActive {
+	if m.logsOverlay.Active {
 		t.Error("expected logsOverlayActive to be false after Esc")
 	}
 }
@@ -907,7 +907,7 @@ func TestLogsAutoScroll_ResetOnQ(t *testing.T) {
 	if m.logsAutoScroll {
 		t.Error("expected logsAutoScroll to be false after closing overlay with 'q'")
 	}
-	if m.logsOverlayActive {
+	if m.logsOverlay.Active {
 		t.Error("expected logsOverlayActive to be false after 'q'")
 	}
 }
@@ -917,7 +917,7 @@ func TestLogsAutoScroll_ResetOnQ(t *testing.T) {
 func TestLogsAutoScrollTick_NoOpWhenOverlayClosed(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
 	m.logsAutoScroll = true
-	m.logsOverlayActive = false // overlay closed
+	m.logsOverlay.Active = false // overlay closed
 
 	m, cmd := applyMsg(m, logsAutoScrollTickMsg{})
 
