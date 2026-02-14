@@ -69,6 +69,14 @@ var (
 		{Title: "TOPOLOGY", Weight: 3},
 		{Title: "PHASE", Weight: 1},
 	}
+
+	containerColumnSpecs = []ColumnSpec{
+		{Title: "NAME", Weight: 3},
+		{Title: "IMAGE", Weight: 5},
+		{Title: "STATE", Weight: 2},
+		{Title: "READY", Weight: 1},
+		{Title: "RESTARTS", Weight: 1},
+	}
 )
 
 // computeWeightedColumns takes a column spec and available width, and returns
@@ -157,6 +165,23 @@ type Model struct {
 	yamlSearchActive  bool
 	yamlSearchInput   textinput.Model
 	yamlSearchText    string
+
+	// Logs overlay (shown when user presses 'l' on a pod/container)
+	logsOverlayActive bool
+	logsViewport      viewport.Model
+	logsContent       string // raw log content
+	logsPodName       string
+	logsContainerName string
+	logsSearchActive  bool
+	logsSearchInput   textinput.Model
+	logsSearchText    string
+	logsWrapEnabled   bool
+	logsNamespace     string // namespace for re-fetching logs (autoscroll)
+	logsAutoScroll       bool // autoscroll (tail -f) toggle state
+	logsHorizontalOffset int  // horizontal scroll offset (rune count from left)
+
+	// Container view state
+	containerInfos []data.ContainerInfo
 
 	// Topology view state
 	topologyViewData   *data.TopologyViewData
@@ -331,6 +356,14 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 	yi.Prompt = "/ "
 	yi.PromptStyle = FilterBarStyle
 
+	// Initialize logs search input
+	lsi := textinput.New()
+	lsi.Placeholder = ""
+	lsi.CharLimit = 256
+	lsi.Width = 40
+	lsi.Prompt = "/ "
+	lsi.PromptStyle = FilterBarStyle
+
 	// Initialize autocomplete for lens/command inputs
 	ac := NewAutocompleter(LensCommandNames())
 	ac.ConfigureInput(&ci, AutocompleteSuggestionStyle)
@@ -349,6 +382,7 @@ func NewModel(cache data.GlobalCache, opts ...Option) Model {
 		commandInput:       ci,
 		lensInput:          li,
 		yamlSearchInput:    yi,
+		logsSearchInput:    lsi,
 		lensAutocomplete:   ac,
 		forestResourceType: "pcs", // default resource type
 		allNamespaces:      true,  // default: show all namespaces
@@ -436,8 +470,68 @@ func (m *Model) topologyColumnVisible() bool {
 	return m.topologyAvailable()
 }
 
+// rebuildContainersTable rebuilds the resources table for the ContainersView.
+func (m *Model) rebuildContainersTable() {
+	prevSelectedName := ""
+	if selectedRow := m.resourcesTable.SelectedRow(); len(selectedRow) > 0 {
+		prevSelectedName = selectedRow[0]
+	}
+	prevCursor := m.resourcesTable.Cursor()
+
+	// Clear and set columns
+	m.resourcesTable.SetRows([]table.Row{})
+	w := tableContentWidth(m.width, len(containerColumnSpecs))
+	m.resourcesTable.SetColumns(computeWeightedColumns(containerColumnSpecs, w))
+
+	// Build rows from containerInfos
+	rows := make([]table.Row, 0, len(m.containerInfos))
+	for _, c := range m.containerInfos {
+		readyStr := "false"
+		if c.Ready {
+			readyStr = "true"
+		}
+		rows = append(rows, table.Row{
+			c.Name,
+			c.Image,
+			c.State,
+			readyStr,
+			fmt.Sprintf("%d", c.RestartCount),
+		})
+	}
+
+	m.resourcesTable.SetRows(rows)
+
+	// Restore cursor
+	if len(rows) > 0 {
+		restored := false
+		if prevSelectedName != "" {
+			for i, row := range rows {
+				if len(row) > 0 && row[0] == prevSelectedName {
+					m.resourcesTable.SetCursor(i)
+					restored = true
+					break
+				}
+			}
+		}
+		if !restored {
+			if prevCursor >= len(rows) {
+				m.resourcesTable.SetCursor(len(rows) - 1)
+			} else if prevCursor >= 0 {
+				m.resourcesTable.SetCursor(prevCursor)
+			} else {
+				m.resourcesTable.SetCursor(0)
+			}
+		}
+	}
+}
+
 // rebuildResourcesTable rebuilds the resources table from current data with color-coded cells.
 func (m *Model) rebuildResourcesTable() {
+	if m.viewState.ViewType == data.ContainersView {
+		m.rebuildContainersTable()
+		return
+	}
+
 	// Remember the currently selected row's name so we can restore it after rebuild.
 	// The NAME column is at index 2 (NAMESPACE=0, TYPE=1, NAME=2).
 	prevSelectedName := ""
@@ -672,8 +766,8 @@ func (m *Model) rebuildEventsTable() {
 
 // getFilteredEvents returns events filtered by current selection.
 func (m Model) getFilteredEvents() []data.Event {
-	// In Pod view, show events for that specific pod
-	if m.viewState.ViewType == data.PodView {
+	// In Pod view or Containers view, show events for that specific pod
+	if m.viewState.ViewType == data.PodView || m.viewState.ViewType == data.ContainersView {
 		filtered := []data.Event{}
 		for _, event := range m.allEvents {
 			if event.Parent == m.viewState.SelectedPod {

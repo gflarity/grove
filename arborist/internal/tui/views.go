@@ -31,6 +31,11 @@ func (m Model) View() string {
 		return "Syncing..."
 	}
 
+	// Logs overlay takes over the full screen
+	if m.logsOverlayActive {
+		return m.renderLogsOverlay()
+	}
+
 	// YAML overlay takes over the full screen
 	if m.yamlOverlayActive {
 		return m.renderYAMLOverlay()
@@ -156,7 +161,7 @@ func (m Model) renderHeaderFrame() string {
 
 	items := []menuItem{
 		{":", "Cmd"},
-		{"l", "Lens"},
+		{"v", "View"},
 		{"/", "Filter"},
 		{"tab", "Switch"},
 	}
@@ -169,10 +174,16 @@ func (m Model) renderHeaderFrame() string {
 	}
 
 	items = append(items, menuItem{"y", "YAML"})
+	if m.logsAvailable() {
+		items = append(items, menuItem{"l", "Logs"})
+	}
+	if m.shellAvailable() {
+		items = append(items, menuItem{"s", "Shell"})
+	}
 	if m.topologyAvailable() {
 		items = append(items, menuItem{"t", "Topology"})
 	}
-	items = append(items, menuItem{"e", "Errors"})
+	items = append(items, menuItem{"!", "Errors"})
 
 	if m.viewState.ViewType != data.ForestView {
 		items = append(items, menuItem{"esc", "Back"})
@@ -426,12 +437,7 @@ func (m Model) renderResourcesFrame(height int) string {
 	title := m.renderResourcesSectionHeader()
 
 	// Build the content
-	var content string
-	if m.viewState.ViewType == data.PodView {
-		content = m.renderPodViewport()
-	} else {
-		content = m.renderResourcesTable()
-	}
+	content := m.renderResourcesTable()
 
 	return renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
 }
@@ -553,12 +559,7 @@ func (m Model) renderResourcesSection(height int) string {
 	header := m.renderResourcesSectionHeader()
 
 	// Content
-	var content string
-	if m.viewState.ViewType == data.PodView {
-		content = m.renderPodViewport()
-	} else {
-		content = m.renderResourcesTable()
-	}
+	content := m.renderResourcesTable()
 
 	return header + "\n" + content
 }
@@ -595,8 +596,17 @@ func renderSectionHeader(label string, count int, isActive bool, suffix string) 
 // renderResourcesSectionHeader renders the resources section header in k9s style.
 // Example: "Resources [3] Forest > my-pcs > replica-0"
 func (m Model) renderResourcesSectionHeader() string {
-	viewKey := m.getCurrentViewKey()
-	resources := m.allResources[viewKey]
+	var count int
+	if m.viewState.ViewType == data.ContainersView {
+		count = len(m.containerInfos)
+	} else {
+		viewKey := m.getCurrentViewKey()
+		count = len(m.allResources[viewKey])
+	}
+	label := "Resources"
+	if m.viewState.ViewType == data.ContainersView {
+		label = "Containers"
+	}
 
 	suffix := m.renderBreadcrumb()
 
@@ -606,7 +616,7 @@ func (m Model) renderResourcesSectionHeader() string {
 			FilterBarStyle.Render("filter:") + " " + m.filterText
 	}
 
-	return renderSectionHeader("Resources", len(resources), m.activePane == data.ResourcesPane, suffix)
+	return renderSectionHeader(label, count, m.activePane == data.ResourcesPane, suffix)
 }
 
 // renderEventsSectionHeader renders the events section header in k9s style.
@@ -717,6 +727,105 @@ func (m Model) renderYAMLSearchFrame() string {
 	return topLine + "\n" + contentLine + "\n" + bottomLine
 }
 
+// renderLogsOverlay renders the full-screen logs overlay with framed viewport.
+func (m Model) renderLogsOverlay() string {
+	var sections []string
+
+	// Title: "Logs: pod-name / container-name"
+	title := SectionHeaderActiveStyle.Render("Logs") + " " +
+		SectionCountStyle.Render(m.logsPodName+"/"+m.logsContainerName)
+
+	// Status indicators
+	wrapStatus := "OFF"
+	if m.logsWrapEnabled {
+		wrapStatus = "ON"
+	}
+	autoScrollStatus := "OFF"
+	if m.logsAutoScroll {
+		autoScrollStatus = "ON"
+	}
+
+	scrollPct := ""
+	if m.logsViewport.TotalLineCount() > 0 {
+		pct := int(m.logsViewport.ScrollPercent() * 100)
+		scrollPct = fmt.Sprintf(" %d%%", pct)
+	}
+
+	// Col indicator (shows when horizontally scrolled)
+	colIndicator := ""
+	if m.logsHorizontalOffset > 0 {
+		colIndicator = fmt.Sprintf(" Col:%d", m.logsHorizontalOffset)
+	}
+
+	// Key hints
+	hints := MenuKeyStyle.Render("<esc>") + MenuActionStyle.Render("Close") + "  " +
+		MenuKeyStyle.Render("<↑↓←→>") + MenuActionStyle.Render("Scroll") + "  " +
+		MenuKeyStyle.Render("<w>") + MenuActionStyle.Render("Wrap:"+wrapStatus) + "  " +
+		MenuKeyStyle.Render("<s>") + MenuActionStyle.Render("AutoScroll:"+autoScrollStatus) + "  " +
+		MenuKeyStyle.Render("</>") + MenuActionStyle.Render("Search")
+	if m.logsSearchText != "" {
+		hints += "  " + MenuKeyStyle.Render("<n/N>") + MenuActionStyle.Render("Next/Prev")
+	}
+	hints += "  " + SectionCountStyle.Render(scrollPct+colIndicator)
+
+	// Add search bar if active
+	if m.logsSearchActive {
+		searchFrame := m.renderLogsSearchFrame()
+		sections = append(sections, searchFrame)
+	} else if m.logsSearchText != "" {
+		searchIndicator := FilterBarStyle.Render("search: " + m.logsSearchText)
+		sections = append(sections, searchIndicator)
+	}
+
+	// Calculate content height
+	fixedLines := 4 // frame top + bottom + title line + hints line
+	if m.logsSearchActive {
+		fixedLines += 3
+	} else if m.logsSearchText != "" {
+		fixedLines += 1
+	}
+
+	contentHeight := m.height - fixedLines
+	if contentHeight < 3 {
+		contentHeight = 3
+	}
+
+	m.logsViewport.Height = contentHeight
+
+	content := m.logsViewport.View()
+	frame := renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
+
+	result := ""
+	if len(sections) > 0 {
+		result = lipgloss.JoinVertical(lipgloss.Left, sections...) + "\n"
+	}
+	result += frame + "\n" + hints
+
+	return result
+}
+
+// renderLogsSearchFrame renders the search input as a framed box in the logs overlay.
+func (m Model) renderLogsSearchFrame() string {
+	border := lipgloss.NormalBorder()
+	bc := lipgloss.NewStyle().Foreground(ColorBorderFocused)
+	contentWidth := m.width - 2
+
+	content := "🔍" + m.logsSearchInput.View()
+	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
+
+	lineWidth := lipgloss.Width(content)
+	pad := contentWidth - lineWidth
+	if pad < 0 {
+		pad = 0
+	}
+
+	topLine := bc.Render(border.TopLeft + strings.Repeat(border.Top, contentWidth) + border.TopRight)
+	contentLine := bc.Render(border.Left) + content + strings.Repeat(" ", pad) + bc.Render(border.Right)
+	bottomLine := bc.Render(border.BottomLeft + strings.Repeat(border.Bottom, contentWidth) + border.BottomRight)
+
+	return topLine + "\n" + contentLine + "\n" + bottomLine
+}
+
 // renderBreadcrumb returns the breadcrumb title for the current view with lipgloss styling.
 func (m Model) renderBreadcrumb() string {
 	forestStyle := BreadcrumbStyles["Forest"]
@@ -789,7 +898,7 @@ func (m Model) renderBreadcrumb() string {
 		}
 		return forestStyle.Render("Forest") + sep + parent + sep + pcStyle.Render(m.viewState.SelectedPodClique)
 
-	case data.PodView:
+	case data.ContainersView, data.PodView:
 		if !hasPCS {
 			label := forestResourceTypeLabel(m.forestResourceType)
 			bc := forestStyle.Render(label)
@@ -828,7 +937,7 @@ func (m Model) renderMenuBar() string {
 
 	items := []menuItem{
 		{":", "Cmd"},
-		{"l", "Lens"},
+		{"v", "View"},
 		{"/", "Filter"},
 		{"tab", "Switch"},
 	}
@@ -841,10 +950,16 @@ func (m Model) renderMenuBar() string {
 	}
 
 	items = append(items, menuItem{"y", "YAML"})
+	if m.logsAvailable() {
+		items = append(items, menuItem{"l", "Logs"})
+	}
+	if m.shellAvailable() {
+		items = append(items, menuItem{"s", "Shell"})
+	}
 	if m.topologyAvailable() {
 		items = append(items, menuItem{"t", "Topology"})
 	}
-	items = append(items, menuItem{"e", "Errors"})
+	items = append(items, menuItem{"!", "Errors"})
 
 	if m.viewState.ViewType != data.ForestView {
 		items = append(items, menuItem{"esc", "Back"})
@@ -872,7 +987,7 @@ func (m Model) buildShortcutsString() string {
 	var parts []string
 
 	parts = append(parts, "<:>Cmd")
-	parts = append(parts, "<l>Lens")
+	parts = append(parts, "<v>View")
 	parts = append(parts, "</>Filter")
 	parts = append(parts, "<tab>Switch")
 
@@ -884,10 +999,16 @@ func (m Model) buildShortcutsString() string {
 	}
 
 	parts = append(parts, "<y>YAML")
+	if m.logsAvailable() {
+		parts = append(parts, "<l>Logs")
+	}
+	if m.shellAvailable() {
+		parts = append(parts, "<s>Shell")
+	}
 	if m.topologyAvailable() {
 		parts = append(parts, "<t>Topology")
 	}
-	parts = append(parts, "<e>Errors")
+	parts = append(parts, "<!>Errors")
 
 	if m.viewState.ViewType != data.ForestView {
 		parts = append(parts, "<esc>Back")
@@ -912,6 +1033,21 @@ func forestResourceTypeLabel(rt string) string {
 	default:
 		return "Forest"
 	}
+}
+
+// shellAvailable returns true when the 's' key should be shown in the menu.
+// This is true in ContainersView, or when a Pod is selected in the resources table.
+func (m Model) shellAvailable() bool {
+	if m.viewState.ViewType == data.ContainersView {
+		return true
+	}
+	if m.viewState.ViewType == data.PodCliqueView || m.viewState.ViewType == data.ForestView {
+		selectedRow := m.resourcesTable.SelectedRow()
+		if len(selectedRow) >= 2 && selectedRow[1] == "Pod" {
+			return true
+		}
+	}
+	return false
 }
 
 // colorizeResourceRow returns plain text for each column value.

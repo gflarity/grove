@@ -211,7 +211,7 @@ func TestErrorLogFrame_ShowsPlaceholderWhenEmpty(t *testing.T) {
 	}
 }
 
-// --- 'e' keybinding ---
+// --- '!' keybinding ---
 
 func TestEKey_TogglesErrorLogOff(t *testing.T) {
 	m := newTestModel(nil)
@@ -220,9 +220,9 @@ func TestEKey_TogglesErrorLogOff(t *testing.T) {
 		t.Fatal("precondition: errorLogVisible should be true")
 	}
 
-	m = sendRune(m, 'e')
+	m = sendRune(m, '!')
 	if m.errorLogVisible {
-		t.Error("expected 'e' to toggle errorLogVisible to false")
+		t.Error("expected '!' to toggle errorLogVisible to false")
 	}
 }
 
@@ -231,23 +231,23 @@ func TestEKey_TogglesErrorLogOn(t *testing.T) {
 	m.addError("err")
 	m.errorLogVisible = false
 
-	m = sendRune(m, 'e')
+	m = sendRune(m, '!')
 	if !m.errorLogVisible {
-		t.Error("expected 'e' to toggle errorLogVisible to true")
+		t.Error("expected '!' to toggle errorLogVisible to true")
 	}
 }
 
 func TestEKey_TogglesEvenWhenErrorLogEmpty(t *testing.T) {
 	m := newTestModel(nil)
-	// No errors — 'e' should still toggle errorLogVisible
-	m = sendRune(m, 'e')
+	// No errors — '!' should still toggle errorLogVisible
+	m = sendRune(m, '!')
 	if !m.errorLogVisible {
-		t.Error("expected 'e' to toggle errorLogVisible to true even with empty errorLog")
+		t.Error("expected '!' to toggle errorLogVisible to true even with empty errorLog")
 	}
 	// Toggle back
-	m = sendRune(m, 'e')
+	m = sendRune(m, '!')
 	if m.errorLogVisible {
-		t.Error("expected 'e' to toggle errorLogVisible back to false")
+		t.Error("expected '!' to toggle errorLogVisible back to false")
 	}
 }
 
@@ -256,7 +256,7 @@ func TestNewError_ReShowsBoxAfterToggleAway(t *testing.T) {
 	m.addError("first error")
 
 	// User toggles it away
-	m = sendRune(m, 'e')
+	m = sendRune(m, '!')
 	if m.errorLogVisible {
 		t.Fatal("precondition: error log should be hidden after toggle")
 	}
@@ -275,8 +275,8 @@ func TestErrorsMenuHint_AppearsWhenErrorsExist(t *testing.T) {
 	m.addError("err")
 
 	shortcuts := m.buildShortcutsString()
-	if !strings.Contains(shortcuts, "<e>Errors") {
-		t.Errorf("expected shortcuts to contain '<e>Errors', got %q", shortcuts)
+	if !strings.Contains(shortcuts, "<!>Errors") {
+		t.Errorf("expected shortcuts to contain '<!>Errors', got %q", shortcuts)
 	}
 }
 
@@ -284,8 +284,8 @@ func TestErrorsMenuHint_AlwaysPresent(t *testing.T) {
 	m := newTestModel(nil)
 
 	shortcuts := m.buildShortcutsString()
-	if !strings.Contains(shortcuts, "<e>Errors") {
-		t.Errorf("expected shortcuts to always contain '<e>Errors', got %q", shortcuts)
+	if !strings.Contains(shortcuts, "<!>Errors") {
+		t.Errorf("expected shortcuts to always contain '<!>Errors', got %q", shortcuts)
 	}
 }
 
@@ -399,7 +399,7 @@ func TestResizeLayout_TablesGrowWhenErrorLogToggledOff(t *testing.T) {
 	shrunkHeight := m.resourcesTable.Height()
 
 	// Toggle off
-	m = sendRune(m, 'e')
+	m = sendRune(m, '!')
 	restoredHeight := m.resourcesTable.Height()
 
 	if shrunkHeight >= baseHeight {
@@ -417,7 +417,7 @@ func TestResizeLayout_EmptyErrorBoxStillShrinksTables(t *testing.T) {
 	baseHeight := m.resourcesTable.Height()
 
 	// Toggle on empty error box
-	m = sendRune(m, 'e')
+	m = sendRune(m, '!')
 	if !m.errorLogVisible {
 		t.Fatal("precondition: errorLogVisible should be true")
 	}
@@ -826,6 +826,367 @@ func TestTopologyColumn_AppearsAfterCacheUpdateDeliversTopology(t *testing.T) {
 	}
 	if !found {
 		t.Error("TOPOLOGY column should appear after topology data becomes available")
+	}
+}
+
+// ===========================================================================
+// Part 4: Logs Autoscroll (tail -f) Tests
+// ===========================================================================
+
+// helper: create a model with the logs overlay open on a mock pod/container.
+func newTestModelWithLogsOverlay() Model {
+	mc := data.NewMockGlobalCache()
+	m := newTestModelWithCache(mc)
+	m.logsOverlayActive = true
+	m.logsPodName = "test-pod"
+	m.logsContainerName = "main"
+	m.logsNamespace = "default"
+	m.logsContent = "line 1\nline 2\nline 3"
+	m.logsViewport.SetContent(m.logsContent)
+	return m
+}
+
+// --- Toggle on ---
+
+func TestLogsAutoScroll_ToggleOn(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	if m.logsAutoScroll {
+		t.Fatal("precondition: logsAutoScroll should be false")
+	}
+
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+
+	if !m.logsAutoScroll {
+		t.Error("expected logsAutoScroll to be true after pressing 's'")
+	}
+	if cmd == nil {
+		t.Error("expected a command to be returned (tick + log fetch)")
+	}
+}
+
+// --- Toggle off ---
+
+func TestLogsAutoScroll_ToggleOff(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = true
+
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+
+	if m.logsAutoScroll {
+		t.Error("expected logsAutoScroll to be false after second 's' press")
+	}
+	if cmd != nil {
+		t.Error("expected nil command when turning off autoscroll")
+	}
+}
+
+// --- Close overlay with Esc resets autoscroll ---
+
+func TestLogsAutoScroll_ResetOnEsc(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = true
+
+	m = mustApply(m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m.logsAutoScroll {
+		t.Error("expected logsAutoScroll to be false after closing overlay with Esc")
+	}
+	if m.logsOverlayActive {
+		t.Error("expected logsOverlayActive to be false after Esc")
+	}
+}
+
+// --- Close overlay with 'q' resets autoscroll ---
+
+func TestLogsAutoScroll_ResetOnQ(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = true
+
+	m = sendRune(m, 'q')
+
+	if m.logsAutoScroll {
+		t.Error("expected logsAutoScroll to be false after closing overlay with 'q'")
+	}
+	if m.logsOverlayActive {
+		t.Error("expected logsOverlayActive to be false after 'q'")
+	}
+}
+
+// --- Tick when overlay closed is no-op ---
+
+func TestLogsAutoScrollTick_NoOpWhenOverlayClosed(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = true
+	m.logsOverlayActive = false // overlay closed
+
+	m, cmd := applyMsg(m, logsAutoScrollTickMsg{})
+
+	if cmd != nil {
+		t.Error("expected nil command when overlay is closed (tick should stop)")
+	}
+}
+
+// --- Tick when autoscroll off is no-op ---
+
+func TestLogsAutoScrollTick_NoOpWhenAutoScrollOff(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = false
+
+	m, cmd := applyMsg(m, logsAutoScrollTickMsg{})
+
+	if cmd != nil {
+		t.Error("expected nil command when autoscroll is off (tick should stop)")
+	}
+}
+
+// --- Tick when active schedules next tick + refetch ---
+
+func TestLogsAutoScrollTick_SchedulesNextWhenActive(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = true
+
+	_, cmd := applyMsg(m, logsAutoScrollTickMsg{})
+
+	if cmd == nil {
+		t.Error("expected a command to be returned (next tick + log refetch)")
+	}
+}
+
+// --- Render shows AutoScroll:OFF ---
+
+func TestLogsOverlay_ShowsAutoScrollOFF(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = false
+
+	view := m.View()
+	if !strings.Contains(view, "AutoScroll:OFF") {
+		t.Error("expected view to contain 'AutoScroll:OFF'")
+	}
+}
+
+// --- Render shows AutoScroll:ON ---
+
+func TestLogsOverlay_ShowsAutoScrollON(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = true
+
+	view := m.View()
+	if !strings.Contains(view, "AutoScroll:ON") {
+		t.Error("expected view to contain 'AutoScroll:ON'")
+	}
+}
+
+// --- handleLogsExec resets autoscroll ---
+
+func TestLogsExec_ResetsAutoScroll(t *testing.T) {
+	mc := data.NewMockGlobalCache()
+	snap := mc.Snapshot()
+	snap.PodCliqueSets = []data.Resource{
+		{Name: "test-pod", Type: "Pod", Namespace: "default", Ready: "1/1", Scheduled: "Running"},
+	}
+	mc.SetSnapshot(snap)
+	m := newTestModelWithCache(mc)
+	m.forestResourceType = "pod"
+	m.applySnapshot()
+
+	// Set autoscroll as if it were previously active
+	m.logsAutoScroll = true
+
+	// Put in containers view to use the direct logs path
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "test-pod"
+	m.containerInfos = []data.ContainerInfo{
+		{Name: "main", Image: "nginx", State: "Running", Ready: true},
+	}
+	m.rebuildContainersTable()
+
+	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+
+	if m.logsAutoScroll {
+		t.Error("expected logsAutoScroll to be reset to false when opening new logs overlay")
+	}
+}
+
+// --- resolveCarriageReturns ---
+
+func TestResolveCarriageReturns_NoOp(t *testing.T) {
+	input := "hello\nworld"
+	got := resolveCarriageReturns(input)
+	if got != input {
+		t.Errorf("expected no change, got %q", got)
+	}
+}
+
+func TestResolveCarriageReturns_ProgressBar(t *testing.T) {
+	// Simulates tqdm output: multiple \r-separated updates on one line
+	input := "Loading:  10%\rLoading:  50%\rLoading: 100%"
+	got := resolveCarriageReturns(input)
+	if got != "Loading: 100%" {
+		t.Errorf("expected last segment, got %q", got)
+	}
+}
+
+func TestResolveCarriageReturns_MultiLine(t *testing.T) {
+	input := "line1\roverwritten1\nline2\roverwritten2\nplain"
+	got := resolveCarriageReturns(input)
+	want := "overwritten1\noverwritten2\nplain"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// --- truncateLines ---
+
+func TestTruncateLines_ShortLinesUnchanged(t *testing.T) {
+	input := "short\nlines"
+	got := truncateLines(input, 80)
+	if got != input {
+		t.Errorf("expected no change for short lines, got %q", got)
+	}
+}
+
+func TestTruncateLines_LongLinesTruncated(t *testing.T) {
+	long := strings.Repeat("x", 200)
+	got := truncateLines(long, 50)
+	if len(got) > 50 {
+		t.Errorf("expected truncated to <=50 chars, got len=%d", len(got))
+	}
+}
+
+// --- handleLogsRequest stores namespace and resets autoscroll ---
+
+func TestLogsRequest_StoresNamespaceAndResetsAutoScroll(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsAutoScroll = true
+
+	m = mustApply(m, LogsRequestMsg{PodName: "new-pod", Namespace: "kube-system", Container: "sidecar"})
+
+	if m.logsAutoScroll {
+		t.Error("expected logsAutoScroll to be reset on LogsRequestMsg")
+	}
+	if m.logsNamespace != "kube-system" {
+		t.Errorf("expected logsNamespace = %q, got %q", "kube-system", m.logsNamespace)
+	}
+}
+
+// ===========================================================================
+// Part 5: Logs Overlay Horizontal Scrolling Tests
+// ===========================================================================
+
+// --- horizontalSlice ---
+
+func TestHorizontalSlice_NoOffset(t *testing.T) {
+	input := "abcdefghij\n1234567890"
+	got := horizontalSlice(input, 0, 5)
+	want := "abcde\n12345"
+	if got != want {
+		t.Errorf("horizontalSlice(offset=0, width=5) = %q, want %q", got, want)
+	}
+}
+
+func TestHorizontalSlice_WithOffset(t *testing.T) {
+	input := "abcdefghij\n1234567890"
+	got := horizontalSlice(input, 3, 5)
+	want := "defgh\n45678"
+	if got != want {
+		t.Errorf("horizontalSlice(offset=3, width=5) = %q, want %q", got, want)
+	}
+}
+
+func TestHorizontalSlice_OffsetBeyondLine(t *testing.T) {
+	input := "short\nabc"
+	got := horizontalSlice(input, 100, 10)
+	want := "\n"
+	if got != want {
+		t.Errorf("horizontalSlice(offset=100) = %q, want %q (empty lines)", got, want)
+	}
+}
+
+// --- Arrow key tests ---
+
+func TestLogsRightArrow_IncrementsOffset(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsWrapEnabled = false
+	m.logsHorizontalOffset = 0
+
+	m = mustApply(m, tea.KeyMsg{Type: tea.KeyRight})
+
+	if m.logsHorizontalOffset != logsHorizontalScrollStep {
+		t.Errorf("logsHorizontalOffset = %d, want %d", m.logsHorizontalOffset, logsHorizontalScrollStep)
+	}
+}
+
+func TestLogsLeftArrow_DecrementsOffset(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsWrapEnabled = false
+	m.logsHorizontalOffset = 16
+
+	m = mustApply(m, tea.KeyMsg{Type: tea.KeyLeft})
+
+	want := 16 - logsHorizontalScrollStep
+	if m.logsHorizontalOffset != want {
+		t.Errorf("logsHorizontalOffset = %d, want %d", m.logsHorizontalOffset, want)
+	}
+}
+
+func TestLogsLeftArrow_ClampsAtZero(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsWrapEnabled = false
+	m.logsHorizontalOffset = 3 // less than one step
+
+	m = mustApply(m, tea.KeyMsg{Type: tea.KeyLeft})
+
+	if m.logsHorizontalOffset != 0 {
+		t.Errorf("logsHorizontalOffset = %d, want 0 (clamped)", m.logsHorizontalOffset)
+	}
+}
+
+func TestLogsLeftArrow_NoOpWhenWrapEnabled(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsWrapEnabled = true
+	m.logsHorizontalOffset = 16
+
+	m = mustApply(m, tea.KeyMsg{Type: tea.KeyLeft})
+
+	if m.logsHorizontalOffset != 16 {
+		t.Errorf("logsHorizontalOffset = %d, want 16 (unchanged when wrap enabled)", m.logsHorizontalOffset)
+	}
+}
+
+func TestLogsWrapToggle_ResetsHorizontalOffset(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsWrapEnabled = false
+	m.logsHorizontalOffset = 24
+
+	m = sendRune(m, 'w')
+
+	if m.logsHorizontalOffset != 0 {
+		t.Errorf("logsHorizontalOffset = %d, want 0 after wrap toggle", m.logsHorizontalOffset)
+	}
+	if !m.logsWrapEnabled {
+		t.Error("expected logsWrapEnabled to be true after toggle")
+	}
+}
+
+// --- Col indicator tests ---
+
+func TestLogsOverlay_ShowsColIndicator(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsHorizontalOffset = 16
+
+	view := m.View()
+	if !strings.Contains(view, "Col:16") {
+		t.Error("expected view to contain 'Col:16' when logsHorizontalOffset > 0")
+	}
+}
+
+func TestLogsOverlay_HidesColIndicator(t *testing.T) {
+	m := newTestModelWithLogsOverlay()
+	m.logsHorizontalOffset = 0
+
+	view := m.View()
+	if strings.Contains(view, "Col:") {
+		t.Error("expected view NOT to contain 'Col:' when logsHorizontalOffset = 0")
 	}
 }
 

@@ -645,8 +645,8 @@ func TestPodYAMLView_FullDrillDown(t *testing.T) {
 	// Navigate into the first child resource
 	m = sendKey(m, tea.KeyEnter)
 
-	// Continue drilling until we reach PodView or can't go further
-	for m.viewState.ViewType != data.PodView && m.viewState.ViewType != data.ForestView {
+	// Continue drilling until we reach ContainersView or can't go further
+	for m.viewState.ViewType != data.ContainersView && m.viewState.ViewType != data.ForestView {
 		prevViewType := m.viewState.ViewType
 		m = sendKey(m, tea.KeyEnter)
 		if m.viewState.ViewType == prevViewType {
@@ -654,9 +654,9 @@ func TestPodYAMLView_FullDrillDown(t *testing.T) {
 		}
 	}
 
-	if m.viewState.ViewType == data.PodView {
+	if m.viewState.ViewType == data.ContainersView {
 		if m.viewState.SelectedPod == "" {
-			t.Fatal("expected SelectedPod to be set in PodView")
+			t.Fatal("expected SelectedPod to be set in ContainersView")
 		}
 
 		// Go back
@@ -2195,26 +2195,26 @@ func TestCommandMode_HeaderShowsCmdShortcut(t *testing.T) {
 }
 
 // ===========================================================================
-// Lens Edit Mode Tests (inline header editing via 'l' key)
+// Lens Edit Mode Tests (inline header editing via 'v' key)
 // ===========================================================================
 
-func TestLensEdit_ActivateWithL(t *testing.T) {
+func TestLensEdit_ActivateWithV(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	if m.lensEditActive {
 		t.Fatal("expected lens edit mode inactive initially")
 	}
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	if !m.lensEditActive {
-		t.Fatal("expected lens edit mode active after pressing l")
+		t.Fatal("expected lens edit mode active after pressing v")
 	}
 }
 
 func TestLensEdit_EscCancels(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	if !m.lensEditActive {
 		t.Fatal("expected lens edit mode active")
 	}
@@ -2244,7 +2244,7 @@ func TestLensEdit_EnterExecutesTopology(t *testing.T) {
 		t.Fatalf("expected ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	for _, r := range "topology" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
@@ -2268,7 +2268,7 @@ func TestLensEdit_PrefixMatchTopology(t *testing.T) {
 
 	m := newTestModelWithCache(mc)
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	for _, r := range "top" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
@@ -2287,7 +2287,7 @@ func TestLensEdit_PrefixMatchForest(t *testing.T) {
 		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	for _, r := range "for" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
@@ -2302,7 +2302,7 @@ func TestLensEdit_PrefixMatchForest(t *testing.T) {
 func TestLensEdit_TabCompletion(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	for _, r := range "top" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
@@ -2319,7 +2319,7 @@ func TestLensEdit_TabCompletion(t *testing.T) {
 func TestLensEdit_TabCompletionForest(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	for _, r := range "for" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
@@ -2335,7 +2335,7 @@ func TestLensEdit_NoMatchDoesNothing(t *testing.T) {
 
 	viewBefore := m.viewState.ViewType
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	for _, r := range "xyz" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
@@ -2355,7 +2355,7 @@ func TestLensEdit_EmptyInputDoesNothing(t *testing.T) {
 
 	viewBefore := m.viewState.ViewType
 
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.viewState.ViewType != viewBefore {
@@ -2365,7 +2365,7 @@ func TestLensEdit_EmptyInputDoesNothing(t *testing.T) {
 
 func TestLensEdit_CtrlCQuitsFromLensEdit(t *testing.T) {
 	m := newTestModel(samplePCSResources())
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	if !m.lensEditActive {
 		t.Fatal("expected lens edit active")
 	}
@@ -2390,7 +2390,7 @@ func TestLensEdit_HeaderShowsInlineInput(t *testing.T) {
 	}
 
 	// Activate lens edit and type something
-	m = sendRune(m, 'l')
+	m = sendRune(m, 'v')
 	for _, r := range "top" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
@@ -4012,8 +4012,8 @@ func TestFlatPod_DrillInto_ShowsPodView(t *testing.T) {
 	// Drill into the first Pod
 	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
 
-	if m.viewState.ViewType != data.PodView {
-		t.Fatalf("expected PodView after drilling into Pod, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != data.ContainersView {
+		t.Fatalf("expected ContainersView after drilling into Pod, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 }
 
@@ -4636,13 +4636,13 @@ func TestFlatPod_DrillIn_ShowsPodViewAndBreadcrumb(t *testing.T) {
 	// Drill into the first Pod
 	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
 
-	if m.viewState.ViewType != data.PodView {
-		t.Fatalf("expected PodView after drilling from flat Pod list, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != data.ContainersView {
+		t.Fatalf("expected ContainersView after drilling from flat Pod list, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
 	// Lens should say "forest"
 	if got := m.viewDisplayName(); got != "forest" {
-		t.Fatalf("expected lens='forest' in PodView, got %q", got)
+		t.Fatalf("expected lens='forest' in ContainersView, got %q", got)
 	}
 
 	// Breadcrumb should show Pods > pod-name, not empty PCS segments
@@ -4654,9 +4654,9 @@ func TestFlatPod_DrillIn_ShowsPodViewAndBreadcrumb(t *testing.T) {
 		t.Errorf("breadcrumb should not contain 'replica-' for flat pod drill, got: %s", bc)
 	}
 
-	// Should have returned a loadPodYAML command
+	// Should have returned a loadPodContainers command
 	if cmd == nil {
-		t.Error("expected loadPodYAMLCmd after drilling into Pod")
+		t.Error("expected loadPodContainersCmd after drilling into Pod")
 	}
 
 	// Navigate back
@@ -4702,21 +4702,21 @@ func TestFlatPC_DrillIntoPod_FullRoundTrip(t *testing.T) {
 
 	// Drill into first Pod
 	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if m.viewState.ViewType != data.PodView {
-		t.Fatalf("expected PodView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != data.ContainersView {
+		t.Fatalf("expected ContainersView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
 	// Back to PodCliqueView
 	m = sendKey(m, tea.KeyEsc)
 	if m.viewState.ViewType != data.PodCliqueView {
-		t.Fatalf("expected PodCliqueView after Esc from PodView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		t.Fatalf("expected PodCliqueView after Esc from ContainersView, got %s", data.ViewTypeName(m.viewState.ViewType))
 	}
 
 	// Pods should still be there
 	viewKey = m.getCurrentViewKey()
 	pods = m.allResources[viewKey]
 	if len(pods) == 0 {
-		t.Fatal("expected pods still populated after back from PodView")
+		t.Fatal("expected pods still populated after back from ContainersView")
 	}
 
 	// Back to ForestView
@@ -4968,5 +4968,627 @@ func TestHeaderShowsSpecificNamespace(t *testing.T) {
 	header := m.renderHeaderFrame()
 	if !strings.Contains(header, "gpu-stack") {
 		t.Errorf("expected header to show 'gpu-stack', got:\n%s", header)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ContainersView and Shell tests
+// ---------------------------------------------------------------------------
+
+// TestDrillIntoPod_ShowsContainersView verifies that drilling into a Pod
+// from PodCliqueView transitions to ContainersView (not PodView).
+func TestDrillIntoPod_ShowsContainersView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Navigate to alpha-pcs → replica-0 (auto-skips single replica) → PodClique
+	m = sendKey(m, tea.KeyEnter)
+
+	// Select the standalone PodClique
+	for i, row := range m.resourcesTable.Rows() {
+		if len(row) >= 3 && row[1] == "PodClique" {
+			m.resourcesTable.SetCursor(i)
+			break
+		}
+	}
+	m = sendKey(m, tea.KeyEnter) // into PodCliqueView
+
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+
+	// Now drill into a Pod
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.viewState.ViewType != data.ContainersView {
+		t.Fatalf("expected ContainersView after drilling into Pod, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.viewState.SelectedPod == "" {
+		t.Fatal("expected SelectedPod to be set")
+	}
+	if cmd == nil {
+		t.Fatal("expected loadPodContainersCmd to be returned")
+	}
+}
+
+// TestContainersView_PodContainersMsg_PopulatesTable verifies that receiving
+// a PodContainersMsg populates the containers table.
+func TestContainersView_PodContainersMsg_PopulatesTable(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set up ContainersView state manually
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+
+	// Deliver PodContainersMsg
+	containers := []data.ContainerInfo{
+		{Name: "main", Image: "nvidia/triton:24.04", Ready: true, State: "Running", RestartCount: 0},
+		{Name: "sidecar", Image: "envoy:1.28", Ready: true, State: "Running", RestartCount: 2},
+		{Name: "init-wait", Image: "busybox:1.36", Ready: false, State: "Waiting", RestartCount: 0},
+	}
+	m = mustApply(m, PodContainersMsg{
+		PodName:    "alpha-pcs-0-pc-worker-0",
+		Namespace:  "default",
+		Containers: containers,
+	})
+
+	if len(m.containerInfos) != 3 {
+		t.Fatalf("expected 3 containerInfos, got %d", len(m.containerInfos))
+	}
+
+	rows := m.resourcesTable.Rows()
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 table rows, got %d", len(rows))
+	}
+
+	// Check first row content
+	if rows[0][0] != "main" {
+		t.Errorf("expected first container name 'main', got %q", rows[0][0])
+	}
+	if rows[0][2] != "Running" {
+		t.Errorf("expected state 'Running', got %q", rows[0][2])
+	}
+	if rows[0][3] != "true" {
+		t.Errorf("expected ready 'true', got %q", rows[0][3])
+	}
+
+	// Check third row (not ready)
+	if rows[2][0] != "init-wait" {
+		t.Errorf("expected third container name 'init-wait', got %q", rows[2][0])
+	}
+	if rows[2][3] != "false" {
+		t.Errorf("expected ready 'false', got %q", rows[2][3])
+	}
+}
+
+// TestContainersView_PodContainersMsg_Error adds to error log.
+func TestContainersView_PodContainersMsg_Error(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+
+	m = mustApply(m, PodContainersMsg{
+		PodName: "alpha-pcs-0-pc-worker-0",
+		Err:     errForTest("connection refused"),
+	})
+
+	if len(m.containerInfos) != 0 {
+		t.Fatalf("expected 0 containerInfos on error, got %d", len(m.containerInfos))
+	}
+	if len(m.errorLog) == 0 {
+		t.Fatal("expected error log entry on PodContainersMsg error")
+	}
+	if !strings.Contains(m.errorLog[0].Message, "connection refused") {
+		t.Errorf("expected error message to contain 'connection refused', got %q", m.errorLog[0].Message)
+	}
+}
+
+// TestContainersView_NavigateBack_ClearsContainerInfos verifies that Esc
+// from ContainersView clears containerInfos and returns to the parent view.
+func TestContainersView_NavigateBack_ClearsContainerInfos(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set up ContainersView with some containers
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
+	m.containerInfos = []data.ContainerInfo{
+		{Name: "main", Image: "nvidia/triton:24.04", Ready: true, State: "Running"},
+	}
+
+	m = sendKey(m, tea.KeyEsc)
+
+	if m.viewState.ViewType != data.PodCliqueView {
+		t.Fatalf("expected PodCliqueView after Esc, got %s", data.ViewTypeName(m.viewState.ViewType))
+	}
+	if m.containerInfos != nil {
+		t.Fatalf("expected containerInfos to be nil after navigating back, got %d entries", len(m.containerInfos))
+	}
+	if m.viewState.SelectedPod != "" {
+		t.Fatalf("expected SelectedPod to be cleared, got %q", m.viewState.SelectedPod)
+	}
+}
+
+// TestContainersView_Breadcrumb verifies that the breadcrumb in ContainersView
+// shows the full path including the pod name.
+func TestContainersView_Breadcrumb(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+
+	bc := m.renderBreadcrumb()
+	if !strings.Contains(bc, "alpha-pcs-0-pc-worker-0") {
+		t.Errorf("breadcrumb should contain pod name, got: %s", bc)
+	}
+	if !strings.Contains(bc, "alpha-pcs") {
+		t.Errorf("breadcrumb should contain PCS name, got: %s", bc)
+	}
+}
+
+// TestContainersView_SectionHeader_ShowsContainers verifies the section header
+// says "Containers" with the correct count.
+func TestContainersView_SectionHeader_ShowsContainers(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.containerInfos = []data.ContainerInfo{
+		{Name: "main", Image: "img", Ready: true, State: "Running"},
+		{Name: "sidecar", Image: "img2", Ready: true, State: "Running"},
+	}
+
+	header := m.renderResourcesSectionHeader()
+	if !strings.Contains(header, "Containers") {
+		t.Errorf("expected section header to contain 'Containers', got: %s", header)
+	}
+	if !strings.Contains(header, "[2]") {
+		t.Errorf("expected section header to show count [2], got: %s", header)
+	}
+}
+
+// TestShellKey_ContainersView_RunningContainer verifies that pressing 's'
+// in ContainersView with a running container selected returns a tea.Exec command.
+func TestShellKey_ContainersView_RunningContainer(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+	m.containerInfos = []data.ContainerInfo{
+		{Name: "main", Image: "nvidia/triton:24.04", Ready: true, State: "Running"},
+	}
+	m.rebuildContainersTable()
+
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if cmd == nil {
+		t.Fatal("expected a command (tea.Exec) when pressing 's' on a running container")
+	}
+}
+
+// TestShellKey_ContainersView_NonRunningContainer shows error when shelling
+// into a non-running container.
+func TestShellKey_ContainersView_NonRunningContainer(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+	m.containerInfos = []data.ContainerInfo{
+		{Name: "init-wait", Image: "busybox:1.36", Ready: false, State: "Waiting"},
+	}
+	m.rebuildContainersTable()
+
+	updated, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated
+	if cmd != nil {
+		t.Fatal("expected no command when pressing 's' on a non-running container")
+	}
+	if len(m.errorLog) == 0 {
+		t.Fatal("expected error log entry for non-running container shell attempt")
+	}
+	if !strings.Contains(m.errorLog[0].Message, "Waiting") {
+		t.Errorf("expected error message to mention state 'Waiting', got: %s", m.errorLog[0].Message)
+	}
+}
+
+// TestShellKey_PodCliqueView_PodSelected verifies that pressing 's' in
+// PodCliqueView with a Pod selected returns a fetchFirstRunningContainerCmd.
+func TestShellKey_PodCliqueView_PodSelected(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Navigate to PodClique view with pods
+	m.viewState.ViewType = data.PodCliqueView
+	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
+	m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
+	m.rebuildResourcesTable()
+
+	// Verify a Pod is selected
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 2 || selectedRow[1] != "Pod" {
+		t.Fatalf("expected a Pod row to be selected, got: %v", selectedRow)
+	}
+
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if cmd == nil {
+		t.Fatal("expected a command when pressing 's' with a Pod selected in PodCliqueView")
+	}
+}
+
+// TestShellKey_PodCliqueView_NoPodSelected verifies that pressing 's' when
+// no Pod is in the selected row is a no-op.
+func TestShellKey_PodCliqueView_NoPodSelected(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// PodCliqueSetReplicaView where the selected row is a PCSG, not a Pod
+	m.viewState.ViewType = data.PodCliqueSetReplicaView
+	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+	m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
+	m.rebuildResourcesTable()
+
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if cmd != nil {
+		t.Fatal("expected no command when pressing 's' in a view without Pod selection")
+	}
+}
+
+// TestShellKey_ForestPodLens verifies that pressing 's' in forest Pod lens
+// with a Pod selected returns a command.
+func TestShellKey_ForestPodLens(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pod forest lens
+	m.forestResourceType = "pod"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	// Verify a Pod is selected
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 2 || selectedRow[1] != "Pod" {
+		t.Fatalf("expected Pod in forest pod lens, got: %v", selectedRow)
+	}
+
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if cmd == nil {
+		t.Fatal("expected a command when pressing 's' with Pod selected in forest Pod lens")
+	}
+}
+
+// TestShellExitMsg_Error adds error to log.
+func TestShellExitMsg_Error(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = mustApply(m, ShellExitMsg{Err: errForTest("exit status 137")})
+
+	if len(m.errorLog) == 0 {
+		t.Fatal("expected error log entry on ShellExitMsg with error")
+	}
+	if !strings.Contains(m.errorLog[0].Message, "exit status 137") {
+		t.Errorf("expected error message to contain 'exit status 137', got %q", m.errorLog[0].Message)
+	}
+}
+
+// TestShellExitMsg_NoError does not add to error log.
+func TestShellExitMsg_NoError(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = mustApply(m, ShellExitMsg{Err: nil})
+
+	if len(m.errorLog) != 0 {
+		t.Fatalf("expected no error log entries on clean ShellExitMsg, got %d", len(m.errorLog))
+	}
+}
+
+// TestContainersView_EventsShowPodEvents verifies that events in ContainersView
+// are filtered to the selected pod.
+func TestContainersView_EventsShowPodEvents(t *testing.T) {
+	events := map[string][]data.Event{
+		"Pod/alpha-pcs-0-pc-worker-0": {
+			{Type: "Normal", Kind: "Pod", Reason: "Scheduled", Message: "assigned to node-1", Parent: "alpha-pcs-0-pc-worker-0"},
+		},
+		"Pod/other-pod": {
+			{Type: "Warning", Kind: "Pod", Reason: "Failed", Message: "crash", Parent: "other-pod"},
+		},
+	}
+	mc := buildMockCacheWithEvents(events)
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
+
+	filtered := m.getFilteredEvents()
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 event for selected pod, got %d", len(filtered))
+	}
+	if filtered[0].Reason != "Scheduled" {
+		t.Errorf("expected event reason 'Scheduled', got %q", filtered[0].Reason)
+	}
+}
+
+// TestShellAvailable_ContainersView returns true.
+func TestShellAvailable_ContainersView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+	m.viewState.ViewType = data.ContainersView
+	if !m.shellAvailable() {
+		t.Fatal("expected shellAvailable() = true in ContainersView")
+	}
+}
+
+// TestShellAvailable_ForestPCSView returns false.
+func TestShellAvailable_ForestPCSView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+	// In default Forest/PCS view, selected row is a PCS not a Pod
+	if m.shellAvailable() {
+		t.Fatal("expected shellAvailable() = false in ForestView with PCS selected")
+	}
+}
+
+// TestContainersView_YAMLOverlay verifies 'y' opens YAML overlay for the pod.
+func TestContainersView_YAMLOverlay(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !m.yamlOverlayActive {
+		t.Fatal("expected YAML overlay to be active after pressing 'y' in ContainersView")
+	}
+	if cmd == nil {
+		t.Fatal("expected loadResourceYAMLCmd to be returned")
+	}
+	if m.yamlResourceType != "Pod" {
+		t.Errorf("expected yamlResourceType 'Pod', got %q", m.yamlResourceType)
+	}
+}
+
+// ===========================================================================
+// Logs Overlay Tests
+// ===========================================================================
+
+func TestLogsOverlay_OpenFromContainersView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set up ContainersView state manually (same pattern as shell tests)
+	m.viewState.ViewType = data.ContainersView
+	m.viewState.SelectedPod = "alpha-pcs-0-pc-worker-0"
+	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
+	m.containerInfos = []data.ContainerInfo{
+		{Name: "worker", Image: "img:v1", State: "Running", Ready: true},
+	}
+	m.rebuildContainersTable()
+
+	// Press 'l' to open logs overlay
+	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if !m.logsOverlayActive {
+		t.Fatal("expected logs overlay active after pressing 'l' in ContainersView")
+	}
+	if cmd == nil {
+		t.Fatal("expected a command when pressing 'l' in ContainersView")
+	}
+	if m.logsContainerName != "worker" {
+		t.Errorf("expected logsContainerName='worker', got %q", m.logsContainerName)
+	}
+}
+
+func TestLogsOverlay_OpenFromPodCliqueView(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Set up PodCliqueView with Pod rows (same approach as shell tests)
+	m.viewState.ViewType = data.PodCliqueView
+	m.viewState.SelectedPodClique = "alpha-pcs-0-standalone-pc"
+	m.viewState.SelectedPodCliqueSet = "alpha-pcs"
+	m.viewState.SelectedReplicaIndex = "0"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	// Verify a Pod is selected
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 2 || selectedRow[1] != "Pod" {
+		t.Skipf("no Pod row selected in PodCliqueView, skipping (row: %v)", selectedRow)
+	}
+
+	// Press 'l' — should return a command (fetchFirstContainerForLogsCmd)
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if cmd == nil {
+		t.Fatal("expected a command when pressing 'l' with Pod selected in PodCliqueView")
+	}
+}
+
+func TestLogsOverlay_ReceiveLogsRequestOpensOverlay(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Simulate receiving a LogsRequestMsg (as if fetchFirstContainerForLogsCmd completed)
+	m, cmd := applyMsg(m, LogsRequestMsg{PodName: "test-pod", Namespace: "default", Container: "main"})
+
+	if !m.logsOverlayActive {
+		t.Fatal("expected logs overlay to be active after LogsRequestMsg")
+	}
+	if m.logsPodName != "test-pod" {
+		t.Errorf("expected logsPodName='test-pod', got %q", m.logsPodName)
+	}
+	if m.logsContainerName != "main" {
+		t.Errorf("expected logsContainerName='main', got %q", m.logsContainerName)
+	}
+	if cmd == nil {
+		t.Fatal("expected loadPodLogsCmd to be returned")
+	}
+}
+
+func TestLogsOverlay_ReceiveLogsContent(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Open overlay first
+	m = mustApply(m, LogsRequestMsg{PodName: "test-pod", Namespace: "default", Container: "main"})
+
+	// Deliver log content
+	m = mustApply(m, LogsContentMsg{PodName: "test-pod", Container: "main", Content: "line1\nline2\nline3"})
+
+	if m.logsContent != "line1\nline2\nline3" {
+		t.Errorf("expected logsContent to be set, got %q", m.logsContent)
+	}
+}
+
+func TestLogsOverlay_CloseWithEsc(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = mustApply(m, LogsRequestMsg{PodName: "test-pod", Namespace: "default", Container: "main"})
+	if !m.logsOverlayActive {
+		t.Fatal("expected logs overlay active")
+	}
+
+	m = sendKey(m, tea.KeyEsc)
+	if m.logsOverlayActive {
+		t.Fatal("expected logs overlay closed after Esc")
+	}
+}
+
+func TestLogsOverlay_CloseWithQ(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = mustApply(m, LogsRequestMsg{PodName: "test-pod", Namespace: "default", Container: "main"})
+
+	m = sendRune(m, 'q')
+	if m.logsOverlayActive {
+		t.Fatal("expected logs overlay closed after q")
+	}
+}
+
+func TestLogsOverlay_WrapToggle(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = mustApply(m, LogsRequestMsg{PodName: "test-pod", Namespace: "default", Container: "main"})
+
+	if m.logsWrapEnabled {
+		t.Fatal("expected wrap disabled initially")
+	}
+
+	m = sendRune(m, 'w')
+	if !m.logsWrapEnabled {
+		t.Fatal("expected wrap enabled after pressing w")
+	}
+
+	m = sendRune(m, 'w')
+	if m.logsWrapEnabled {
+		t.Fatal("expected wrap disabled after pressing w again")
+	}
+}
+
+func TestLogsOverlay_ForestPodLens(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	// Switch to :pod forest lens
+	m.forestResourceType = "pod"
+	m.applySnapshot()
+	m.rebuildResourcesTable()
+
+	selectedRow := m.resourcesTable.SelectedRow()
+	if len(selectedRow) < 2 || selectedRow[1] != "Pod" {
+		t.Fatalf("expected Pod in forest pod lens, got: %v", selectedRow)
+	}
+
+	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if cmd == nil {
+		t.Fatal("expected a command when pressing 'l' with Pod selected in forest Pod lens")
+	}
+}
+
+func TestWrapText(t *testing.T) {
+	input := "abcdefghij"
+	result := wrapText(input, 4)
+	expected := "abcd\nefgh\nij"
+	if result != expected {
+		t.Errorf("expected %q, got %q", expected, result)
+	}
+}
+
+func TestWrapText_MultipleLines(t *testing.T) {
+	input := "short\nabcdefghij"
+	result := wrapText(input, 5)
+	expected := "short\nabcde\nfghij"
+	if result != expected {
+		t.Errorf("expected %q, got %q", expected, result)
+	}
+}
+
+func TestHighlightSearch_CaseInsensitive(t *testing.T) {
+	content := "Hello World\nhello again"
+	result := highlightSearch(content, "hello")
+	// Both lines should still contain non-match text
+	if !strings.Contains(result, "World") {
+		t.Error("expected result to contain 'World'")
+	}
+	if !strings.Contains(result, "again") {
+		t.Error("expected result to contain 'again'")
+	}
+}
+
+func TestHighlightSearch_NoMatch(t *testing.T) {
+	content := "Hello World"
+	result := highlightSearch(content, "xyz")
+	if result != content {
+		t.Errorf("expected result unchanged when no match, got %q", result)
+	}
+}
+
+func TestHighlightSearch_Empty(t *testing.T) {
+	content := "Hello World"
+	result := highlightSearch(content, "")
+	if result != content {
+		t.Errorf("expected result unchanged with empty search, got %q", result)
+	}
+}
+
+func TestLogsOverlay_RenderContainsTitle(t *testing.T) {
+	mc := buildFullMockCache()
+	m := newTestModelWithCache(mc)
+
+	m = mustApply(m, LogsRequestMsg{PodName: "my-pod", Namespace: "default", Container: "worker"})
+	m = mustApply(m, LogsContentMsg{PodName: "my-pod", Container: "worker", Content: "log line 1\nlog line 2"})
+
+	view := m.View()
+	if !strings.Contains(view, "my-pod") {
+		t.Error("expected logs overlay to contain pod name in title")
+	}
+	if !strings.Contains(view, "worker") {
+		t.Error("expected logs overlay to contain container name in title")
+	}
+	if !strings.Contains(view, "Wrap") {
+		t.Error("expected logs overlay to contain Wrap status indicator")
 	}
 }

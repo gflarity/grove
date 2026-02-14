@@ -53,6 +53,14 @@ type GlobalCache interface {
 	// Supported types: "PodCliqueSet", "PodCliqueScalingGroup", "PodClique", "Pod".
 	// For virtual types like "(PodCliqueSet replica)", callers should resolve to the parent.
 	GetResourceYAML(ctx context.Context, resourceType, name, namespace string) (string, error)
+
+	// GetPodContainers fetches a Pod and returns container info for display.
+	// Uses a direct API GET (same as GetPodYAML).
+	GetPodContainers(ctx context.Context, podName, namespace string) ([]ContainerInfo, error)
+
+	// GetPodLogs fetches the last tailLines of logs for a specific container in a pod.
+	// Uses a direct API call to the pod's log endpoint.
+	GetPodLogs(ctx context.Context, podName, namespace, container string, tailLines int64) (string, error)
 }
 
 // WarningConfigurable is an optional interface that GlobalCache implementations

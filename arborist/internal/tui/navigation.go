@@ -91,6 +91,8 @@ func (m Model) getCurrentViewKey() string {
 		return "PodCliqueScalingGroupReplica/" + m.viewState.SelectedScalingGroup + "/" + m.viewState.SelectedPCSGReplicaIndex
 	case data.PodCliqueView:
 		return "PodClique/" + m.viewState.SelectedPodClique
+	case data.ContainersView:
+		return "" // Containers view uses containerInfos, not allResources
 	case data.PodView:
 		return "" // Pod view doesn't list resources
 	}
@@ -104,8 +106,8 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 	m.filterText = ""
 	m.filterInput.SetValue("")
 
-	if m.viewState.ViewType == data.PodView {
-		debugLogWithContext("navigateInto: already in PodView, ignoring")
+	if m.viewState.ViewType == data.PodView || m.viewState.ViewType == data.ContainersView {
+		debugLogWithContext("navigateInto: already in PodView/ContainersView, ignoring")
 		return m, nil
 	}
 
@@ -254,16 +256,16 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 
 	case "Pod":
 		oldViewType := m.viewState.ViewType
-		m.viewState.ViewType = data.PodView
+		m.viewState.ViewType = data.ContainersView
 		m.viewState.SelectedPod = selectedName
 
-		debugLogStateTransition(oldViewType, data.PodView, fmt.Sprintf("pod=%q", selectedName))
+		debugLogStateTransition(oldViewType, data.ContainersView, fmt.Sprintf("pod=%q", selectedName))
 
 		m.rebuildResourcesTable()
 		m.rebuildEventsTable()
 
-		// Pod YAML is the one async API call that remains
-		return m, loadPodYAMLCmd(m.cache, m.ctx, selectedName, selectedNamespace)
+		// Fetch container info asynchronously
+		return m, loadPodContainersCmd(m.cache, m.ctx, selectedName, selectedNamespace)
 	}
 
 	return m, nil
@@ -603,6 +605,17 @@ func (m Model) navigateBack() (tea.Model, tea.Cmd) {
 		m.viewState.SelectedPodClique = ""
 		m.viewState.SelectedPod = ""
 		debugLogStateTransition(oldViewType, newViewType, "")
+
+	case data.ContainersView:
+		if m.viewState.SelectedPodClique != "" {
+			m.viewState.ViewType = data.PodCliqueView
+		} else {
+			// No PodClique context (flat Pod list) — go to forest
+			m.viewState.ViewType = data.ForestView
+		}
+		m.viewState.SelectedPod = ""
+		m.containerInfos = nil
+		debugLogStateTransition(oldViewType, m.viewState.ViewType, "")
 
 	case data.PodView:
 		if m.viewState.SelectedPodClique != "" {

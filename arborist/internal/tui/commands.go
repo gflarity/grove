@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/ai-dynamo/grove/arborist/internal/data"
@@ -71,5 +72,92 @@ func loadPodYAMLCmd(cache data.GlobalCache, ctx context.Context, podName, namesp
 
 		yaml, err := cache.GetPodYAML(ctx, podName, namespace)
 		return PodYAMLMsg{PodName: podName, YAML: yaml, Err: err}
+	}
+}
+
+// loadPodContainersCmd creates a command to load a Pod's container info.
+func loadPodContainersCmd(cache data.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("loadPodContainers", "pod", podName, "ns", namespace)
+		if cache == nil {
+			return PodContainersMsg{PodName: podName, Err: fmt.Errorf("no cache available")}
+		}
+
+		containers, err := cache.GetPodContainers(ctx, podName, namespace)
+		return PodContainersMsg{PodName: podName, Namespace: namespace, Containers: containers, Err: err}
+	}
+}
+
+// loadPodLogsCmd creates a command to load a pod container's logs.
+func loadPodLogsCmd(cache data.GlobalCache, ctx context.Context, podName, namespace, container string, tailLines int64) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("loadPodLogs", "pod", podName, "ns", namespace, "container", container)
+		if cache == nil {
+			return LogsContentMsg{PodName: podName, Container: container, Err: fmt.Errorf("no cache available")}
+		}
+
+		content, err := cache.GetPodLogs(ctx, podName, namespace, container, tailLines)
+		return LogsContentMsg{PodName: podName, Container: container, Content: content, Err: err}
+	}
+}
+
+// logsAutoScrollInterval is how often logs are re-fetched when autoscroll is active.
+const logsAutoScrollInterval = 2 * time.Second
+
+// logsAutoScrollTickCmd returns a tea.Tick that fires a logsAutoScrollTickMsg after the interval.
+func logsAutoScrollTickCmd() tea.Cmd {
+	return tea.Tick(logsAutoScrollInterval, func(time.Time) tea.Msg {
+		return logsAutoScrollTickMsg{}
+	})
+}
+
+// fetchFirstContainerForLogsCmd fetches containers for a pod and returns a LogsRequestMsg
+// for the first running container (or first container if none running), or an ErrorMsg.
+func fetchFirstContainerForLogsCmd(cache data.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("fetchFirstContainerForLogs", "pod", podName, "ns", namespace)
+		if cache == nil {
+			return ErrorMsg{Operation: "logs", Err: fmt.Errorf("no cache available")}
+		}
+
+		containers, err := cache.GetPodContainers(ctx, podName, namespace)
+		if err != nil {
+			return ErrorMsg{Operation: "logs", Err: fmt.Errorf("failed to get containers: %w", err)}
+		}
+		if len(containers) == 0 {
+			return ErrorMsg{Operation: "logs", Err: fmt.Errorf("no containers in pod %s", podName)}
+		}
+
+		// Prefer first running container, fall back to first container
+		for _, c := range containers {
+			if c.State == "Running" {
+				return LogsRequestMsg{PodName: podName, Namespace: namespace, Container: c.Name}
+			}
+		}
+		return LogsRequestMsg{PodName: podName, Namespace: namespace, Container: containers[0].Name}
+	}
+}
+
+// fetchFirstRunningContainerCmd fetches containers for a pod and returns a ShellRequestMsg
+// for the first running container, or an ErrorMsg if none are found.
+func fetchFirstRunningContainerCmd(cache data.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+	return func() tea.Msg {
+		debugLogCmd("fetchFirstRunningContainer", "pod", podName, "ns", namespace)
+		if cache == nil {
+			return ErrorMsg{Operation: "shell", Err: fmt.Errorf("no cache available")}
+		}
+
+		containers, err := cache.GetPodContainers(ctx, podName, namespace)
+		if err != nil {
+			return ErrorMsg{Operation: "shell", Err: fmt.Errorf("failed to get containers: %w", err)}
+		}
+
+		for _, c := range containers {
+			if c.State == "Running" {
+				return ShellRequestMsg{PodName: podName, Namespace: namespace, Container: c.Name}
+			}
+		}
+
+		return ErrorMsg{Operation: "shell", Err: fmt.Errorf("no running containers in pod %s", podName)}
 	}
 }
