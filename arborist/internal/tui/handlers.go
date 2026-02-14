@@ -395,6 +395,10 @@ func (m *Model) rebuildEventsFromSnapshot(snapshot *data.CacheSnapshot) {
 	case data.PodCliqueView:
 		m.allEvents = snapshot.GetEventsForPodClique(m.viewState.SelectedPodClique)
 
+	case data.ContainersView:
+		// Show events for the selected pod
+		m.allEvents = snapshot.EventsByObject["Pod/"+m.viewState.SelectedPod]
+
 	case data.PodView:
 		m.allEvents = snapshot.GetEventsForPodClique(m.viewState.SelectedPodClique)
 

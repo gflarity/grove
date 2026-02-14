@@ -36,6 +36,9 @@ type MockGlobalCache struct {
 	// PodYAMLs maps "namespace/podName" to YAML strings.
 	PodYAMLs map[string]string
 
+	// PodLogs maps "namespace/podName/container" to log strings.
+	PodLogs map[string]string
+
 	// Errors allows injecting errors for specific operations.
 	Errors map[string]error
 }
@@ -45,6 +48,7 @@ func NewMockGlobalCache() *MockGlobalCache {
 	return &MockGlobalCache{
 		updatesCh: make(chan struct{}, 1),
 		PodYAMLs:  make(map[string]string),
+		PodLogs:   make(map[string]string),
 		Errors:    make(map[string]error),
 		snapshot: &CacheSnapshot{
 			PodCliqueSets:          []Resource{},
@@ -107,6 +111,27 @@ func (m *MockGlobalCache) GetPodYAML(_ context.Context, podName, namespace strin
 		return "", fmt.Errorf("Pod YAML for %s not found", key)
 	}
 	return yaml, nil
+}
+
+// GetPodContainers returns an empty list for the mock (no real pods to query).
+func (m *MockGlobalCache) GetPodContainers(_ context.Context, podName, namespace string) ([]ContainerInfo, error) {
+	if err, ok := m.Errors["GetPodContainers"]; ok {
+		return nil, err
+	}
+	return []ContainerInfo{}, nil
+}
+
+// GetPodLogs returns pre-configured logs for a container.
+func (m *MockGlobalCache) GetPodLogs(_ context.Context, podName, namespace, container string, _ int64) (string, error) {
+	if err, ok := m.Errors["GetPodLogs"]; ok {
+		return "", err
+	}
+	key := namespace + "/" + podName + "/" + container
+	logs, ok := m.PodLogs[key]
+	if !ok {
+		return "", fmt.Errorf("Pod logs for %s not found", key)
+	}
+	return logs, nil
 }
 
 // GetResourceYAML returns pre-configured YAML for a resource.

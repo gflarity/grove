@@ -19,6 +19,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"time"
@@ -387,6 +388,68 @@ func (c *InformerGlobalCache) GetPodYAML(ctx context.Context, podName, namespace
 	}
 
 	return string(yamlData), nil
+}
+
+// GetPodContainers fetches a Pod and returns container info for display.
+func (c *InformerGlobalCache) GetPodContainers(ctx context.Context, podName, namespace string) ([]data.ContainerInfo, error) {
+	pod, err := c.clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Pod: %w", err)
+	}
+
+	// Build a map of container statuses for quick lookup
+	statusMap := make(map[string]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
+	for _, cs := range pod.Status.ContainerStatuses {
+		statusMap[cs.Name] = cs
+	}
+
+	containers := make([]data.ContainerInfo, 0, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		info := data.ContainerInfo{
+			Name:  c.Name,
+			Image: c.Image,
+		}
+
+		if cs, ok := statusMap[c.Name]; ok {
+			info.Ready = cs.Ready
+			info.RestartCount = cs.RestartCount
+			switch {
+			case cs.State.Running != nil:
+				info.State = "Running"
+			case cs.State.Waiting != nil:
+				info.State = "Waiting"
+			case cs.State.Terminated != nil:
+				info.State = "Terminated"
+			default:
+				info.State = "Unknown"
+			}
+		} else {
+			info.State = "Waiting"
+		}
+
+		containers = append(containers, info)
+	}
+
+	return containers, nil
+}
+
+// GetPodLogs fetches the last tailLines of logs for a specific container in a pod.
+func (c *InformerGlobalCache) GetPodLogs(ctx context.Context, podName, namespace, container string, tailLines int64) (string, error) {
+	opts := &corev1.PodLogOptions{
+		Container: container,
+		TailLines: &tailLines,
+	}
+	stream, err := c.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get logs for %s/%s: %w", podName, container, err)
+	}
+	defer stream.Close()
+
+	logBytes, err := io.ReadAll(stream)
+	if err != nil {
+		return "", fmt.Errorf("failed to read logs for %s/%s: %w", podName, container, err)
+	}
+	return string(logBytes), nil
 }
 
 // GetResourceYAML fetches any resource's YAML by type and name.

@@ -43,6 +43,7 @@ const (
 	PodCliqueScalingGroupReplicaView
 	PodCliqueView
 	PodView
+	ContainersView
 	TopologyView
 )
 
@@ -141,11 +142,22 @@ func ViewTypeName(vt ViewType) string {
 		return "PodCliqueView"
 	case PodView:
 		return "PodView"
+	case ContainersView:
+		return "ContainersView"
 	case TopologyView:
 		return "TopologyView"
 	default:
 		return fmt.Sprintf("ViewType(%d)", vt)
 	}
+}
+
+// ContainerInfo holds display-ready info about a container in a Pod.
+type ContainerInfo struct {
+	Name         string
+	Image        string
+	Ready        bool
+	State        string // "Running", "Waiting", "Terminated"
+	RestartCount int32
 }
 
 // SortResourcesByName sorts a slice of Resource in place by Name.
