@@ -1,9 +1,6 @@
 package k8s
 
 import (
-	"fmt"
-	"time"
-
 	"github.com/ai-dynamo/grove/arborist/internal/data"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
@@ -12,9 +9,9 @@ import (
 // convertK8sEventToEvent converts a Kubernetes Event to our data.Event type.
 func convertK8sEventToEvent(k8sEvent corev1.Event) data.Event {
 	// Calculate age
-	age := formatAge(k8sEvent.LastTimestamp.Time)
+	age := data.FormatAge(k8sEvent.LastTimestamp.Time)
 	if k8sEvent.LastTimestamp.IsZero() {
-		age = formatAge(k8sEvent.EventTime.Time)
+		age = data.FormatAge(k8sEvent.EventTime.Time)
 	}
 
 	return data.Event{
@@ -29,81 +26,70 @@ func convertK8sEventToEvent(k8sEvent corev1.Event) data.Event {
 	}
 }
 
-// formatAge formats a time duration into a human-readable age string.
-func formatAge(t time.Time) string {
-	if t.IsZero() {
-		return "unknown"
+// KubeConfigInfo holds display-ready metadata extracted from a single kubeconfig load.
+type KubeConfigInfo struct {
+	ContextName string
+	ClusterName string
+	UserName    string
+	Namespace   string // from context, falls back to "default"
+}
+
+// ResolveKubeConfigInfo loads the kubeconfig once and extracts context, cluster,
+// user, and namespace. All fields fall back to sensible defaults on error.
+func ResolveKubeConfigInfo() KubeConfigInfo {
+	info := KubeConfigInfo{
+		ContextName: "(unknown)",
+		ClusterName: "(unknown)",
+		UserName:    "(unknown)",
+		Namespace:   "default",
 	}
 
-	duration := time.Since(t)
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	overrides := &clientcmd.ConfigOverrides{}
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
 
-	if duration < time.Minute {
-		return fmt.Sprintf("%ds", int(duration.Seconds()))
-	} else if duration < time.Hour {
-		return fmt.Sprintf("%dm", int(duration.Minutes()))
-	} else if duration < 24*time.Hour {
-		return fmt.Sprintf("%dh", int(duration.Hours()))
-	} else {
-		return fmt.Sprintf("%dd", int(duration.Hours()/24))
+	rawConfig, err := clientConfig.RawConfig()
+	if err != nil {
+		return info
 	}
+
+	if rawConfig.CurrentContext != "" {
+		info.ContextName = rawConfig.CurrentContext
+	}
+
+	if ctx, ok := rawConfig.Contexts[rawConfig.CurrentContext]; ok {
+		if ctx.Cluster != "" {
+			info.ClusterName = ctx.Cluster
+		}
+		if ctx.AuthInfo != "" {
+			info.UserName = ctx.AuthInfo
+		}
+	}
+
+	// Namespace() handles overrides and defaults correctly
+	if ns, _, err := clientConfig.Namespace(); err == nil && ns != "" {
+		info.Namespace = ns
+	}
+
+	return info
 }
 
 // ResolveCurrentContext returns the current kubeconfig context name and cluster name.
 // Returns "(unknown)" for either value if it cannot be determined (e.g. in-cluster config,
 // missing kubeconfig, etc.).
 func ResolveCurrentContext() (contextName, clusterName string) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		loadingRules, &clientcmd.ConfigOverrides{},
-	).RawConfig()
-	if err != nil {
-		return "(unknown)", "(unknown)"
-	}
-
-	contextName = config.CurrentContext
-	if contextName == "" {
-		contextName = "(unknown)"
-	}
-
-	clusterName = "(unknown)"
-	if ctx, ok := config.Contexts[contextName]; ok && ctx.Cluster != "" {
-		clusterName = ctx.Cluster
-	}
-
-	return contextName, clusterName
+	info := ResolveKubeConfigInfo()
+	return info.ContextName, info.ClusterName
 }
 
 // ResolveCurrentUser returns the kubeconfig user (AuthInfo) name for the current context.
 // Returns "(unknown)" if unavailable.
 func ResolveCurrentUser() string {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		loadingRules, &clientcmd.ConfigOverrides{},
-	).RawConfig()
-	if err != nil {
-		return "(unknown)"
-	}
-
-	ctx, ok := config.Contexts[config.CurrentContext]
-	if !ok || ctx.AuthInfo == "" {
-		return "(unknown)"
-	}
-	return ctx.AuthInfo
+	return ResolveKubeConfigInfo().UserName
 }
 
 // ResolveCurrentNamespace returns the namespace from the current kubeconfig context,
 // falling back to "default" if none is set.
 func ResolveCurrentNamespace() (string, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	configOverrides := &clientcmd.ConfigOverrides{}
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-
-	ns, _, err := kubeConfig.Namespace()
-	if err != nil {
-		return "default", nil //nolint:nilerr
-	}
-	if ns == "" {
-		return "default", nil
-	}
-	return ns, nil
+	return ResolveKubeConfigInfo().Namespace, nil
 }

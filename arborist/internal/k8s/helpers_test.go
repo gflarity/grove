@@ -421,37 +421,4 @@ func TestConvertK8sEventToEvent(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// formatAge
-// ---------------------------------------------------------------------------
-
-func TestFormatAge(t *testing.T) {
-	now := time.Now()
-
-	tests := []struct {
-		name string
-		t    time.Time
-		want string
-	}{
-		{name: "zero time", t: time.Time{}, want: "unknown"},
-		{name: "5 seconds ago", t: now.Add(-5 * time.Second), want: "5s"},
-		{name: "30 seconds ago", t: now.Add(-30 * time.Second), want: "30s"},
-		{name: "59 seconds ago", t: now.Add(-59 * time.Second), want: "59s"},
-		{name: "1 minute ago", t: now.Add(-1 * time.Minute), want: "1m"},
-		{name: "5 minutes ago", t: now.Add(-5 * time.Minute), want: "5m"},
-		{name: "59 minutes ago", t: now.Add(-59 * time.Minute), want: "59m"},
-		{name: "1 hour ago", t: now.Add(-1 * time.Hour), want: "1h"},
-		{name: "23 hours ago", t: now.Add(-23 * time.Hour), want: "23h"},
-		{name: "1 day ago", t: now.Add(-24 * time.Hour), want: "1d"},
-		{name: "7 days ago", t: now.Add(-7 * 24 * time.Hour), want: "7d"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := formatAge(tt.t)
-			if got != tt.want {
-				t.Errorf("formatAge() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
+// NOTE: FormatAge tests live in data/cache_test.go (data.FormatAge is the canonical implementation).

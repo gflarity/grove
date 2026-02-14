@@ -155,7 +155,7 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 			// Build virtual replica resources for tracking (needed for back navigation)
 			pcsKey := "PodCliqueSet/" + selectedName
 			m.allResources[pcsKey] = []data.Resource{{
-				Name:      selectedName + "-replica-" + replicaIndexes[0],
+				Name:      replicaDisplayName(selectedName, replicaIndexes[0]),
 				Type:      "(PodCliqueSet replica)",
 				Namespace: selectedNamespace,
 			}}
@@ -172,7 +172,7 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "(PodCliqueSet replica)":
-		parts := strings.Split(selectedName, "-replica-")
+		parts := strings.Split(selectedName, replicaSeparator)
 		if len(parts) == 2 {
 			oldViewType := m.viewState.ViewType
 			m.viewState.ViewType = data.PodCliqueSetReplicaView
@@ -207,7 +207,7 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 			// Build virtual replica resources for tracking (needed for back navigation)
 			pcsgKey := "PodCliqueScalingGroup/" + selectedName
 			m.allResources[pcsgKey] = []data.Resource{{
-				Name:      selectedName + "-replica-" + pcsgReplicaIndexes[0],
+				Name:      replicaDisplayName(selectedName, pcsgReplicaIndexes[0]),
 				Type:      "(PodCliqueScalingGroup replica)",
 				Namespace: selectedNamespace,
 			}}
@@ -223,7 +223,7 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "(PodCliqueScalingGroup replica)":
-		parts := strings.Split(selectedName, "-replica-")
+		parts := strings.Split(selectedName, replicaSeparator)
 		if len(parts) == 2 {
 			oldViewType := m.viewState.ViewType
 			m.viewState.ViewType = data.PodCliqueScalingGroupReplicaView

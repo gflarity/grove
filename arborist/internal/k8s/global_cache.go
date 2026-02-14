@@ -173,6 +173,13 @@ func (c *InformerGlobalCache) SetOnWarning(fn func(string)) {
 	c.onWarning = fn
 }
 
+// warnf logs a non-fatal warning via the onWarning callback (if set).
+func (c *InformerGlobalCache) warnf(format string, args ...interface{}) {
+	if c.onWarning != nil {
+		c.onWarning(fmt.Sprintf(format, args...))
+	}
+}
+
 // Start begins the informers and starts watching. Non-blocking.
 func (c *InformerGlobalCache) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -233,6 +240,9 @@ func (c *InformerGlobalCache) Start(ctx context.Context) error {
 	c.eventInformer = c.eventInformerFactory.Core().V1().Events().Informer()
 
 	// Check which Grove CRDs are available before creating dynamic informers.
+	// NOTE: The TUI pre-flight (cli/tui.go) hard-fails if core CRDs are missing,
+	// providing a clear user-facing error. This cache-level check handles graceful
+	// degradation for partial installations (e.g. ClusterTopology not installed).
 	// All core CRDs share the grove.io/v1alpha1 group, so one Discovery call
 	// covers PCS, PCSG, PC, and ClusterTopology.
 	groveAvailable := c.checkGroveCRDsAvailable()
@@ -672,18 +682,17 @@ func (c *InformerGlobalCache) rebuildSnapshot() {
 		NodeGPUCapacity:      nodeResult.nodeGPUCapacity,
 	}
 
-	// Store and notify
+	// Store and notify. The send must be inside the lock so that the stopped
+	// check and channel send are atomic with respect to Stop() closing the channel.
 	c.mu.Lock()
 	c.snapshot = snapshot
-	stopped := c.stopped
-	c.mu.Unlock()
-
-	if !stopped {
+	if !c.stopped {
 		select {
 		case c.updatesCh <- struct{}{}:
 		default:
 		}
 	}
+	c.mu.Unlock()
 }
 
 // readClusterTopologyLevels reads the ClusterTopology CR from the informer cache.
@@ -724,6 +733,7 @@ func (c *InformerGlobalCache) readPCSGs() (map[string][]*corev1alpha1.PodCliqueS
 		}
 		var pcsg corev1alpha1.PodCliqueScalingGroup
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(uns.Object, &pcsg); err != nil {
+			c.warnf("failed to convert PodCliqueScalingGroup %q: %v", uns.GetName(), err)
 			continue
 		}
 
@@ -840,6 +850,7 @@ func (c *InformerGlobalCache) readPodCliques(scheduledByPodClique map[string]int
 		}
 		var pc corev1alpha1.PodClique
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(uns.Object, &pc); err != nil {
+			c.warnf("failed to convert PodClique %q: %v", uns.GetName(), err)
 			continue
 		}
 
@@ -912,6 +923,7 @@ func (c *InformerGlobalCache) readEvents() map[string][]data.Event {
 
 		var event corev1.Event
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj, &event); err != nil {
+			c.warnf("failed to convert Event: %v", err)
 			continue
 		}
 
