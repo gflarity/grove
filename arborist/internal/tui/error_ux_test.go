@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -136,7 +136,7 @@ func TestErrorMsg_FormatsAsOperationColonError(t *testing.T) {
 }
 
 func TestErrorMsg_StartGlobalCache_SetsCacheSynced(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	m := NewModel(mc)
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
@@ -446,8 +446,8 @@ func TestTopologyAvailable_NilTopologyViewData(t *testing.T) {
 
 func TestTopologyAvailable_EmptyDomains(t *testing.T) {
 	m := newTestModel(nil)
-	m.topologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{},
+	m.topologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{},
 	}
 
 	if m.topologyAvailable() {
@@ -457,8 +457,8 @@ func TestTopologyAvailable_EmptyDomains(t *testing.T) {
 
 func TestTopologyAvailable_WithValidDomains(t *testing.T) {
 	m := newTestModel(nil)
-	m.topologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	m.topologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
 		},
 	}
@@ -476,8 +476,8 @@ func TestTKey_NoTopologyData_LogsError_StaysInForestView(t *testing.T) {
 
 	m = sendRune(m, 't')
 
-	if m.viewState.ViewType != data.ForestView {
-		t.Errorf("expected to stay in ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.ForestView {
+		t.Errorf("expected to stay in ForestView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 	if len(m.errorLog) != 1 {
 		t.Fatalf("expected 1 error, got %d", len(m.errorLog))
@@ -491,16 +491,16 @@ func TestTKey_NoTopologyData_LogsError_StaysInForestView(t *testing.T) {
 
 func TestTKey_WithTopologyData_SwitchesToTopologyView(t *testing.T) {
 	m := newTestModel(nil)
-	m.topologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	m.topologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
 		},
 	}
 
 	m = sendRune(m, 't')
 
-	if m.viewState.ViewType != data.TopologyView {
-		t.Errorf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.TopologyView {
+		t.Errorf("expected TopologyView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 	if len(m.errorLog) != 0 {
 		t.Errorf("expected no errors, got %d", len(m.errorLog))
@@ -518,8 +518,8 @@ func TestTopologyCommand_NoTopologyData_LogsError(t *testing.T) {
 	m.commandInput.SetValue("topology")
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyEnter})
 
-	if m.viewState.ViewType != data.ForestView {
-		t.Errorf("expected to stay in ForestView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.ForestView {
+		t.Errorf("expected to stay in ForestView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 	if len(m.errorLog) != 1 {
 		t.Fatalf("expected 1 error, got %d", len(m.errorLog))
@@ -533,8 +533,8 @@ func TestTopologyCommand_NoTopologyData_LogsError(t *testing.T) {
 
 func TestTopologyCommand_WithTopologyData_Switches(t *testing.T) {
 	m := newTestModel(nil)
-	m.topologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	m.topologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
 		},
 	}
@@ -543,8 +543,8 @@ func TestTopologyCommand_WithTopologyData_Switches(t *testing.T) {
 	m.commandInput.SetValue("topology")
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyEnter})
 
-	if m.viewState.ViewType != data.TopologyView {
-		t.Errorf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.TopologyView {
+		t.Errorf("expected TopologyView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 }
 
@@ -552,15 +552,15 @@ func TestTopologyCommand_WithTopologyData_Switches(t *testing.T) {
 
 func TestTKey_FromTopologyView_GoesBackEvenIfDataDisappeared(t *testing.T) {
 	m := newTestModel(nil)
-	m.topologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	m.topologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
 		},
 	}
 
 	// Enter topology view
 	m = sendRune(m, 't')
-	if m.viewState.ViewType != data.TopologyView {
+	if m.viewState.ViewType != clusterstate.TopologyView {
 		t.Fatal("precondition: should be in TopologyView")
 	}
 
@@ -569,8 +569,8 @@ func TestTKey_FromTopologyView_GoesBackEvenIfDataDisappeared(t *testing.T) {
 
 	// Press 't' to go back — should work unconditionally
 	m = sendRune(m, 't')
-	if m.viewState.ViewType != data.ForestView {
-		t.Errorf("expected ForestView after toggling back, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.ForestView {
+		t.Errorf("expected ForestView after toggling back, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 	// No error should be logged for going BACK
 	if len(m.errorLog) != 0 {
@@ -592,8 +592,8 @@ func TestHeader_HidesTopologyHint_WhenUnavailable(t *testing.T) {
 
 func TestHeader_ShowsTopologyHint_WhenAvailable(t *testing.T) {
 	m := newTestModel(nil)
-	m.topologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	m.topologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
 		},
 	}
@@ -607,7 +607,7 @@ func TestHeader_ShowsTopologyHint_WhenAvailable(t *testing.T) {
 // --- After cache update delivers topology data, 't' starts working ---
 
 func TestTopology_TransitionFalseToTrue_AfterCacheUpdate(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	m := newTestModelWithCache(mc)
 
 	// Initially no topology data
@@ -618,8 +618,8 @@ func TestTopology_TransitionFalseToTrue_AfterCacheUpdate(t *testing.T) {
 
 	// Simulate cache update that delivers topology data
 	snap := mc.Snapshot()
-	snap.TopologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
 		},
 	}
@@ -634,8 +634,8 @@ func TestTopology_TransitionFalseToTrue_AfterCacheUpdate(t *testing.T) {
 
 	// 't' should now work
 	m = sendRune(m, 't')
-	if m.viewState.ViewType != data.TopologyView {
-		t.Errorf("expected TopologyView after cache update, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.TopologyView {
+		t.Errorf("expected TopologyView after cache update, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 }
 
@@ -656,8 +656,8 @@ func TestTopologyColumnVisible_FalseWhenNoTopologyData(t *testing.T) {
 
 func TestTopologyColumnVisible_FalseWhenEmptyDomains(t *testing.T) {
 	m := newTestModel(nil)
-	m.topologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{},
+	m.topologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{},
 	}
 
 	if m.topologyColumnVisible() {
@@ -667,8 +667,8 @@ func TestTopologyColumnVisible_FalseWhenEmptyDomains(t *testing.T) {
 
 func TestTopologyColumnVisible_TrueWhenDomainsExist(t *testing.T) {
 	m := newTestModel(nil)
-	m.topologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	m.topologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
 		},
 	}
@@ -681,9 +681,9 @@ func TestTopologyColumnVisible_TrueWhenDomainsExist(t *testing.T) {
 // --- TOPOLOGY column hidden when unavailable ---
 
 func TestResourcesTable_HidesTopologyColumn_WhenUnavailable(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "N/A"},
 	}
 	mc.SetSnapshot(snap)
@@ -703,13 +703,13 @@ func TestResourcesTable_HidesTopologyColumn_WhenUnavailable(t *testing.T) {
 }
 
 func TestResourcesTable_ShowsTopologyColumn_WhenAvailable(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "rack"},
 	}
-	snap.TopologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "rack", Key: "topology.io/rack", ValuesCount: 3},
 		},
 	}
@@ -734,9 +734,9 @@ func TestResourcesTable_ShowsTopologyColumn_WhenAvailable(t *testing.T) {
 }
 
 func TestResourcesTable_RowWidth_MatchesColumns_NoTopology(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "N/A"},
 	}
 	mc.SetSnapshot(snap)
@@ -757,13 +757,13 @@ func TestResourcesTable_RowWidth_MatchesColumns_NoTopology(t *testing.T) {
 }
 
 func TestResourcesTable_RowWidth_MatchesColumns_WithTopology(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "rack"},
 	}
-	snap.TopologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "rack", Key: "topology.io/rack", ValuesCount: 3},
 		},
 	}
@@ -784,9 +784,9 @@ func TestResourcesTable_RowWidth_MatchesColumns_WithTopology(t *testing.T) {
 // --- Topology column reappears after cache update delivers topology ---
 
 func TestTopologyColumn_AppearsAfterCacheUpdateDeliversTopology(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "N/A"},
 	}
 	mc.SetSnapshot(snap)
@@ -805,12 +805,12 @@ func TestTopologyColumn_AppearsAfterCacheUpdateDeliversTopology(t *testing.T) {
 
 	// Simulate cache update that delivers topology
 	snap = mc.Snapshot()
-	snap.TopologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "rack", Key: "topology.io/rack", ValuesCount: 2},
 		},
 	}
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-1", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1", Topology: "rack"},
 	}
 	mc.SetSnapshot(snap)
@@ -835,12 +835,12 @@ func TestTopologyColumn_AppearsAfterCacheUpdateDeliversTopology(t *testing.T) {
 
 // helper: create a model with the logs overlay open on a mock pod/container.
 func newTestModelWithLogsOverlay() Model {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	m := newTestModelWithCache(mc)
 	m.logsOverlay.Active = true
-	m.logsPodName = "test-pod"
-	m.logsContainerName = "main"
-	m.logsNamespace = "default"
+	m.logsOverlay.PodName = "test-pod"
+	m.logsOverlay.ContainerName = "main"
+	m.logsOverlay.Namespace = "default"
 	m.logsOverlay.Content = "line 1\nline 2\nline 3"
 	m.logsOverlay.Viewport.SetContent(m.logsOverlay.Content)
 	return m
@@ -850,13 +850,13 @@ func newTestModelWithLogsOverlay() Model {
 
 func TestLogsAutoScroll_ToggleOn(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	if m.logsAutoScroll {
+	if m.logsOverlay.AutoScroll {
 		t.Fatal("precondition: logsAutoScroll should be false")
 	}
 
 	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 
-	if !m.logsAutoScroll {
+	if !m.logsOverlay.AutoScroll {
 		t.Error("expected logsAutoScroll to be true after pressing 's'")
 	}
 	if cmd == nil {
@@ -868,11 +868,11 @@ func TestLogsAutoScroll_ToggleOn(t *testing.T) {
 
 func TestLogsAutoScroll_ToggleOff(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = true
+	m.logsOverlay.AutoScroll = true
 
 	m, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 
-	if m.logsAutoScroll {
+	if m.logsOverlay.AutoScroll {
 		t.Error("expected logsAutoScroll to be false after second 's' press")
 	}
 	if cmd != nil {
@@ -884,11 +884,11 @@ func TestLogsAutoScroll_ToggleOff(t *testing.T) {
 
 func TestLogsAutoScroll_ResetOnEsc(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = true
+	m.logsOverlay.AutoScroll = true
 
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyEsc})
 
-	if m.logsAutoScroll {
+	if m.logsOverlay.AutoScroll {
 		t.Error("expected logsAutoScroll to be false after closing overlay with Esc")
 	}
 	if m.logsOverlay.Active {
@@ -900,11 +900,11 @@ func TestLogsAutoScroll_ResetOnEsc(t *testing.T) {
 
 func TestLogsAutoScroll_ResetOnQ(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = true
+	m.logsOverlay.AutoScroll = true
 
 	m = sendRune(m, 'q')
 
-	if m.logsAutoScroll {
+	if m.logsOverlay.AutoScroll {
 		t.Error("expected logsAutoScroll to be false after closing overlay with 'q'")
 	}
 	if m.logsOverlay.Active {
@@ -916,7 +916,7 @@ func TestLogsAutoScroll_ResetOnQ(t *testing.T) {
 
 func TestLogsAutoScrollTick_NoOpWhenOverlayClosed(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = true
+	m.logsOverlay.AutoScroll = true
 	m.logsOverlay.Active = false // overlay closed
 
 	m, cmd := applyMsg(m, logsAutoScrollTickMsg{})
@@ -930,7 +930,7 @@ func TestLogsAutoScrollTick_NoOpWhenOverlayClosed(t *testing.T) {
 
 func TestLogsAutoScrollTick_NoOpWhenAutoScrollOff(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = false
+	m.logsOverlay.AutoScroll = false
 
 	m, cmd := applyMsg(m, logsAutoScrollTickMsg{})
 
@@ -943,7 +943,7 @@ func TestLogsAutoScrollTick_NoOpWhenAutoScrollOff(t *testing.T) {
 
 func TestLogsAutoScrollTick_SchedulesNextWhenActive(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = true
+	m.logsOverlay.AutoScroll = true
 
 	_, cmd := applyMsg(m, logsAutoScrollTickMsg{})
 
@@ -956,7 +956,7 @@ func TestLogsAutoScrollTick_SchedulesNextWhenActive(t *testing.T) {
 
 func TestLogsOverlay_ShowsAutoScrollOFF(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = false
+	m.logsOverlay.AutoScroll = false
 
 	view := m.View()
 	if !strings.Contains(view, "AutoScroll:OFF") {
@@ -968,7 +968,7 @@ func TestLogsOverlay_ShowsAutoScrollOFF(t *testing.T) {
 
 func TestLogsOverlay_ShowsAutoScrollON(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = true
+	m.logsOverlay.AutoScroll = true
 
 	view := m.View()
 	if !strings.Contains(view, "AutoScroll:ON") {
@@ -979,9 +979,9 @@ func TestLogsOverlay_ShowsAutoScrollON(t *testing.T) {
 // --- handleLogsExec resets autoscroll ---
 
 func TestLogsExec_ResetsAutoScroll(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "test-pod", Type: "Pod", Namespace: "default", Ready: "1/1", Scheduled: "Running"},
 	}
 	mc.SetSnapshot(snap)
@@ -990,19 +990,19 @@ func TestLogsExec_ResetsAutoScroll(t *testing.T) {
 	m.applySnapshot()
 
 	// Set autoscroll as if it were previously active
-	m.logsAutoScroll = true
+	m.logsOverlay.AutoScroll = true
 
 	// Put in containers view to use the direct logs path
-	m.viewState.ViewType = data.ContainersView
+	m.viewState.ViewType = clusterstate.ContainersView
 	m.viewState.SelectedPod = "test-pod"
-	m.containerInfos = []data.ContainerInfo{
+	m.containerInfos = []clusterstate.ContainerInfo{
 		{Name: "main", Image: "nginx", State: "Running", Ready: true},
 	}
 	m.rebuildContainersTable()
 
 	m, _ = applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 
-	if m.logsAutoScroll {
+	if m.logsOverlay.AutoScroll {
 		t.Error("expected logsAutoScroll to be reset to false when opening new logs overlay")
 	}
 }
@@ -1057,15 +1057,15 @@ func TestTruncateLines_LongLinesTruncated(t *testing.T) {
 
 func TestLogsRequest_StoresNamespaceAndResetsAutoScroll(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsAutoScroll = true
+	m.logsOverlay.AutoScroll = true
 
 	m = mustApply(m, LogsRequestMsg{PodName: "new-pod", Namespace: "kube-system", Container: "sidecar"})
 
-	if m.logsAutoScroll {
+	if m.logsOverlay.AutoScroll {
 		t.Error("expected logsAutoScroll to be reset on LogsRequestMsg")
 	}
-	if m.logsNamespace != "kube-system" {
-		t.Errorf("expected logsNamespace = %q, got %q", "kube-system", m.logsNamespace)
+	if m.logsOverlay.Namespace != "kube-system" {
+		t.Errorf("expected logsNamespace = %q, got %q", "kube-system", m.logsOverlay.Namespace)
 	}
 }
 
@@ -1106,64 +1106,64 @@ func TestHorizontalSlice_OffsetBeyondLine(t *testing.T) {
 
 func TestLogsRightArrow_IncrementsOffset(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsWrapEnabled = false
-	m.logsHorizontalOffset = 0
+	m.logsOverlay.WrapEnabled = false
+	m.logsOverlay.HorizontalOffset = 0
 
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyRight})
 
-	if m.logsHorizontalOffset != logsHorizontalScrollStep {
-		t.Errorf("logsHorizontalOffset = %d, want %d", m.logsHorizontalOffset, logsHorizontalScrollStep)
+	if m.logsOverlay.HorizontalOffset != logsHorizontalScrollStep {
+		t.Errorf("logsHorizontalOffset = %d, want %d", m.logsOverlay.HorizontalOffset, logsHorizontalScrollStep)
 	}
 }
 
 func TestLogsLeftArrow_DecrementsOffset(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsWrapEnabled = false
-	m.logsHorizontalOffset = 16
+	m.logsOverlay.WrapEnabled = false
+	m.logsOverlay.HorizontalOffset = 16
 
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyLeft})
 
 	want := 16 - logsHorizontalScrollStep
-	if m.logsHorizontalOffset != want {
-		t.Errorf("logsHorizontalOffset = %d, want %d", m.logsHorizontalOffset, want)
+	if m.logsOverlay.HorizontalOffset != want {
+		t.Errorf("logsHorizontalOffset = %d, want %d", m.logsOverlay.HorizontalOffset, want)
 	}
 }
 
 func TestLogsLeftArrow_ClampsAtZero(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsWrapEnabled = false
-	m.logsHorizontalOffset = 3 // less than one step
+	m.logsOverlay.WrapEnabled = false
+	m.logsOverlay.HorizontalOffset = 3 // less than one step
 
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyLeft})
 
-	if m.logsHorizontalOffset != 0 {
-		t.Errorf("logsHorizontalOffset = %d, want 0 (clamped)", m.logsHorizontalOffset)
+	if m.logsOverlay.HorizontalOffset != 0 {
+		t.Errorf("logsHorizontalOffset = %d, want 0 (clamped)", m.logsOverlay.HorizontalOffset)
 	}
 }
 
 func TestLogsLeftArrow_NoOpWhenWrapEnabled(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsWrapEnabled = true
-	m.logsHorizontalOffset = 16
+	m.logsOverlay.WrapEnabled = true
+	m.logsOverlay.HorizontalOffset = 16
 
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyLeft})
 
-	if m.logsHorizontalOffset != 16 {
-		t.Errorf("logsHorizontalOffset = %d, want 16 (unchanged when wrap enabled)", m.logsHorizontalOffset)
+	if m.logsOverlay.HorizontalOffset != 16 {
+		t.Errorf("logsHorizontalOffset = %d, want 16 (unchanged when wrap enabled)", m.logsOverlay.HorizontalOffset)
 	}
 }
 
 func TestLogsWrapToggle_ResetsHorizontalOffset(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsWrapEnabled = false
-	m.logsHorizontalOffset = 24
+	m.logsOverlay.WrapEnabled = false
+	m.logsOverlay.HorizontalOffset = 24
 
 	m = sendRune(m, 'w')
 
-	if m.logsHorizontalOffset != 0 {
-		t.Errorf("logsHorizontalOffset = %d, want 0 after wrap toggle", m.logsHorizontalOffset)
+	if m.logsOverlay.HorizontalOffset != 0 {
+		t.Errorf("logsHorizontalOffset = %d, want 0 after wrap toggle", m.logsOverlay.HorizontalOffset)
 	}
-	if !m.logsWrapEnabled {
+	if !m.logsOverlay.WrapEnabled {
 		t.Error("expected logsWrapEnabled to be true after toggle")
 	}
 }
@@ -1172,7 +1172,7 @@ func TestLogsWrapToggle_ResetsHorizontalOffset(t *testing.T) {
 
 func TestLogsOverlay_ShowsColIndicator(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsHorizontalOffset = 16
+	m.logsOverlay.HorizontalOffset = 16
 
 	view := m.View()
 	if !strings.Contains(view, "Col:16") {
@@ -1182,7 +1182,7 @@ func TestLogsOverlay_ShowsColIndicator(t *testing.T) {
 
 func TestLogsOverlay_HidesColIndicator(t *testing.T) {
 	m := newTestModelWithLogsOverlay()
-	m.logsHorizontalOffset = 0
+	m.logsOverlay.HorizontalOffset = 0
 
 	view := m.View()
 	if strings.Contains(view, "Col:") {

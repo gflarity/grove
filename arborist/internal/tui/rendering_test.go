@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -209,8 +209,8 @@ func TestTruncateStyledLeft_MaxWidthOne(t *testing.T) {
 
 func TestRenderBreadcrumb_PodCliqueScalingGroupView(t *testing.T) {
 	m := newTestModel(nil)
-	m.viewState = data.ViewState{
-		ViewType:             data.PodCliqueScalingGroupView,
+	m.viewState = clusterstate.ViewState{
+		ViewType:             clusterstate.PodCliqueScalingGroupView,
 		SelectedPodCliqueSet: "my-pcs",
 		SelectedReplicaIndex: "0",
 		SelectedScalingGroup: "my-pcsg",
@@ -228,8 +228,8 @@ func TestRenderBreadcrumb_PodCliqueScalingGroupView(t *testing.T) {
 func TestRenderBreadcrumb_PodCliqueViewWithScalingGroupPath(t *testing.T) {
 	// PodCliqueView reached via Forest > PCS > replica > PCSG > PCSG-replica > PC
 	m := newTestModel(nil)
-	m.viewState = data.ViewState{
-		ViewType:                 data.PodCliqueView,
+	m.viewState = clusterstate.ViewState{
+		ViewType:                 clusterstate.PodCliqueView,
 		SelectedPodCliqueSet:     "my-pcs",
 		SelectedReplicaIndex:     "1",
 		SelectedScalingGroup:     "my-pcsg",
@@ -249,8 +249,8 @@ func TestRenderBreadcrumb_PodCliqueViewWithScalingGroupPath(t *testing.T) {
 func TestRenderBreadcrumb_PodCliqueViewWithoutScalingGroup(t *testing.T) {
 	// PodCliqueView reached via Forest > PCS > replica > PC (no scaling group)
 	m := newTestModel(nil)
-	m.viewState = data.ViewState{
-		ViewType:             data.PodCliqueView,
+	m.viewState = clusterstate.ViewState{
+		ViewType:             clusterstate.PodCliqueView,
 		SelectedPodCliqueSet: "my-pcs",
 		SelectedReplicaIndex: "0",
 		SelectedPodClique:    "my-pc",
@@ -272,8 +272,8 @@ func TestRenderBreadcrumb_PodCliqueViewWithoutScalingGroup(t *testing.T) {
 func TestRenderBreadcrumb_PodCliqueViewWithScalingGroupNoReplica(t *testing.T) {
 	// PodCliqueView with scaling group set but no PCSG replica index
 	m := newTestModel(nil)
-	m.viewState = data.ViewState{
-		ViewType:             data.PodCliqueView,
+	m.viewState = clusterstate.ViewState{
+		ViewType:             clusterstate.PodCliqueView,
 		SelectedPodCliqueSet: "my-pcs",
 		SelectedReplicaIndex: "0",
 		SelectedScalingGroup: "my-pcsg",
@@ -294,8 +294,8 @@ func TestRenderBreadcrumb_PodCliqueViewWithScalingGroupNoReplica(t *testing.T) {
 func TestRenderBreadcrumb_PodViewWithScalingGroupPath(t *testing.T) {
 	// PodView reached via the full PCSG path
 	m := newTestModel(nil)
-	m.viewState = data.ViewState{
-		ViewType:                 data.PodView,
+	m.viewState = clusterstate.ViewState{
+		ViewType:                 clusterstate.PodView,
 		SelectedPodCliqueSet:     "my-pcs",
 		SelectedReplicaIndex:     "0",
 		SelectedScalingGroup:     "my-pcsg",
@@ -316,8 +316,8 @@ func TestRenderBreadcrumb_PodViewWithScalingGroupPath(t *testing.T) {
 func TestRenderBreadcrumb_PodViewWithoutScalingGroup(t *testing.T) {
 	// PodView reached without scaling group path
 	m := newTestModel(nil)
-	m.viewState = data.ViewState{
-		ViewType:             data.PodView,
+	m.viewState = clusterstate.ViewState{
+		ViewType:             clusterstate.PodView,
 		SelectedPodCliqueSet: "my-pcs",
 		SelectedReplicaIndex: "0",
 		SelectedPodClique:    "my-pc",
@@ -335,8 +335,8 @@ func TestRenderBreadcrumb_PodViewWithoutScalingGroup(t *testing.T) {
 
 func TestRenderBreadcrumb_PodCliqueScalingGroupReplicaView(t *testing.T) {
 	m := newTestModel(nil)
-	m.viewState = data.ViewState{
-		ViewType:                 data.PodCliqueScalingGroupReplicaView,
+	m.viewState = clusterstate.ViewState{
+		ViewType:                 clusterstate.PodCliqueScalingGroupReplicaView,
 		SelectedPodCliqueSet:     "my-pcs",
 		SelectedReplicaIndex:     "0",
 		SelectedScalingGroup:     "my-pcsg",
@@ -355,8 +355,8 @@ func TestRenderBreadcrumb_PodCliqueScalingGroupReplicaView(t *testing.T) {
 func TestRenderBreadcrumb_DefaultFallback(t *testing.T) {
 	// An unknown ViewType should fall back to "Forest"
 	m := newTestModel(nil)
-	m.viewState = data.ViewState{
-		ViewType: data.ViewType(999),
+	m.viewState = clusterstate.ViewState{
+		ViewType: clusterstate.ViewType(999),
 	}
 	bc := m.renderBreadcrumb()
 	if !strings.Contains(bc, "Forest") {
@@ -372,33 +372,33 @@ func TestViewDisplayName_OnlyTwoLenses(t *testing.T) {
 	m := newTestModel(nil)
 
 	// All forest hierarchy views should return "forest"
-	forestViews := []data.ViewType{
-		data.ForestView,
-		data.PodCliqueSetView,
-		data.PodCliqueSetReplicaView,
-		data.PodCliqueScalingGroupView,
-		data.PodCliqueScalingGroupReplicaView,
-		data.PodCliqueView,
-		data.PodView,
+	forestViews := []clusterstate.ViewType{
+		clusterstate.ForestView,
+		clusterstate.PodCliqueSetView,
+		clusterstate.PodCliqueSetReplicaView,
+		clusterstate.PodCliqueScalingGroupView,
+		clusterstate.PodCliqueScalingGroupReplicaView,
+		clusterstate.PodCliqueView,
+		clusterstate.PodView,
 	}
 	for _, vt := range forestViews {
 		m.viewState.ViewType = vt
 		got := m.viewDisplayName()
 		if got != "forest" {
 			t.Errorf("viewDisplayName() for %s = %q, want %q",
-				data.ViewTypeName(vt), got, "forest")
+				clusterstate.ViewTypeName(vt), got, "forest")
 		}
 	}
 
 	// Topology view returns "topology"
-	m.viewState.ViewType = data.TopologyView
+	m.viewState.ViewType = clusterstate.TopologyView
 	got := m.viewDisplayName()
 	if got != "topology" {
 		t.Errorf("viewDisplayName() for TopologyView = %q, want %q", got, "topology")
 	}
 
 	// Unknown view type still returns "forest" (it's the default)
-	m.viewState.ViewType = data.ViewType(999)
+	m.viewState.ViewType = clusterstate.ViewType(999)
 	got = m.viewDisplayName()
 	if got != "forest" {
 		t.Errorf("viewDisplayName() for unknown type = %q, want %q", got, "forest")

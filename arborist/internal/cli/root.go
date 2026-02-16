@@ -19,9 +19,9 @@ package cli
 import (
 	"fmt"
 	"os"
-	rtdebug "runtime/debug"
+	"strings"
 
-	"github.com/ai-dynamo/grove/arborist/internal/tui"
+	"github.com/ai-dynamo/grove/arborist/internal/debug"
 )
 
 // CLI defines the top-level Kong command structure for arborist.
@@ -29,7 +29,7 @@ type CLI struct {
 	Debug string `help:"Write arborist CLI debug logs to the given file path." short:"d" type:"path"`
 
 	// Subcommands
-	TUI         TUICmd         `cmd:"" default:"withargs" help:"Launch the interactive TUI (default)."`
+	TUI         ForestCmd      `cmd:"" default:"withargs" help:"Launch the interactive TUI."`
 	Topology    TopologyCmd    `cmd:"" help:"Show pods grouped by topology domain."`
 	Diagnostics DiagnosticsCmd `cmd:"" aliases:"diag" help:"Collect cluster diagnostics for a PodCliqueSet."`
 }
@@ -39,33 +39,22 @@ type CLI struct {
 func (c *CLI) AfterApply() error {
 	if c.Debug != "" {
 		path := c.Debug
-		if len(path) > 0 && path[0] == '~' {
-			home, err := os.UserHomeDir()
-			if err == nil {
+		// Kong's type:"path" does not expand ~; handle ~/... manually.
+		// Note: ~user syntax is not supported.
+		if strings.HasPrefix(path, "~/") || path == "~" {
+			if home, err := os.UserHomeDir(); err == nil {
 				path = home + path[1:]
 			}
 		}
-		if err := tui.InitDebugLog(path); err != nil {
+		if err := debug.Init(path); err != nil {
 			return fmt.Errorf("failed to open debug log: %w", err)
 		}
 	}
-	tui.DebugLog("starting arborist")
+	debug.Log("starting arborist")
 	return nil
 }
 
 // Cleanup closes the debug log.  The caller (main) should defer this.
 func (c *CLI) Cleanup() {
-	tui.CloseDebugLog()
-}
-
-// recoverPanic is a shared deferred panic handler for all CLI commands.
-// It logs the panic and stack trace to the debug log, prints to stderr, and exits.
-func recoverPanic() {
-	if r := recover(); r != nil {
-		stack := rtdebug.Stack()
-		tui.DebugLog("PANIC: %v\n%s", r, stack)
-		tui.CloseDebugLog()
-		fmt.Fprintf(os.Stderr, "arborist panic: %v\n%s", r, stack)
-		os.Exit(1)
-	}
+	debug.Close()
 }

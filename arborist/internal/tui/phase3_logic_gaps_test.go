@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	"github.com/charmbracelet/bubbles/table"
 	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,15 +17,17 @@ import (
 
 func TestCurrentTopologyDomain_LastEntryHasValue_FindsNextDomain(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{
-				{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
-				{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
-				{Domain: "rack", Key: "topology.kubernetes.io/rack", ValuesCount: 6},
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{
+					{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+					{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+					{Domain: "rack", Key: "topology.kubernetes.io/rack", ValuesCount: 6},
+				},
 			},
-		},
-		topologyDrillStack: []data.TopologyDrillSelection{
-			{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
+			topologyDrill: clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{
+				{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
+			}),
 		},
 	}
 
@@ -40,16 +42,18 @@ func TestCurrentTopologyDomain_LastEntryHasValue_FindsNextDomain(t *testing.T) {
 
 func TestCurrentTopologyDomain_AtNarrowestDomain_ReturnsEmpty(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{
-				{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
-				{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{
+					{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+					{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+				},
 			},
-		},
-		topologyDrillStack: []data.TopologyDrillSelection{
-			{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
-			// zone has a value selected — try to find next domain, but there is none
-			{Domain: "zone", Key: "topology.kubernetes.io/zone", Value: "us-east-1a"},
+			topologyDrill: clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{
+				{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
+				// zone has a value selected — try to find next domain, but there is none
+				{Domain: "zone", Key: "topology.kubernetes.io/zone", Value: "us-east-1a"},
+			}),
 		},
 	}
 
@@ -64,8 +68,10 @@ func TestCurrentTopologyDomain_AtNarrowestDomain_ReturnsEmpty(t *testing.T) {
 
 func TestCurrentTopologyDomain_NilTopologyViewData(t *testing.T) {
 	m := Model{
-		topologyViewData:   nil,
-		topologyDrillStack: []data.TopologyDrillSelection{{Domain: "region", Key: "k", Value: ""}},
+		TopologyState: TopologyState{
+			topologyViewData: nil,
+			topologyDrill:    clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{{Domain: "region", Key: "k", Value: ""}}),
+		},
 	}
 
 	domain, key := m.currentTopologyDomain()
@@ -76,10 +82,12 @@ func TestCurrentTopologyDomain_NilTopologyViewData(t *testing.T) {
 
 func TestCurrentTopologyDomain_EmptyDomains(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{},
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{},
+			},
+			topologyDrill: clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{{Domain: "region", Key: "k", Value: ""}}),
 		},
-		topologyDrillStack: []data.TopologyDrillSelection{{Domain: "region", Key: "k", Value: ""}},
 	}
 
 	domain, key := m.currentTopologyDomain()
@@ -90,12 +98,13 @@ func TestCurrentTopologyDomain_EmptyDomains(t *testing.T) {
 
 func TestCurrentTopologyDomain_EmptyDrillStack(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{
-				{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{
+					{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+				},
 			},
 		},
-		topologyDrillStack: nil,
 	}
 
 	domain, key := m.currentTopologyDomain()
@@ -106,15 +115,17 @@ func TestCurrentTopologyDomain_EmptyDrillStack(t *testing.T) {
 
 func TestCurrentTopologyDomain_LastEntryNoValue_ReturnsThatDomain(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{
-				{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
-				{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{
+					{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+					{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+				},
 			},
-		},
-		topologyDrillStack: []data.TopologyDrillSelection{
-			{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
-			{Domain: "zone", Key: "topology.kubernetes.io/zone", Value: ""},
+			topologyDrill: clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{
+				{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
+				{Domain: "zone", Key: "topology.kubernetes.io/zone", Value: ""},
+			}),
 		},
 	}
 
@@ -133,31 +144,31 @@ func TestCurrentTopologyDomain_LastEntryNoValue_ReturnsThatDomain(t *testing.T) 
 
 func TestRebuildEventsFromSnapshot_PodCliqueSetReplicaView_PCSGRow(t *testing.T) {
 	now := time.Now()
-	snapshot := &data.CacheSnapshot{
-		PodCliqueSets: samplePCSResources(),
-		EventsByObject: map[string][]data.Event{
+	snapshot := &clusterstate.CacheSnapshot{
+		HierarchyData: clusterstate.HierarchyData{
+			PodCliqueSets:           samplePCSResources(),
+			ReplicaIndexesByPCS:     map[string][]string{"alpha-pcs": {"0"}},
+			ScalingGroupsByReplica:  map[string][]clusterstate.Resource{},
+			PodCliquesByReplica:     map[string][]clusterstate.Resource{},
+			ReplicaIndexesByPCSG:    map[string][]string{},
+			PodCliquesByPCSG:        map[string][]clusterstate.Resource{},
+			PodCliquesByPCSGReplica: map[string][]clusterstate.Resource{},
+			PodsByPodClique:         map[string][]clusterstate.Resource{},
+		},
+		EventsByObject: map[string][]clusterstate.Event{
 			"PodCliqueScalingGroup/my-pcsg": {
 				{Type: "Normal", Reason: "Created", Message: "PCSG created", Parent: "my-pcsg", Timestamp: now},
 			},
 		},
-		ReplicaIndexesByPCS:     map[string][]string{"alpha-pcs": {"0"}},
-		ScalingGroupsByReplica:  map[string][]data.Resource{},
-		PodCliquesByReplica:     map[string][]data.Resource{},
-		ReplicaIndexesByPCSG:    map[string][]string{},
-		PodCliquesByPCSG:        map[string][]data.Resource{},
-		PodCliquesByPCSGReplica: map[string][]data.Resource{},
-		PodsByPodClique:         map[string][]data.Resource{},
-		NodeLabels:              map[string]map[string]string{},
-		PodInfos:                map[string]data.CachedPodInfo{},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:             data.PodCliqueSetReplicaView,
+		viewState: clusterstate.ViewState{
+			ViewType:             clusterstate.PodCliqueSetReplicaView,
 			SelectedPodCliqueSet: "alpha-pcs",
 			SelectedReplicaIndex: "0",
 		},
-		allResources: make(map[string][]data.Resource),
+		DataState: DataState{allResources: make(map[string][]clusterstate.Resource)},
 	}
 	// Set up resources table with a PCSG row selected
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
@@ -178,31 +189,31 @@ func TestRebuildEventsFromSnapshot_PodCliqueSetReplicaView_PCSGRow(t *testing.T)
 
 func TestRebuildEventsFromSnapshot_PodCliqueSetReplicaView_PodCliqueRow(t *testing.T) {
 	now := time.Now()
-	snapshot := &data.CacheSnapshot{
-		PodCliqueSets: samplePCSResources(),
-		EventsByObject: map[string][]data.Event{
+	snapshot := &clusterstate.CacheSnapshot{
+		HierarchyData: clusterstate.HierarchyData{
+			PodCliqueSets:           samplePCSResources(),
+			ReplicaIndexesByPCS:     map[string][]string{"alpha-pcs": {"0"}},
+			ScalingGroupsByReplica:  map[string][]clusterstate.Resource{},
+			PodCliquesByReplica:     map[string][]clusterstate.Resource{},
+			ReplicaIndexesByPCSG:    map[string][]string{},
+			PodCliquesByPCSG:        map[string][]clusterstate.Resource{},
+			PodCliquesByPCSGReplica: map[string][]clusterstate.Resource{},
+			PodsByPodClique:         map[string][]clusterstate.Resource{},
+		},
+		EventsByObject: map[string][]clusterstate.Event{
 			"PodClique/my-pc": {
 				{Type: "Normal", Reason: "Scaled", Message: "PC scaled", Parent: "my-pc", Timestamp: now},
 			},
 		},
-		ReplicaIndexesByPCS:     map[string][]string{"alpha-pcs": {"0"}},
-		ScalingGroupsByReplica:  map[string][]data.Resource{},
-		PodCliquesByReplica:     map[string][]data.Resource{},
-		ReplicaIndexesByPCSG:    map[string][]string{},
-		PodCliquesByPCSG:        map[string][]data.Resource{},
-		PodCliquesByPCSGReplica: map[string][]data.Resource{},
-		PodsByPodClique:         map[string][]data.Resource{},
-		NodeLabels:              map[string]map[string]string{},
-		PodInfos:                map[string]data.CachedPodInfo{},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:             data.PodCliqueSetReplicaView,
+		viewState: clusterstate.ViewState{
+			ViewType:             clusterstate.PodCliqueSetReplicaView,
 			SelectedPodCliqueSet: "alpha-pcs",
 			SelectedReplicaIndex: "0",
 		},
-		allResources: make(map[string][]data.Resource),
+		DataState: DataState{allResources: make(map[string][]clusterstate.Resource)},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 	m.resourcesTable.SetRows([]table.Row{
@@ -222,33 +233,33 @@ func TestRebuildEventsFromSnapshot_PodCliqueSetReplicaView_PodCliqueRow(t *testi
 
 func TestRebuildEventsFromSnapshot_PodCliqueSetReplicaView_Fallback(t *testing.T) {
 	now := time.Now()
-	snapshot := &data.CacheSnapshot{
-		PodCliqueSets: samplePCSResources(),
-		EventsByObject: map[string][]data.Event{
+	snapshot := &clusterstate.CacheSnapshot{
+		HierarchyData: clusterstate.HierarchyData{
+			PodCliqueSets:       samplePCSResources(),
+			ReplicaIndexesByPCS: map[string][]string{"alpha-pcs": {"0"}},
+			ScalingGroupsByReplica: map[string][]clusterstate.Resource{
+				"alpha-pcs/0": {{Name: "alpha-pcs-0-sg-prefill", Type: "PodCliqueScalingGroup"}},
+			},
+			PodCliquesByReplica:     map[string][]clusterstate.Resource{},
+			ReplicaIndexesByPCSG:    map[string][]string{},
+			PodCliquesByPCSG:        map[string][]clusterstate.Resource{},
+			PodCliquesByPCSGReplica: map[string][]clusterstate.Resource{},
+			PodsByPodClique:         map[string][]clusterstate.Resource{},
+		},
+		EventsByObject: map[string][]clusterstate.Event{
 			"PodCliqueScalingGroup/alpha-pcs-0-sg-prefill": {
 				{Type: "Normal", Reason: "Ready", Message: "replica events", Parent: "alpha-pcs-0-sg-prefill", Timestamp: now},
 			},
 		},
-		ReplicaIndexesByPCS: map[string][]string{"alpha-pcs": {"0"}},
-		ScalingGroupsByReplica: map[string][]data.Resource{
-			"alpha-pcs/0": {{Name: "alpha-pcs-0-sg-prefill", Type: "PodCliqueScalingGroup"}},
-		},
-		PodCliquesByReplica:     map[string][]data.Resource{},
-		ReplicaIndexesByPCSG:    map[string][]string{},
-		PodCliquesByPCSG:        map[string][]data.Resource{},
-		PodCliquesByPCSGReplica: map[string][]data.Resource{},
-		PodsByPodClique:         map[string][]data.Resource{},
-		NodeLabels:              map[string]map[string]string{},
-		PodInfos:                map[string]data.CachedPodInfo{},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:             data.PodCliqueSetReplicaView,
+		viewState: clusterstate.ViewState{
+			ViewType:             clusterstate.PodCliqueSetReplicaView,
 			SelectedPodCliqueSet: "alpha-pcs",
 			SelectedReplicaIndex: "0",
 		},
-		allResources: make(map[string][]data.Resource),
+		DataState: DataState{allResources: make(map[string][]clusterstate.Resource)},
 	}
 	// No rows selected (empty table) → fallback to replica events
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
@@ -264,32 +275,32 @@ func TestRebuildEventsFromSnapshot_PodCliqueSetReplicaView_Fallback(t *testing.T
 
 func TestRebuildEventsFromSnapshot_PodCliqueScalingGroupView_PCSGReplicaRow(t *testing.T) {
 	now := time.Now()
-	snapshot := &data.CacheSnapshot{
-		PodCliqueSets: samplePCSResources(),
-		EventsByObject: map[string][]data.Event{
+	snapshot := &clusterstate.CacheSnapshot{
+		HierarchyData: clusterstate.HierarchyData{
+			PodCliqueSets:          samplePCSResources(),
+			ReplicaIndexesByPCS:    map[string][]string{},
+			ScalingGroupsByReplica: map[string][]clusterstate.Resource{},
+			PodCliquesByReplica:    map[string][]clusterstate.Resource{},
+			ReplicaIndexesByPCSG:   map[string][]string{"my-pcsg": {"0"}},
+			PodCliquesByPCSG:       map[string][]clusterstate.Resource{},
+			PodCliquesByPCSGReplica: map[string][]clusterstate.Resource{
+				"my-pcsg/0": {{Name: "my-pcsg-0-worker", Type: "PodClique"}},
+			},
+			PodsByPodClique: map[string][]clusterstate.Resource{},
+		},
+		EventsByObject: map[string][]clusterstate.Event{
 			"PodClique/my-pcsg-0-worker": {
 				{Type: "Normal", Reason: "Started", Message: "replica event", Parent: "my-pcsg-0-worker", Timestamp: now},
 			},
 		},
-		ReplicaIndexesByPCS:    map[string][]string{},
-		ScalingGroupsByReplica: map[string][]data.Resource{},
-		PodCliquesByReplica:    map[string][]data.Resource{},
-		ReplicaIndexesByPCSG:   map[string][]string{"my-pcsg": {"0"}},
-		PodCliquesByPCSG:       map[string][]data.Resource{},
-		PodCliquesByPCSGReplica: map[string][]data.Resource{
-			"my-pcsg/0": {{Name: "my-pcsg-0-worker", Type: "PodClique"}},
-		},
-		PodsByPodClique: map[string][]data.Resource{},
-		NodeLabels:      map[string]map[string]string{},
-		PodInfos:        map[string]data.CachedPodInfo{},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:             data.PodCliqueScalingGroupView,
+		viewState: clusterstate.ViewState{
+			ViewType:             clusterstate.PodCliqueScalingGroupView,
 			SelectedScalingGroup: "my-pcsg",
 		},
-		allResources: make(map[string][]data.Resource),
+		DataState: DataState{allResources: make(map[string][]clusterstate.Resource)},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 	m.resourcesTable.SetRows([]table.Row{
@@ -306,31 +317,31 @@ func TestRebuildEventsFromSnapshot_PodCliqueScalingGroupView_PCSGReplicaRow(t *t
 
 func TestRebuildEventsFromSnapshot_PodCliqueScalingGroupReplicaView_PodCliqueRow(t *testing.T) {
 	now := time.Now()
-	snapshot := &data.CacheSnapshot{
-		PodCliqueSets: samplePCSResources(),
-		EventsByObject: map[string][]data.Event{
+	snapshot := &clusterstate.CacheSnapshot{
+		HierarchyData: clusterstate.HierarchyData{
+			PodCliqueSets:           samplePCSResources(),
+			ReplicaIndexesByPCS:     map[string][]string{},
+			ScalingGroupsByReplica:  map[string][]clusterstate.Resource{},
+			PodCliquesByReplica:     map[string][]clusterstate.Resource{},
+			ReplicaIndexesByPCSG:    map[string][]string{},
+			PodCliquesByPCSG:        map[string][]clusterstate.Resource{},
+			PodCliquesByPCSGReplica: map[string][]clusterstate.Resource{},
+			PodsByPodClique:         map[string][]clusterstate.Resource{},
+		},
+		EventsByObject: map[string][]clusterstate.Event{
 			"PodClique/my-pcsg-0-worker": {
 				{Type: "Normal", Reason: "Synced", Message: "PC event in PCSG replica", Parent: "my-pcsg-0-worker", Timestamp: now},
 			},
 		},
-		ReplicaIndexesByPCS:     map[string][]string{},
-		ScalingGroupsByReplica:  map[string][]data.Resource{},
-		PodCliquesByReplica:     map[string][]data.Resource{},
-		ReplicaIndexesByPCSG:    map[string][]string{},
-		PodCliquesByPCSG:        map[string][]data.Resource{},
-		PodCliquesByPCSGReplica: map[string][]data.Resource{},
-		PodsByPodClique:         map[string][]data.Resource{},
-		NodeLabels:              map[string]map[string]string{},
-		PodInfos:                map[string]data.CachedPodInfo{},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:                 data.PodCliqueScalingGroupReplicaView,
+		viewState: clusterstate.ViewState{
+			ViewType:                 clusterstate.PodCliqueScalingGroupReplicaView,
 			SelectedScalingGroup:     "my-pcsg",
 			SelectedPCSGReplicaIndex: "0",
 		},
-		allResources: make(map[string][]data.Resource),
+		DataState: DataState{allResources: make(map[string][]clusterstate.Resource)},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 	m.resourcesTable.SetRows([]table.Row{
@@ -350,33 +361,33 @@ func TestRebuildEventsFromSnapshot_PodCliqueScalingGroupReplicaView_PodCliqueRow
 
 func TestRebuildEventsFromSnapshot_PodCliqueScalingGroupReplicaView_Fallback(t *testing.T) {
 	now := time.Now()
-	snapshot := &data.CacheSnapshot{
-		PodCliqueSets: samplePCSResources(),
-		EventsByObject: map[string][]data.Event{
+	snapshot := &clusterstate.CacheSnapshot{
+		HierarchyData: clusterstate.HierarchyData{
+			PodCliqueSets:          samplePCSResources(),
+			ReplicaIndexesByPCS:    map[string][]string{},
+			ScalingGroupsByReplica: map[string][]clusterstate.Resource{},
+			PodCliquesByReplica:    map[string][]clusterstate.Resource{},
+			ReplicaIndexesByPCSG:   map[string][]string{},
+			PodCliquesByPCSG:       map[string][]clusterstate.Resource{},
+			PodCliquesByPCSGReplica: map[string][]clusterstate.Resource{
+				"my-pcsg/0": {{Name: "my-pcsg-0-worker", Type: "PodClique"}},
+			},
+			PodsByPodClique: map[string][]clusterstate.Resource{},
+		},
+		EventsByObject: map[string][]clusterstate.Event{
 			"PodClique/my-pcsg-0-worker": {
 				{Type: "Normal", Reason: "Synced", Message: "fallback event", Parent: "my-pcsg-0-worker", Timestamp: now},
 			},
 		},
-		ReplicaIndexesByPCS:    map[string][]string{},
-		ScalingGroupsByReplica: map[string][]data.Resource{},
-		PodCliquesByReplica:    map[string][]data.Resource{},
-		ReplicaIndexesByPCSG:   map[string][]string{},
-		PodCliquesByPCSG:       map[string][]data.Resource{},
-		PodCliquesByPCSGReplica: map[string][]data.Resource{
-			"my-pcsg/0": {{Name: "my-pcsg-0-worker", Type: "PodClique"}},
-		},
-		PodsByPodClique: map[string][]data.Resource{},
-		NodeLabels:      map[string]map[string]string{},
-		PodInfos:        map[string]data.CachedPodInfo{},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:                 data.PodCliqueScalingGroupReplicaView,
+		viewState: clusterstate.ViewState{
+			ViewType:                 clusterstate.PodCliqueScalingGroupReplicaView,
 			SelectedScalingGroup:     "my-pcsg",
 			SelectedPCSGReplicaIndex: "0",
 		},
-		allResources: make(map[string][]data.Resource),
+		DataState: DataState{allResources: make(map[string][]clusterstate.Resource)},
 	}
 	// Empty table → fallback
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
@@ -392,30 +403,30 @@ func TestRebuildEventsFromSnapshot_PodCliqueScalingGroupReplicaView_Fallback(t *
 
 func TestRebuildEventsFromSnapshot_PodCliqueView(t *testing.T) {
 	now := time.Now()
-	snapshot := &data.CacheSnapshot{
-		PodCliqueSets: samplePCSResources(),
-		EventsByObject: map[string][]data.Event{
+	snapshot := &clusterstate.CacheSnapshot{
+		HierarchyData: clusterstate.HierarchyData{
+			PodCliqueSets:           samplePCSResources(),
+			ReplicaIndexesByPCS:     map[string][]string{},
+			ScalingGroupsByReplica:  map[string][]clusterstate.Resource{},
+			PodCliquesByReplica:     map[string][]clusterstate.Resource{},
+			ReplicaIndexesByPCSG:    map[string][]string{},
+			PodCliquesByPCSG:        map[string][]clusterstate.Resource{},
+			PodCliquesByPCSGReplica: map[string][]clusterstate.Resource{},
+			PodsByPodClique:         map[string][]clusterstate.Resource{},
+		},
+		EventsByObject: map[string][]clusterstate.Event{
 			"PodClique/my-pc": {
 				{Type: "Normal", Reason: "Ready", Message: "pc event", Parent: "my-pc", Timestamp: now},
 			},
 		},
-		ReplicaIndexesByPCS:     map[string][]string{},
-		ScalingGroupsByReplica:  map[string][]data.Resource{},
-		PodCliquesByReplica:     map[string][]data.Resource{},
-		ReplicaIndexesByPCSG:    map[string][]string{},
-		PodCliquesByPCSG:        map[string][]data.Resource{},
-		PodCliquesByPCSGReplica: map[string][]data.Resource{},
-		PodsByPodClique:         map[string][]data.Resource{},
-		NodeLabels:              map[string]map[string]string{},
-		PodInfos:                map[string]data.CachedPodInfo{},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:          data.PodCliqueView,
+		viewState: clusterstate.ViewState{
+			ViewType:          clusterstate.PodCliqueView,
 			SelectedPodClique: "my-pc",
 		},
-		allResources: make(map[string][]data.Resource),
+		DataState: DataState{allResources: make(map[string][]clusterstate.Resource)},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 
@@ -428,9 +439,20 @@ func TestRebuildEventsFromSnapshot_PodCliqueView(t *testing.T) {
 
 func TestRebuildEventsFromSnapshot_PodView(t *testing.T) {
 	now := time.Now()
-	snapshot := &data.CacheSnapshot{
-		PodCliqueSets: samplePCSResources(),
-		EventsByObject: map[string][]data.Event{
+	snapshot := &clusterstate.CacheSnapshot{
+		HierarchyData: clusterstate.HierarchyData{
+			PodCliqueSets:           samplePCSResources(),
+			ReplicaIndexesByPCS:     map[string][]string{},
+			ScalingGroupsByReplica:  map[string][]clusterstate.Resource{},
+			PodCliquesByReplica:     map[string][]clusterstate.Resource{},
+			ReplicaIndexesByPCSG:    map[string][]string{},
+			PodCliquesByPCSG:        map[string][]clusterstate.Resource{},
+			PodCliquesByPCSGReplica: map[string][]clusterstate.Resource{},
+			PodsByPodClique: map[string][]clusterstate.Resource{
+				"my-pc": {{Name: "my-pod", Type: "Pod"}},
+			},
+		},
+		EventsByObject: map[string][]clusterstate.Event{
 			"PodClique/my-pc": {
 				{Type: "Normal", Reason: "Ready", Message: "pod view event", Parent: "my-pc", Timestamp: now},
 			},
@@ -438,26 +460,15 @@ func TestRebuildEventsFromSnapshot_PodView(t *testing.T) {
 				{Type: "Normal", Reason: "Scheduled", Message: "pod scheduled", Parent: "my-pod", Timestamp: now},
 			},
 		},
-		ReplicaIndexesByPCS:     map[string][]string{},
-		ScalingGroupsByReplica:  map[string][]data.Resource{},
-		PodCliquesByReplica:     map[string][]data.Resource{},
-		ReplicaIndexesByPCSG:    map[string][]string{},
-		PodCliquesByPCSG:        map[string][]data.Resource{},
-		PodCliquesByPCSGReplica: map[string][]data.Resource{},
-		PodsByPodClique: map[string][]data.Resource{
-			"my-pc": {{Name: "my-pod", Type: "Pod"}},
-		},
-		NodeLabels: map[string]map[string]string{},
-		PodInfos:   map[string]data.CachedPodInfo{},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:          data.PodView,
+		viewState: clusterstate.ViewState{
+			ViewType:          clusterstate.PodView,
 			SelectedPodClique: "my-pc",
 			SelectedPod:       "my-pod",
 		},
-		allResources: make(map[string][]data.Resource),
+		DataState: DataState{allResources: make(map[string][]clusterstate.Resource)},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 
@@ -471,8 +482,8 @@ func TestRebuildEventsFromSnapshot_PodView(t *testing.T) {
 
 func TestRebuildEventsFromSnapshot_NilSnapshot(t *testing.T) {
 	m := Model{
-		viewState: data.ViewState{ViewType: data.ForestView},
-		allEvents: []data.Event{{Type: "old"}},
+		viewState: clusterstate.ViewState{ViewType: clusterstate.ForestView},
+		DataState: DataState{allEvents: []clusterstate.Event{{Type: "old"}}},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 
@@ -488,21 +499,21 @@ func TestRebuildEventsFromSnapshot_NilSnapshot(t *testing.T) {
 // ===========================================================================
 
 func TestGpuCountsForResource_PodCliqueScalingGroupReplica_Valid(t *testing.T) {
-	summary := &data.GPUSummary{
+	summary := &clusterstate.GPUSummary{
 		GPUTypes: []string{"H100"},
-		ByPCSGReplica: map[string]data.GPUCounts{
+		ByPCSGReplica: map[string]clusterstate.GPUCounts{
 			"my-pcsg/0": {"H100": 4},
 		},
 	}
 
 	m := Model{
-		gpuSummary: summary,
-		viewState: data.ViewState{
+		DataState: DataState{gpuSummary: summary},
+		viewState: clusterstate.ViewState{
 			SelectedScalingGroup: "my-pcsg",
 		},
 	}
 
-	counts := m.gpuCountsForResource(data.Resource{
+	counts := m.gpuCountsForResource(clusterstate.Resource{
 		Name: "my-pcsg-replica-0",
 		Type: "(PodCliqueScalingGroup replica)",
 	})
@@ -516,21 +527,21 @@ func TestGpuCountsForResource_PodCliqueScalingGroupReplica_Valid(t *testing.T) {
 }
 
 func TestGpuCountsForResource_PodCliqueScalingGroupReplica_EmptyPCSGName(t *testing.T) {
-	summary := &data.GPUSummary{
+	summary := &clusterstate.GPUSummary{
 		GPUTypes: []string{"H100"},
-		ByPCSGReplica: map[string]data.GPUCounts{
+		ByPCSGReplica: map[string]clusterstate.GPUCounts{
 			"my-pcsg/0": {"H100": 4},
 		},
 	}
 
 	m := Model{
-		gpuSummary: summary,
-		viewState: data.ViewState{
+		DataState: DataState{gpuSummary: summary},
+		viewState: clusterstate.ViewState{
 			SelectedScalingGroup: "", // empty pcsg name
 		},
 	}
 
-	counts := m.gpuCountsForResource(data.Resource{
+	counts := m.gpuCountsForResource(clusterstate.Resource{
 		Name: "my-pcsg-replica-0",
 		Type: "(PodCliqueScalingGroup replica)",
 	})
@@ -542,22 +553,22 @@ func TestGpuCountsForResource_PodCliqueScalingGroupReplica_EmptyPCSGName(t *test
 }
 
 func TestGpuCountsForResource_PodCliqueScalingGroupReplica_BadReplicaIndex(t *testing.T) {
-	summary := &data.GPUSummary{
+	summary := &clusterstate.GPUSummary{
 		GPUTypes: []string{"H100"},
-		ByPCSGReplica: map[string]data.GPUCounts{
+		ByPCSGReplica: map[string]clusterstate.GPUCounts{
 			"my-pcsg/0": {"H100": 2},
 		},
 	}
 
 	m := Model{
-		gpuSummary: summary,
-		viewState: data.ViewState{
+		DataState: DataState{gpuSummary: summary},
+		viewState: clusterstate.ViewState{
 			SelectedScalingGroup: "my-pcsg",
 		},
 	}
 
 	// Name without "-replica-" suffix — extractReplicaIndex returns ""
-	counts := m.gpuCountsForResource(data.Resource{
+	counts := m.gpuCountsForResource(clusterstate.Resource{
 		Name: "my-pcsg-no-replica-suffix",
 		Type: "(PodCliqueScalingGroup replica)",
 	})
@@ -569,19 +580,19 @@ func TestGpuCountsForResource_PodCliqueScalingGroupReplica_BadReplicaIndex(t *te
 }
 
 func TestGpuCountsForResource_PodCliqueSetReplica_EmptyPCSName(t *testing.T) {
-	summary := &data.GPUSummary{
+	summary := &clusterstate.GPUSummary{
 		GPUTypes:  []string{"H100"},
-		ByReplica: map[string]data.GPUCounts{"pcs-a/0": {"H100": 8}},
+		ByReplica: map[string]clusterstate.GPUCounts{"pcs-a/0": {"H100": 8}},
 	}
 
 	m := Model{
-		gpuSummary: summary,
-		viewState: data.ViewState{
+		DataState: DataState{gpuSummary: summary},
+		viewState: clusterstate.ViewState{
 			SelectedPodCliqueSet: "", // empty pcsName
 		},
 	}
 
-	counts := m.gpuCountsForResource(data.Resource{
+	counts := m.gpuCountsForResource(clusterstate.Resource{
 		Name: "pcs-a-replica-0",
 		Type: "(PodCliqueSet replica)",
 	})
@@ -593,20 +604,20 @@ func TestGpuCountsForResource_PodCliqueSetReplica_EmptyPCSName(t *testing.T) {
 }
 
 func TestGpuCountsForResource_PodCliqueSetReplica_BadReplicaIndex(t *testing.T) {
-	summary := &data.GPUSummary{
+	summary := &clusterstate.GPUSummary{
 		GPUTypes:  []string{"H100"},
-		ByReplica: map[string]data.GPUCounts{"pcs-a/0": {"H100": 8}},
+		ByReplica: map[string]clusterstate.GPUCounts{"pcs-a/0": {"H100": 8}},
 	}
 
 	m := Model{
-		gpuSummary: summary,
-		viewState: data.ViewState{
+		DataState: DataState{gpuSummary: summary},
+		viewState: clusterstate.ViewState{
 			SelectedPodCliqueSet: "pcs-a",
 		},
 	}
 
 	// Name without "-replica-" => replicaIndex = "" => short-circuit, return nil
-	counts := m.gpuCountsForResource(data.Resource{
+	counts := m.gpuCountsForResource(clusterstate.Resource{
 		Name: "pcs-a-no-replica",
 		Type: "(PodCliqueSet replica)",
 	})
@@ -621,18 +632,18 @@ func TestGpuCountsForResource_PodCliqueSetReplica_BadReplicaIndex(t *testing.T) 
 // ===========================================================================
 
 func TestGetFilteredEvents_PodCliqueView_PodRowSelected(t *testing.T) {
-	allEvents := []data.Event{
+	allEvents := []clusterstate.Event{
 		{Type: "Normal", Parent: "pod-a", Reason: "Scheduled", Message: "pod-a scheduled"},
 		{Type: "Normal", Parent: "pod-b", Reason: "Scheduled", Message: "pod-b scheduled"},
 		{Type: "Warning", Parent: "pc-a", Reason: "Failed", Message: "pc-a failed"},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:          data.PodCliqueView,
+		viewState: clusterstate.ViewState{
+			ViewType:          clusterstate.PodCliqueView,
 			SelectedPodClique: "pc-a",
 		},
-		allEvents: allEvents,
+		DataState: DataState{allEvents: allEvents},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 	m.resourcesTable.SetRows([]table.Row{
@@ -651,17 +662,17 @@ func TestGetFilteredEvents_PodCliqueView_PodRowSelected(t *testing.T) {
 }
 
 func TestGetFilteredEvents_PodCliqueView_NonPodRowSelected(t *testing.T) {
-	allEvents := []data.Event{
+	allEvents := []clusterstate.Event{
 		{Type: "Normal", Parent: "pod-a", Reason: "Scheduled", Message: "event 1"},
 		{Type: "Warning", Parent: "pod-b", Reason: "Failed", Message: "event 2"},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:          data.PodCliqueView,
+		viewState: clusterstate.ViewState{
+			ViewType:          clusterstate.PodCliqueView,
 			SelectedPodClique: "pc-a",
 		},
-		allEvents: allEvents,
+		DataState: DataState{allEvents: allEvents},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 	// Row type is PodClique, not Pod
@@ -679,16 +690,16 @@ func TestGetFilteredEvents_PodCliqueView_NonPodRowSelected(t *testing.T) {
 }
 
 func TestGetFilteredEvents_PodCliqueView_NoRowSelected(t *testing.T) {
-	allEvents := []data.Event{
+	allEvents := []clusterstate.Event{
 		{Type: "Normal", Parent: "pod-a", Reason: "Scheduled", Message: "event 1"},
 	}
 
 	m := Model{
-		viewState: data.ViewState{
-			ViewType:          data.PodCliqueView,
+		viewState: clusterstate.ViewState{
+			ViewType:          clusterstate.PodCliqueView,
 			SelectedPodClique: "pc-a",
 		},
-		allEvents: allEvents,
+		DataState: DataState{allEvents: allEvents},
 	}
 	m.resourcesTable = createTableModel(resourceColumnSpecs, true)
 	// Empty table, no row selected
@@ -708,102 +719,111 @@ func TestGetFilteredEvents_PodCliqueView_NoRowSelected(t *testing.T) {
 
 func TestValidateTopologyDrillStack_DomainRemoved_StackResets(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{
-				{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
-				// "rack" domain was removed
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{
+					{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+					// "rack" domain was removed
+				},
 			},
-		},
-		topologyDrillStack: []data.TopologyDrillSelection{
-			{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
-			{Domain: "rack", Key: "topology.kubernetes.io/rack", Value: ""},
+			topologyDrill: clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{
+				{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
+				{Domain: "rack", Key: "topology.kubernetes.io/rack", Value: ""},
+			}),
 		},
 	}
 
 	m.validateTopologyDrillStack()
 
 	// Stack should be truncated to depth 1 (region preserved, rack removed)
-	if len(m.topologyDrillStack) != 1 || m.topologyDrillStack[0].Domain != "region" {
-		t.Errorf("expected drill stack truncated to [region], got %v", m.topologyDrillStack)
+	if m.topologyDrill.Depth() != 1 || m.topologyDrill.Entries()[0].Domain != "region" {
+		t.Errorf("expected drill stack truncated to [region], got %v", m.topologyDrill.Entries())
 	}
 }
 
 func TestValidateTopologyDrillStack_AllDomainsValid_StackPreserved(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{
-				{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
-				{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{
+					{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+					{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 3},
+				},
 			},
-		},
-		topologyDrillStack: []data.TopologyDrillSelection{
-			{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
-			{Domain: "zone", Key: "topology.kubernetes.io/zone", Value: ""},
+			topologyDrill: clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{
+				{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
+				{Domain: "zone", Key: "topology.kubernetes.io/zone", Value: ""},
+			}),
 		},
 	}
 
 	m.validateTopologyDrillStack()
 
-	if len(m.topologyDrillStack) != 2 {
-		t.Errorf("expected drill stack preserved with 2 entries, got %d", len(m.topologyDrillStack))
+	if m.topologyDrill.Depth() != 2 {
+		t.Errorf("expected drill stack preserved with 2 entries, got %d", m.topologyDrill.Depth())
 	}
 }
 
 func TestValidateTopologyDrillStack_PartiallyStale(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{
-				{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
-				// "zone" was removed, "rack" still exists
-				{Domain: "rack", Key: "topology.kubernetes.io/rack", ValuesCount: 6},
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{
+					{Domain: "region", Key: "topology.kubernetes.io/region", ValuesCount: 2},
+					// "zone" was removed, "rack" still exists
+					{Domain: "rack", Key: "topology.kubernetes.io/rack", ValuesCount: 6},
+				},
 			},
-		},
-		topologyDrillStack: []data.TopologyDrillSelection{
-			{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
-			{Domain: "zone", Key: "topology.kubernetes.io/zone", Value: "us-east-1a"},
-			{Domain: "rack", Key: "topology.kubernetes.io/rack", Value: ""},
+			topologyDrill: clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{
+				{Domain: "region", Key: "topology.kubernetes.io/region", Value: "us-east-1"},
+				{Domain: "zone", Key: "topology.kubernetes.io/zone", Value: "us-east-1a"},
+				{Domain: "rack", Key: "topology.kubernetes.io/rack", Value: ""},
+			}),
 		},
 	}
 
 	m.validateTopologyDrillStack()
 
 	// "zone" no longer exists → stack should be truncated to [region]
-	if len(m.topologyDrillStack) != 1 || m.topologyDrillStack[0].Domain != "region" {
-		t.Errorf("expected drill stack truncated to [region], got %v", m.topologyDrillStack)
+	if m.topologyDrill.Depth() != 1 || m.topologyDrill.Entries()[0].Domain != "region" {
+		t.Errorf("expected drill stack truncated to [region], got %v", m.topologyDrill.Entries())
 	}
 }
 
 func TestValidateTopologyDrillStack_NilTopologyViewData(t *testing.T) {
 	m := Model{
-		topologyViewData: nil,
-		topologyDrillStack: []data.TopologyDrillSelection{
-			{Domain: "region", Key: "k", Value: ""},
+		TopologyState: TopologyState{
+			topologyViewData: nil,
+			topologyDrill: clusterstate.NewTopologyDrillStack([]clusterstate.TopologyDrillSelection{
+				{Domain: "region", Key: "k", Value: ""},
+			}),
 		},
 	}
 
 	m.validateTopologyDrillStack()
 
 	// Stack should remain unchanged (nil topologyViewData triggers early return)
-	if len(m.topologyDrillStack) != 1 {
-		t.Errorf("expected drill stack unchanged for nil topologyViewData, got %d", len(m.topologyDrillStack))
+	if m.topologyDrill.Depth() != 1 {
+		t.Errorf("expected drill stack unchanged for nil topologyViewData, got %d", m.topologyDrill.Depth())
 	}
 }
 
 func TestValidateTopologyDrillStack_EmptyStack(t *testing.T) {
 	m := Model{
-		topologyViewData: &data.TopologyViewData{
-			Domains: []data.TopologyDomainRow{
-				{Domain: "region", Key: "k", ValuesCount: 1},
+		TopologyState: TopologyState{
+			topologyViewData: &clusterstate.TopologyViewData{
+				Domains: []clusterstate.TopologyDomainRow{
+					{Domain: "region", Key: "k", ValuesCount: 1},
+				},
 			},
 		},
-		topologyDrillStack: nil,
 	}
 
 	// Should not panic
 	m.validateTopologyDrillStack()
 
-	if m.topologyDrillStack != nil {
-		t.Errorf("expected nil drill stack to remain nil, got %v", m.topologyDrillStack)
+	if !m.topologyDrill.IsEmpty() {
+		t.Errorf("expected empty drill stack to remain empty, got %v", m.topologyDrill.Entries())
 	}
 }
 
@@ -812,7 +832,7 @@ func TestValidateTopologyDrillStack_EmptyStack(t *testing.T) {
 // ===========================================================================
 
 func TestApplySnapshot_TopologyInfoRebuiltForSelectedPCS(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.PodCliqueSets = samplePCSResources()
 	snap.PodCliqueSetSpecs = map[string]*corev1alpha1.PodCliqueSet{
@@ -823,7 +843,7 @@ func TestApplySnapshot_TopologyInfoRebuiltForSelectedPCS(t *testing.T) {
 			},
 		},
 	}
-	snap.TopologyViewData = &data.TopologyViewData{
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
 		DomainToKey: map[string]string{
 			"rack": "topology.io/rack",
 			"zone": "topology.kubernetes.io/zone",
@@ -845,7 +865,7 @@ func TestApplySnapshot_TopologyInfoRebuiltForSelectedPCS(t *testing.T) {
 }
 
 func TestApplySnapshot_DomainToKeyPopulated(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.PodCliqueSets = samplePCSResources()
 	snap.PodCliqueSetSpecs = map[string]*corev1alpha1.PodCliqueSet{
@@ -854,7 +874,7 @@ func TestApplySnapshot_DomainToKeyPopulated(t *testing.T) {
 			Spec:       corev1alpha1.PodCliqueSetSpec{Replicas: 1},
 		},
 	}
-	snap.TopologyViewData = &data.TopologyViewData{
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
 		DomainToKey: map[string]string{
 			"rack": "topology.io/rack",
 			"zone": "topology.kubernetes.io/zone",
@@ -885,7 +905,7 @@ func TestApplySnapshot_DomainToKeyPopulated(t *testing.T) {
 }
 
 func TestApplySnapshot_TopologyViewTriggersTableRebuild(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.PodCliqueSets = samplePCSResources()
 	snap.TopologyViewData = sampleTopologyViewData()
@@ -898,8 +918,8 @@ func TestApplySnapshot_TopologyViewTriggersTableRebuild(t *testing.T) {
 
 	// Toggle to Topology view
 	m = sendRune(m, 't')
-	if m.viewState.ViewType != data.TopologyView {
-		t.Fatalf("expected TopologyView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.TopologyView {
+		t.Fatalf("expected TopologyView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 
 	// Verify domains table is populated
@@ -910,12 +930,12 @@ func TestApplySnapshot_TopologyViewTriggersTableRebuild(t *testing.T) {
 
 	// Now update the snapshot with different topology data
 	newSnap := mc.Snapshot()
-	newSnap.TopologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	newSnap.TopologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "block", Key: "topology.io/block", ValuesCount: 2},
 		},
 		NodeLabels:  map[string]map[string]string{},
-		Pods:        []data.TopologyViewPod{},
+		Pods:        []clusterstate.TopologyViewPod{},
 		DomainToKey: map[string]string{"block": "topology.io/block"},
 	}
 	mc.SetSnapshot(newSnap)
@@ -934,7 +954,7 @@ func TestApplySnapshot_TopologyViewTriggersTableRebuild(t *testing.T) {
 }
 
 func TestApplySnapshot_NilSnapshot(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	// Set snapshot to nil to test early return
 	mc.SetSnapshot(nil)
 
@@ -951,7 +971,7 @@ func TestApplySnapshot_NilSnapshot(t *testing.T) {
 }
 
 func TestApplySnapshot_NoSelectedPCS_SkipsTopologyInfo(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.PodCliqueSets = samplePCSResources()
 	snap.PodCliqueSetSpecs = map[string]*corev1alpha1.PodCliqueSet{

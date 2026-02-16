@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	tea "github.com/charmbracelet/bubbletea"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,9 +16,9 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestCacheUpdateMsg_RefreshesResourcesList(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-a", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 	}
 	mc.SetSnapshot(snap)
@@ -28,7 +28,7 @@ func TestCacheUpdateMsg_RefreshesResourcesList(t *testing.T) {
 
 	// Now update the cache with a new PCS
 	newSnap := mc.Snapshot()
-	newSnap.PodCliqueSets = append(newSnap.PodCliqueSets, data.Resource{
+	newSnap.PodCliqueSets = append(newSnap.PodCliqueSets, clusterstate.Resource{
 		Name: "pcs-b", Type: "PodCliqueSet", Namespace: "default", Ready: "2/2", Scheduled: "2/2",
 	})
 	mc.SetSnapshot(newSnap)
@@ -40,9 +40,9 @@ func TestCacheUpdateMsg_RefreshesResourcesList(t *testing.T) {
 }
 
 func TestCacheUpdateMsg_RemovesDeletedResources(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-a", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 		{Name: "pcs-b", Type: "PodCliqueSet", Namespace: "default", Ready: "2/2", Scheduled: "2/2"},
 	}
@@ -53,7 +53,7 @@ func TestCacheUpdateMsg_RemovesDeletedResources(t *testing.T) {
 
 	// Remove pcs-b
 	newSnap := mc.Snapshot()
-	newSnap.PodCliqueSets = []data.Resource{
+	newSnap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-a", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 	}
 	mc.SetSnapshot(newSnap)
@@ -69,9 +69,9 @@ func TestCacheUpdateMsg_RemovesDeletedResources(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCacheUpdateMsg_PreservesCursorPosition(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "alpha-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 		{Name: "beta-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "2/2", Scheduled: "2/2"},
 		{Name: "gamma-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "3/3", Scheduled: "3/3"},
@@ -89,7 +89,7 @@ func TestCacheUpdateMsg_PreservesCursorPosition(t *testing.T) {
 
 	// Update cache (data changes but beta-pcs still exists)
 	newSnap := mc.Snapshot()
-	newSnap.PodCliqueSets = []data.Resource{
+	newSnap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "alpha-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 		{Name: "beta-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "1/2", Scheduled: "1/2"}, // changed
 		{Name: "gamma-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "3/3", Scheduled: "3/3"},
@@ -110,14 +110,16 @@ func TestCacheUpdateMsg_PreservesCursorPosition(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCacheUpdateMsg_UpdatesGPUSummary(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-a", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 	}
-	snap.GPUSummary = &data.GPUSummary{
-		GPUTypes: []string{"H100"},
-		ByPCS:    map[string]data.GPUCounts{"pcs-a": {"H100": 8}},
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
+		GPUSummary: &clusterstate.GPUSummary{
+			GPUTypes: []string{"H100"},
+			ByPCS:    map[string]clusterstate.GPUCounts{"pcs-a": {"H100": 8}},
+		},
 	}
 	mc.SetSnapshot(snap)
 
@@ -132,9 +134,11 @@ func TestCacheUpdateMsg_UpdatesGPUSummary(t *testing.T) {
 
 	// Update GPU count
 	newSnap := mc.Snapshot()
-	newSnap.GPUSummary = &data.GPUSummary{
-		GPUTypes: []string{"H100"},
-		ByPCS:    map[string]data.GPUCounts{"pcs-a": {"H100": 16}},
+	newSnap.TopologyViewData = &clusterstate.TopologyViewData{
+		GPUSummary: &clusterstate.GPUSummary{
+			GPUTypes: []string{"H100"},
+			ByPCS:    map[string]clusterstate.GPUCounts{"pcs-a": {"H100": 16}},
+		},
 	}
 	mc.SetSnapshot(newSnap)
 
@@ -153,13 +157,13 @@ func TestCacheUpdateMsg_UpdatesGPUSummary(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCacheUpdateMsg_UpdatesTopologyViewData(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-a", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 	}
-	snap.TopologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 2},
 		},
 	}
@@ -176,8 +180,8 @@ func TestCacheUpdateMsg_UpdatesTopologyViewData(t *testing.T) {
 
 	// Update with additional domain
 	newSnap := mc.Snapshot()
-	newSnap.TopologyViewData = &data.TopologyViewData{
-		Domains: []data.TopologyDomainRow{
+	newSnap.TopologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
 			{Domain: "zone", Key: "topology.kubernetes.io/zone", ValuesCount: 2},
 			{Domain: "rack", Key: "topology.io/rack", ValuesCount: 4},
 		},
@@ -201,12 +205,12 @@ func TestCacheUpdateMsg_UpdatesTopologyViewData(t *testing.T) {
 func TestCacheUpdateMsg_UpdatesEvents(t *testing.T) {
 	now := time.Now()
 
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "pcs-a", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 	}
-	snap.EventsByObject = map[string][]data.Event{
+	snap.EventsByObject = map[string][]clusterstate.Event{
 		"PodCliqueSet/pcs-a": {
 			{Type: "Normal", Kind: "PodCliqueSet", Reason: "Created", Message: "initial event", Parent: "pcs-a", Timestamp: now},
 		},
@@ -222,7 +226,7 @@ func TestCacheUpdateMsg_UpdatesEvents(t *testing.T) {
 
 	// Update events
 	newSnap := mc.Snapshot()
-	newSnap.EventsByObject = map[string][]data.Event{
+	newSnap.EventsByObject = map[string][]clusterstate.Event{
 		"PodCliqueSet/pcs-a": {
 			{Type: "Warning", Kind: "PodCliqueSet", Reason: "Degraded", Message: "new warning event", Parent: "pcs-a", Timestamp: now},
 		},
@@ -253,7 +257,7 @@ func TestCacheUpdateMsg_NilCacheIsSafe(t *testing.T) {
 
 func TestBuildMockCacheWithEvents_ShowsEvents(t *testing.T) {
 	now := time.Now()
-	mc := buildMockCacheWithEvents(map[string][]data.Event{
+	mc := buildMockCacheWithEvents(map[string][]clusterstate.Event{
 		"PodCliqueSet/alpha-pcs": {
 			{Type: "Warning", Kind: "PodCliqueSet", Reason: "Degraded", Message: "alpha degraded", Parent: "alpha-pcs", Timestamp: now},
 		},
@@ -268,9 +272,9 @@ func TestBuildMockCacheWithEvents_ShowsEvents(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestApplySnapshot_PopulatesHierarchy(t *testing.T) {
-	mc := data.NewMockGlobalCache()
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
-	snap.PodCliqueSets = []data.Resource{
+	snap.PodCliqueSets = []clusterstate.Resource{
 		{Name: "my-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 	}
 	snap.PodCliqueSetSpecs = map[string]*corev1alpha1.PodCliqueSet{
@@ -282,7 +286,7 @@ func TestApplySnapshot_PopulatesHierarchy(t *testing.T) {
 	snap.ReplicaIndexesByPCS = map[string][]string{
 		"my-pcs": {"0", "1"},
 	}
-	snap.ScalingGroupsByReplica = map[string][]data.Resource{
+	snap.ScalingGroupsByReplica = map[string][]clusterstate.Resource{
 		"my-pcs/0": {
 			{Name: "my-pcsg-0", Type: "PodCliqueScalingGroup", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 		},

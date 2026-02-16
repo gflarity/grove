@@ -1,30 +1,8 @@
 package k8s
 
 import (
-	"github.com/ai-dynamo/grove/arborist/internal/data"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
 )
-
-// convertK8sEventToEvent converts a Kubernetes Event to our data.Event type.
-func convertK8sEventToEvent(k8sEvent corev1.Event) data.Event {
-	// Calculate age
-	age := data.FormatAge(k8sEvent.LastTimestamp.Time)
-	if k8sEvent.LastTimestamp.IsZero() {
-		age = data.FormatAge(k8sEvent.EventTime.Time)
-	}
-
-	return data.Event{
-		Type:      k8sEvent.Type,
-		Kind:      k8sEvent.InvolvedObject.Kind,
-		Reason:    k8sEvent.Reason,
-		Age:       age,
-		From:      k8sEvent.Source.Component,
-		Message:   k8sEvent.Message,
-		Parent:    k8sEvent.InvolvedObject.Name,
-		Timestamp: k8sEvent.LastTimestamp.Time,
-	}
-}
 
 // KubeConfigInfo holds display-ready metadata extracted from a single kubeconfig load.
 type KubeConfigInfo struct {

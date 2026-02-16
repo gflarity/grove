@@ -304,7 +304,7 @@ func TestFetchTopologyCLIData(t *testing.T) {
 	})
 }
 
-func TestGPURequestsFromPod(t *testing.T) {
+func TestGPURequestsFromPod_Exported(t *testing.T) {
 	tests := []struct {
 		name string
 		pod  *corev1.Pod
@@ -367,15 +367,15 @@ func TestGPURequestsFromPod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := gpuRequestsFromPod(tt.pod)
+			got := GPURequestsFromPod(tt.pod)
 			if got != tt.want {
-				t.Errorf("gpuRequestsFromPod() = %d, want %d", got, tt.want)
+				t.Errorf("GPURequestsFromPod() = %d, want %d", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestGPUCapacityFromNode(t *testing.T) {
+func TestGPUCapacityFromNode_Exported(t *testing.T) {
 	tests := []struct {
 		name string
 		node *corev1.Node
@@ -405,15 +405,15 @@ func TestGPUCapacityFromNode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := gpuCapacityFromNode(tt.node)
+			got := GPUCapacityFromNode(tt.node)
 			if got != tt.want {
-				t.Errorf("gpuCapacityFromNode() = %d, want %d", got, tt.want)
+				t.Errorf("GPUCapacityFromNode() = %d, want %d", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestGPUProductFromNode(t *testing.T) {
+func TestGPUProductFromNode_Exported(t *testing.T) {
 	tests := []struct {
 		name string
 		node *corev1.Node
@@ -454,9 +454,9 @@ func TestGPUProductFromNode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := gpuProductFromNode(tt.node)
+			got := GPUProductFromNode(tt.node)
 			if got != tt.want {
-				t.Errorf("gpuProductFromNode() = %q, want %q", got, tt.want)
+				t.Errorf("GPUProductFromNode() = %q, want %q", got, tt.want)
 			}
 		})
 	}

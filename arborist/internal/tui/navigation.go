@@ -4,17 +4,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 // panesForCurrentView returns the ordered list of panes available in the
 // current view. This is the single source of truth for pane cycling.
-func (m *Model) panesForCurrentView() []data.Pane {
-	if m.viewState.ViewType == data.TopologyView {
-		return []data.Pane{data.TopologyDomainsPane, data.TopologyPodsPane}
-	}
-	return []data.Pane{data.ResourcesPane, data.EventsPane}
+func (m *Model) panesForCurrentView() []clusterstate.Pane {
+	return m.behavior().PaneList()
 }
 
 // switchPane cycles to the next pane in the current view's pane list.
@@ -30,7 +27,7 @@ func (m *Model) switchPane() {
 	nextIdx := (currentIdx + 1) % len(panes)
 	m.activePane = panes[nextIdx]
 	m.updateTableFocus()
-	debugLogWithContext("switched pane to %s", data.PaneName(m.activePane))
+	debugLogWithContext("switched pane to %s", clusterstate.PaneName(m.activePane))
 }
 
 // updateTableFocus blurs all tables and focuses the one corresponding to the
@@ -42,13 +39,13 @@ func (m *Model) updateTableFocus() {
 	m.topologyPodsTable.Blur()
 
 	switch m.activePane {
-	case data.ResourcesPane:
+	case clusterstate.ResourcesPane:
 		m.resourcesTable.Focus()
-	case data.EventsPane:
+	case clusterstate.EventsPane:
 		m.eventsTable.Focus()
-	case data.TopologyDomainsPane:
+	case clusterstate.TopologyDomainsPane:
 		m.topologyDomainsTable.Focus()
-	case data.TopologyPodsPane:
+	case clusterstate.TopologyPodsPane:
 		m.topologyPodsTable.Focus()
 	}
 }
@@ -78,25 +75,17 @@ func (m Model) resolveNamespace() string {
 
 // getCurrentViewKey returns the key for looking up resources in allResources map.
 func (m Model) getCurrentViewKey() string {
-	switch m.viewState.ViewType {
-	case data.ForestView:
-		return "forest"
-	case data.PodCliqueSetView:
-		return "PodCliqueSet/" + m.viewState.SelectedPodCliqueSet
-	case data.PodCliqueSetReplicaView:
-		return "PodCliqueSetReplica/" + m.viewState.SelectedPodCliqueSet + "/" + m.viewState.SelectedReplicaIndex
-	case data.PodCliqueScalingGroupView:
-		return "PodCliqueScalingGroup/" + m.viewState.SelectedScalingGroup
-	case data.PodCliqueScalingGroupReplicaView:
-		return "PodCliqueScalingGroupReplica/" + m.viewState.SelectedScalingGroup + "/" + m.viewState.SelectedPCSGReplicaIndex
-	case data.PodCliqueView:
-		return "PodClique/" + m.viewState.SelectedPodClique
-	case data.ContainersView:
-		return "" // Containers view uses containerInfos, not allResources
-	case data.PodView:
-		return "" // Pod view doesn't list resources
-	}
-	return "forest"
+	return m.behavior().ViewKey(m.viewState)
+}
+
+// navigateActions maps resource types to their drill-down action.
+var navigateActions = map[string]func(m *Model, name, namespace string) tea.Cmd{
+	clusterstate.ResourceTypePodCliqueSet: func(m *Model, name, ns string) tea.Cmd { m.navigateIntoPCS(name, ns); return nil },
+	clusterstate.ResourceTypePCSReplica:   func(m *Model, name, _ string) tea.Cmd { m.navigateIntoPCSReplica(name); return nil },
+	clusterstate.ResourceTypePCSG:         func(m *Model, name, ns string) tea.Cmd { m.navigateIntoPCSG(name, ns); return nil },
+	clusterstate.ResourceTypePCSGReplica:  func(m *Model, name, _ string) tea.Cmd { m.navigateIntoPCSGReplica(name); return nil },
+	clusterstate.ResourceTypePodClique:    func(m *Model, name, _ string) tea.Cmd { m.navigateIntoPodClique(name); return nil },
+	clusterstate.ResourceTypePod:          func(m *Model, name, ns string) tea.Cmd { return m.navigateIntoPod(name, ns) },
 }
 
 // navigateInto drills down into the selected resource.
@@ -106,7 +95,7 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 	m.filterText = ""
 	m.filterInput.SetValue("")
 
-	if m.viewState.ViewType == data.PodView || m.viewState.ViewType == data.ContainersView {
+	if m.viewState.ViewType == clusterstate.PodView || m.viewState.ViewType == clusterstate.ContainersView {
 		debugLogWithContext("navigateInto: already in PodView/ContainersView, ignoring")
 		return m, nil
 	}
@@ -123,516 +112,149 @@ func (m Model) navigateInto() (tea.Model, tea.Cmd) {
 
 	debugLogWithContext("navigateInto: type=%s name=%s namespace=%s", selectedType, selectedName, selectedNamespace)
 
-	switch selectedType {
-	case "PodCliqueSet":
-		oldViewType := m.viewState.ViewType
-		m.viewState.SelectedPodCliqueSet = selectedName
-		m.viewState.SelectedReplicaIndex = ""
-		m.viewState.SelectedScalingGroup = ""
-		m.viewState.SelectedPodClique = ""
-		m.viewState.SelectedPod = ""
-
-		// Build topology info from cached PCS spec
-		m.cachedTopologyInfo = nil
-		if m.cachedSnapshot != nil {
-			if pcs, ok := m.cachedSnapshot.PodCliqueSetSpecs[selectedName]; ok {
-				topoInfo := data.BuildTopologyInfo(pcs)
-				if m.cachedSnapshot.TopologyViewData != nil {
-					topoInfo.DomainToKey = m.cachedSnapshot.TopologyViewData.DomainToKey
-				}
-				m.cachedTopologyInfo = topoInfo
-			}
-		}
-
-		// Check replica count for auto-skip
-		replicaIndexes := m.cachedSnapshot.ReplicaIndexesByPCS[selectedName]
-		if len(replicaIndexes) == 1 {
-			// Single replica — skip PodCliqueSetView, go directly to replica view
-			m.viewState.ViewType = data.PodCliqueSetReplicaView
-			m.viewState.SelectedReplicaIndex = replicaIndexes[0]
-			debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, fmt.Sprintf("single replica skip, pcs=%q replica=%q", selectedName, replicaIndexes[0]))
-
-			// Build virtual replica resources for tracking (needed for back navigation)
-			pcsKey := "PodCliqueSet/" + selectedName
-			m.allResources[pcsKey] = []data.Resource{{
-				Name:      replicaDisplayName(selectedName, replicaIndexes[0]),
-				Type:      "(PodCliqueSet replica)",
-				Namespace: selectedNamespace,
-			}}
-		} else {
-			m.viewState.ViewType = data.PodCliqueSetView
-			debugLogStateTransition(oldViewType, data.PodCliqueSetView, fmt.Sprintf("pcs=%q", selectedName))
-		}
-
-		// Rebuild from snapshot
-		m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
-		m.rebuildEventsFromSnapshot(m.cachedSnapshot)
-		m.rebuildResourcesTable()
-		m.rebuildEventsTable()
-		return m, nil
-
-	case "(PodCliqueSet replica)":
-		parts := strings.Split(selectedName, replicaSeparator)
-		if len(parts) == 2 {
-			oldViewType := m.viewState.ViewType
-			m.viewState.ViewType = data.PodCliqueSetReplicaView
-			m.viewState.SelectedReplicaIndex = parts[1]
-			m.viewState.SelectedScalingGroup = ""
-			m.viewState.SelectedPodClique = ""
-			m.viewState.SelectedPod = ""
-
-			debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, fmt.Sprintf("replica=%q", parts[1]))
-
-			m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
-			m.rebuildEventsFromSnapshot(m.cachedSnapshot)
-			m.rebuildResourcesTable()
-			m.rebuildEventsTable()
-		}
-		return m, nil
-
-	case "PodCliqueScalingGroup":
-		oldViewType := m.viewState.ViewType
-		m.viewState.SelectedScalingGroup = selectedName
-		m.viewState.SelectedPCSGReplicaIndex = ""
-		m.viewState.SelectedPodClique = ""
-		m.viewState.SelectedPod = ""
-
-		// Check PCSG replica count for auto-skip
-		pcsgReplicaIndexes := m.cachedSnapshot.ReplicaIndexesByPCSG[selectedName]
-		if len(pcsgReplicaIndexes) == 1 {
-			m.viewState.ViewType = data.PodCliqueScalingGroupReplicaView
-			m.viewState.SelectedPCSGReplicaIndex = pcsgReplicaIndexes[0]
-			debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupReplicaView, fmt.Sprintf("single PCSG replica skip, pcsg=%q replica=%q", selectedName, pcsgReplicaIndexes[0]))
-
-			// Build virtual replica resources for tracking (needed for back navigation)
-			pcsgKey := "PodCliqueScalingGroup/" + selectedName
-			m.allResources[pcsgKey] = []data.Resource{{
-				Name:      replicaDisplayName(selectedName, pcsgReplicaIndexes[0]),
-				Type:      "(PodCliqueScalingGroup replica)",
-				Namespace: selectedNamespace,
-			}}
-		} else {
-			m.viewState.ViewType = data.PodCliqueScalingGroupView
-			debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupView, fmt.Sprintf("pcsg=%q", selectedName))
-		}
-
-		m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
-		m.rebuildEventsFromSnapshot(m.cachedSnapshot)
-		m.rebuildResourcesTable()
-		m.rebuildEventsTable()
-		return m, nil
-
-	case "(PodCliqueScalingGroup replica)":
-		parts := strings.Split(selectedName, replicaSeparator)
-		if len(parts) == 2 {
-			oldViewType := m.viewState.ViewType
-			m.viewState.ViewType = data.PodCliqueScalingGroupReplicaView
-			m.viewState.SelectedPCSGReplicaIndex = parts[1]
-			m.viewState.SelectedPodClique = ""
-			m.viewState.SelectedPod = ""
-
-			debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupReplicaView, fmt.Sprintf("pcsg-replica=%q", parts[1]))
-
-			m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
-			m.rebuildEventsFromSnapshot(m.cachedSnapshot)
-			m.rebuildResourcesTable()
-			m.rebuildEventsTable()
-		}
-		return m, nil
-
-	case "PodClique":
-		oldViewType := m.viewState.ViewType
-		m.viewState.ViewType = data.PodCliqueView
-		m.viewState.SelectedPodClique = selectedName
-		m.viewState.SelectedPod = ""
-
-		debugLogStateTransition(oldViewType, data.PodCliqueView, fmt.Sprintf("podClique=%q", selectedName))
-
-		m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
-		m.rebuildEventsFromSnapshot(m.cachedSnapshot)
-		m.rebuildResourcesTable()
-		m.rebuildEventsTable()
-		return m, nil
-
-	case "Pod":
-		oldViewType := m.viewState.ViewType
-		m.viewState.ViewType = data.ContainersView
-		m.viewState.SelectedPod = selectedName
-
-		debugLogStateTransition(oldViewType, data.ContainersView, fmt.Sprintf("pod=%q", selectedName))
-
-		m.rebuildResourcesTable()
-		m.rebuildEventsTable()
-
-		// Fetch container info asynchronously
-		return m, loadPodContainersCmd(m.cache, m.ctx, selectedName, selectedNamespace)
+	if action, ok := navigateActions[selectedType]; ok {
+		cmd := action(&m, selectedName, selectedNamespace)
+		return m, cmd
 	}
 
 	return m, nil
 }
 
-// topologyDrillInto pushes to the drill stack based on the current selection.
-func (m *Model) topologyDrillInto() {
-	if m.topologyViewData == nil {
-		return
-	}
-
-	if len(m.topologyDrillStack) == 0 {
-		selectedRow := m.topologyDomainsTable.SelectedRow()
-		if len(selectedRow) < 2 {
-			return
-		}
-
-		domain := selectedRow[0]
-		key := selectedRow[1]
-
-		m.topologyDrillStack = append(m.topologyDrillStack, data.TopologyDrillSelection{
-			Domain: domain,
-			Key:    key,
-			Value:  "",
-		})
-
-		debugLogWithContext("topology drill into domain: %s (key: %s)", domain, key)
-	} else {
-		selectedRow := m.topologyDomainsTable.SelectedRow()
-		if len(selectedRow) < 1 {
-			return
-		}
-
-		value := selectedRow[0]
-		m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = value
-
-		currentDomain := m.topologyDrillStack[len(m.topologyDrillStack)-1].Domain
-		domains := m.topologyViewData.Domains
-
-		nextDomain := ""
-		nextKey := ""
-		for i, d := range domains {
-			if d.Domain == currentDomain && i+1 < len(domains) {
-				nextDomain = domains[i+1].Domain
-				nextKey = domains[i+1].Key
-				break
-			}
-		}
-
-		if nextDomain != "" {
-			m.topologyDrillStack = append(m.topologyDrillStack, data.TopologyDrillSelection{
-				Domain: nextDomain,
-				Key:    nextKey,
-				Value:  "",
-			})
-			debugLogWithContext("topology drill into value %q, advancing to domain: %s", value, nextDomain)
-		} else {
-			debugLogWithContext("topology drill: at narrowest domain, no-op")
-			m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = ""
-			return
-		}
-	}
-
-	m.rebuildTopologyDomainsTable()
-	m.rebuildTopologyPodsTable()
-}
-
-// topologyDrillBack pops the last entry from the drill stack.
-// When the last entry has no value (showing values for a domain), popping it
-// also clears the previous entry's value so the user sees the parent domain's
-// values list in a single Esc press. Without this, the intermediate state
-// (previous entry still has a value) causes currentTopologyDomain to return
-// the same domain again, making Esc appear to do nothing.
-func (m *Model) topologyDrillBack() {
-	if len(m.topologyDrillStack) == 0 {
-		return
-	}
-
-	lastEntry := m.topologyDrillStack[len(m.topologyDrillStack)-1]
-
-	if lastEntry.Value == "" {
-		// Pop the empty-value entry (we're leaving this domain level)
-		m.topologyDrillStack = m.topologyDrillStack[:len(m.topologyDrillStack)-1]
-		// Also clear the previous entry's value so we go back to its values list.
-		// Without this, currentTopologyDomain would still point to the same domain
-		// we just popped (because the previous entry has a selected value, so the
-		// "next domain" is the one we just left).
-		if len(m.topologyDrillStack) > 0 {
-			m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = ""
-		}
-	} else {
-		m.topologyDrillStack[len(m.topologyDrillStack)-1].Value = ""
-	}
-
-	debugLogWithContext("topology drill back, stack depth now: %d", len(m.topologyDrillStack))
-	m.rebuildTopologyDomainsTable()
-	m.rebuildTopologyPodsTable()
-}
-
-// =============================================================================
-// Command Mode (vim-style ":" lens switching with autocomplete)
-// =============================================================================
-
-type lensCommand struct {
-	Name string
-}
-
-var lensCommands = []lensCommand{
-	{Name: "forest"},
-	{Name: "topology"},
-	{Name: "pcs"},
-	{Name: "podcliqueset"},
-	{Name: "pc"},
-	{Name: "podclique"},
-	{Name: "pcsg"},
-	{Name: "podcliquescalinggroup"},
-	{Name: "pod"},
-}
-
-// LensCommandNames returns the list of available command names.
-func LensCommandNames() []string {
-	names := make([]string, len(lensCommands))
-	for i, c := range lensCommands {
-		names[i] = c.Name
-	}
-	return names
-}
-
-func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
-	debugLogWithContext("executeCommand: input=%q currentView=%s commandActive=%v lensEditActive=%v",
-		input, data.ViewTypeName(m.viewState.ViewType), m.commandActive, m.lensEditActive)
-
-	input = strings.TrimSpace(strings.ToLower(input))
-	if input == "" {
-		return m, nil
-	}
-
-	matched := ""
-	for _, c := range lensCommands {
-		if c.Name == input {
-			matched = c.Name
-			break
-		}
-	}
-	if matched == "" {
-		if m.lensAutocomplete != nil {
-			if name, ok := m.lensAutocomplete.UniqueMatch(input); ok {
-				matched = name
-			}
-		}
-	}
-	if matched == "" {
-		debugLogWithContext("executeCommand: no match for %q", input)
-		return m, nil
-	}
-
-	debugLogWithContext("executeCommand: executing %q (matched %q)", input, matched)
-
-	// Normalize long forms to short forms for resource type commands
-	normalized := normalizeResourceType(matched)
-
-	switch matched {
-	case "forest":
-		// "forest" is equivalent to ":pcs"
-		normalized = "pcs"
-		m.switchToForestResourceType(normalized)
-		return m, nil
-
-	case "topology":
-		// Guard: if not currently in topology view and topology is unavailable, log error
-		if m.viewState.ViewType != data.TopologyView && !m.topologyAvailable() {
-			m.addError("Topology unavailable — no ClusterTopology resource found")
-			debugLogWithContext("executeCommand: topology unavailable, staying in current view")
-			return m, nil
-		}
-		return m.toggleTopologyView()
-
-	case "pcs", "podcliqueset", "pc", "podclique", "pcsg", "podcliquescalinggroup", "pod":
-		m.switchToForestResourceType(normalized)
-		return m, nil
-	}
-
-	return m, nil
-}
-
-// switchToForestResourceType switches to ForestView with the given resource type,
-// clearing drill state but preserving the filter.
-func (m *Model) switchToForestResourceType(rt string) {
-	m.forestResourceType = rt
-	m.viewState.ViewType = data.ForestView
-	m.viewState.SelectedPodCliqueSet = ""
+// navigateIntoPCS drills into a PodCliqueSet, auto-skipping to the replica view
+// when only one replica exists.
+func (m *Model) navigateIntoPCS(selectedName, selectedNamespace string) {
+	oldViewType := m.viewState.ViewType
+	m.viewState.SelectedPodCliqueSet = selectedName
 	m.viewState.SelectedReplicaIndex = ""
 	m.viewState.SelectedScalingGroup = ""
 	m.viewState.SelectedPodClique = ""
 	m.viewState.SelectedPod = ""
+
+	// Build topology info from cached PCS spec
 	m.cachedTopologyInfo = nil
-	m.activePane = data.ResourcesPane
-	m.updateTableFocus()
-	m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
-	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
-	m.rebuildResourcesTable()
-	m.rebuildEventsTable()
-}
-
-// topologyBreadcrumbString generates a breadcrumb like "region=us-east-1 > zone=us-east-1a".
-func (m *Model) topologyBreadcrumbString() string {
-	if len(m.topologyDrillStack) == 0 {
-		return ""
-	}
-
-	var parts []string
-	for _, entry := range m.topologyDrillStack {
-		if entry.Value != "" {
-			parts = append(parts, entry.Domain+"="+entry.Value)
-		}
-	}
-
-	return strings.Join(parts, " > ")
-}
-
-// navigateBack goes up one level in the hierarchy.
-// Navigation is now synchronous — data comes from the cached snapshot.
-// Filter is preserved across back navigation so users don't lose their filter context.
-func (m Model) navigateBack() (tea.Model, tea.Cmd) {
-	oldViewType := m.viewState.ViewType
-	debugLogWithContext("navigateBack: current viewType=%s", data.ViewTypeName(oldViewType))
-
-	switch m.viewState.ViewType {
-	case data.ForestView:
-		if m.forestResourceType != "pcs" {
-			// Non-default resource type — Esc resets to PCS view
-			debugLogWithContext("navigateBack: resetting forestResourceType from %q to pcs", m.forestResourceType)
-			m.forestResourceType = "pcs"
-			m.populateForestResources(m.cachedSnapshot)
-			m.rebuildResourcesTable()
-			m.rebuildEventsFromSnapshot(m.cachedSnapshot)
-			m.rebuildEventsTable()
-			return m, nil
-		}
-		debugLogWithContext("navigateBack: already at ForestView/pcs, ignoring")
-		return m, nil
-
-	case data.PodCliqueSetView:
-		m.viewState.ViewType = data.ForestView
-		m.viewState.SelectedPodCliqueSet = ""
-		m.viewState.SelectedReplicaIndex = ""
-		m.viewState.SelectedScalingGroup = ""
-		m.viewState.SelectedPodClique = ""
-		m.viewState.SelectedPod = ""
-		m.cachedTopologyInfo = nil
-
-		debugLogStateTransition(oldViewType, data.ForestView, "")
-
-	case data.PodCliqueSetReplicaView:
-		// Check if we should go back to PodCliqueSetView or directly to Forest
-		pcsKey := "PodCliqueSet/" + m.viewState.SelectedPodCliqueSet
-		pcsResources := m.allResources[pcsKey]
-
-		if len(pcsResources) == 1 {
-			// Only 1 replica — came directly from Forest view
-			m.viewState.ViewType = data.ForestView
-			m.viewState.SelectedPodCliqueSet = ""
-			m.viewState.SelectedReplicaIndex = ""
-			m.cachedTopologyInfo = nil
-
-			debugLogStateTransition(oldViewType, data.ForestView, "single replica skip")
-		} else {
-			m.viewState.ViewType = data.PodCliqueSetView
-			m.viewState.SelectedReplicaIndex = ""
-			m.viewState.SelectedScalingGroup = ""
-			m.viewState.SelectedPodClique = ""
-			m.viewState.SelectedPod = ""
-
-			debugLogStateTransition(oldViewType, data.PodCliqueSetView, "")
-		}
-
-	case data.PodCliqueScalingGroupView:
-		if m.viewState.SelectedPodCliqueSet == "" {
-			// Came from flat PCSG list — go back to forest
-			m.viewState.ViewType = data.ForestView
-			m.viewState.SelectedScalingGroup = ""
-			m.viewState.SelectedPCSGReplicaIndex = ""
-			m.viewState.SelectedPodClique = ""
-			m.viewState.SelectedPod = ""
-			debugLogStateTransition(oldViewType, data.ForestView, "no PCS context")
-		} else {
-			m.viewState.ViewType = data.PodCliqueSetReplicaView
-			m.viewState.SelectedScalingGroup = ""
-			m.viewState.SelectedPCSGReplicaIndex = ""
-			m.viewState.SelectedPodClique = ""
-			m.viewState.SelectedPod = ""
-			debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, "")
-		}
-
-	case data.PodCliqueScalingGroupReplicaView:
-		if m.viewState.SelectedPodCliqueSet == "" {
-			// Came from flat list — go back to forest
-			m.viewState.ViewType = data.ForestView
-			m.viewState.SelectedScalingGroup = ""
-			m.viewState.SelectedPCSGReplicaIndex = ""
-			m.viewState.SelectedPodClique = ""
-			m.viewState.SelectedPod = ""
-			debugLogStateTransition(oldViewType, data.ForestView, "no PCS context")
-		} else {
-			pcsgKey := "PodCliqueScalingGroup/" + m.viewState.SelectedScalingGroup
-			pcsgResources := m.allResources[pcsgKey]
-
-			if len(pcsgResources) == 1 {
-				m.viewState.ViewType = data.PodCliqueSetReplicaView
-				m.viewState.SelectedScalingGroup = ""
-				m.viewState.SelectedPCSGReplicaIndex = ""
-
-				debugLogStateTransition(oldViewType, data.PodCliqueSetReplicaView, "single PCSG replica skip")
-			} else {
-				m.viewState.ViewType = data.PodCliqueScalingGroupView
-				m.viewState.SelectedPCSGReplicaIndex = ""
-				m.viewState.SelectedPodClique = ""
-				m.viewState.SelectedPod = ""
-
-				debugLogStateTransition(oldViewType, data.PodCliqueScalingGroupView, "")
+	if m.cachedSnapshot != nil {
+		if pcs, ok := m.cachedSnapshot.PodCliqueSetSpecs[selectedName]; ok {
+			topoInfo := clusterstate.BuildTopologyInfo(pcs)
+			if m.cachedSnapshot.TopologyViewData != nil {
+				topoInfo.DomainToKey = m.cachedSnapshot.TopologyViewData.DomainToKey
 			}
+			m.cachedTopologyInfo = topoInfo
 		}
-
-	case data.PodCliqueView:
-		var newViewType data.ViewType
-		if m.viewState.SelectedScalingGroup != "" && m.viewState.SelectedPCSGReplicaIndex != "" {
-			newViewType = data.PodCliqueScalingGroupReplicaView
-		} else if m.viewState.SelectedScalingGroup != "" {
-			newViewType = data.PodCliqueScalingGroupView
-		} else if m.viewState.SelectedPodCliqueSet != "" {
-			newViewType = data.PodCliqueSetReplicaView
-		} else {
-			// No parent context (flat PC list) — go to forest
-			newViewType = data.ForestView
-		}
-		m.viewState.ViewType = newViewType
-		m.viewState.SelectedPodClique = ""
-		m.viewState.SelectedPod = ""
-		debugLogStateTransition(oldViewType, newViewType, "")
-
-	case data.ContainersView:
-		if m.viewState.SelectedPodClique != "" {
-			m.viewState.ViewType = data.PodCliqueView
-		} else {
-			// No PodClique context (flat Pod list) — go to forest
-			m.viewState.ViewType = data.ForestView
-		}
-		m.viewState.SelectedPod = ""
-		m.containerInfos = nil
-		debugLogStateTransition(oldViewType, m.viewState.ViewType, "")
-
-	case data.PodView:
-		if m.viewState.SelectedPodClique != "" {
-			m.viewState.ViewType = data.PodCliqueView
-		} else {
-			// No PodClique context (flat Pod list) — go to forest
-			m.viewState.ViewType = data.ForestView
-		}
-		m.viewState.SelectedPod = ""
-		debugLogStateTransition(oldViewType, m.viewState.ViewType, "")
 	}
 
-	// Rebuild from snapshot (synchronous)
-	m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
-	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
+	// Check replica count for auto-skip
+	replicaIndexes := m.cachedSnapshot.ReplicaIndexesByPCS[selectedName]
+	if len(replicaIndexes) == 1 {
+		// Single replica — skip PodCliqueSetView, go directly to replica view
+		m.viewState.ViewType = clusterstate.PodCliqueSetReplicaView
+		m.viewState.SelectedReplicaIndex = replicaIndexes[0]
+		debugLogStateTransition(oldViewType, clusterstate.PodCliqueSetReplicaView, fmt.Sprintf("single replica skip, pcs=%q replica=%q", selectedName, replicaIndexes[0]))
+
+		// Build virtual replica resources for tracking (needed for back navigation)
+		pcsKey := "PodCliqueSet/" + selectedName
+		m.allResources[pcsKey] = []clusterstate.Resource{{
+			Name:      replicaDisplayName(selectedName, replicaIndexes[0]),
+			Type:      clusterstate.ResourceTypePCSReplica,
+			Namespace: selectedNamespace,
+		}}
+	} else {
+		m.viewState.ViewType = clusterstate.PodCliqueSetView
+		debugLogStateTransition(oldViewType, clusterstate.PodCliqueSetView, fmt.Sprintf("pcs=%q", selectedName))
+	}
+
+	m.rebuildAllFromSnapshot()
+}
+
+// navigateIntoPCSReplica drills into a PCS replica.
+func (m *Model) navigateIntoPCSReplica(selectedName string) {
+	parts := strings.Split(selectedName, replicaSeparator)
+	if len(parts) != 2 {
+		return
+	}
+	oldViewType := m.viewState.ViewType
+	m.viewState.ViewType = clusterstate.PodCliqueSetReplicaView
+	m.viewState.SelectedReplicaIndex = parts[1]
+	m.viewState.SelectedScalingGroup = ""
+	m.viewState.SelectedPodClique = ""
+	m.viewState.SelectedPod = ""
+
+	debugLogStateTransition(oldViewType, clusterstate.PodCliqueSetReplicaView, fmt.Sprintf("replica=%q", parts[1]))
+
+	m.rebuildAllFromSnapshot()
+}
+
+// navigateIntoPCSG drills into a PodCliqueScalingGroup, auto-skipping to the
+// replica view when only one replica exists.
+func (m *Model) navigateIntoPCSG(selectedName, selectedNamespace string) {
+	oldViewType := m.viewState.ViewType
+	m.viewState.SelectedScalingGroup = selectedName
+	m.viewState.SelectedPCSGReplicaIndex = ""
+	m.viewState.SelectedPodClique = ""
+	m.viewState.SelectedPod = ""
+
+	// Check PCSG replica count for auto-skip
+	pcsgReplicaIndexes := m.cachedSnapshot.ReplicaIndexesByPCSG[selectedName]
+	if len(pcsgReplicaIndexes) == 1 {
+		m.viewState.ViewType = clusterstate.PodCliqueScalingGroupReplicaView
+		m.viewState.SelectedPCSGReplicaIndex = pcsgReplicaIndexes[0]
+		debugLogStateTransition(oldViewType, clusterstate.PodCliqueScalingGroupReplicaView, fmt.Sprintf("single PCSG replica skip, pcsg=%q replica=%q", selectedName, pcsgReplicaIndexes[0]))
+
+		// Build virtual replica resources for tracking (needed for back navigation)
+		pcsgKey := "PodCliqueScalingGroup/" + selectedName
+		m.allResources[pcsgKey] = []clusterstate.Resource{{
+			Name:      replicaDisplayName(selectedName, pcsgReplicaIndexes[0]),
+			Type:      clusterstate.ResourceTypePCSGReplica,
+			Namespace: selectedNamespace,
+		}}
+	} else {
+		m.viewState.ViewType = clusterstate.PodCliqueScalingGroupView
+		debugLogStateTransition(oldViewType, clusterstate.PodCliqueScalingGroupView, fmt.Sprintf("pcsg=%q", selectedName))
+	}
+
+	m.rebuildAllFromSnapshot()
+}
+
+// navigateIntoPCSGReplica drills into a PCSG replica.
+func (m *Model) navigateIntoPCSGReplica(selectedName string) {
+	parts := strings.Split(selectedName, replicaSeparator)
+	if len(parts) != 2 {
+		return
+	}
+	oldViewType := m.viewState.ViewType
+	m.viewState.ViewType = clusterstate.PodCliqueScalingGroupReplicaView
+	m.viewState.SelectedPCSGReplicaIndex = parts[1]
+	m.viewState.SelectedPodClique = ""
+	m.viewState.SelectedPod = ""
+
+	debugLogStateTransition(oldViewType, clusterstate.PodCliqueScalingGroupReplicaView, fmt.Sprintf("pcsg-replica=%q", parts[1]))
+
+	m.rebuildAllFromSnapshot()
+}
+
+// navigateIntoPodClique drills into a PodClique.
+func (m *Model) navigateIntoPodClique(selectedName string) {
+	oldViewType := m.viewState.ViewType
+	m.viewState.ViewType = clusterstate.PodCliqueView
+	m.viewState.SelectedPodClique = selectedName
+	m.viewState.SelectedPod = ""
+
+	debugLogStateTransition(oldViewType, clusterstate.PodCliqueView, fmt.Sprintf("podClique=%q", selectedName))
+
+	m.rebuildAllFromSnapshot()
+}
+
+// navigateIntoPod drills into a Pod, switching to ContainersView and
+// asynchronously loading container info.
+func (m *Model) navigateIntoPod(selectedName, selectedNamespace string) tea.Cmd {
+	oldViewType := m.viewState.ViewType
+	m.viewState.ViewType = clusterstate.ContainersView
+	m.viewState.SelectedPod = selectedName
+
+	debugLogStateTransition(oldViewType, clusterstate.ContainersView, fmt.Sprintf("pod=%q", selectedName))
+
 	m.rebuildResourcesTable()
 	m.rebuildEventsTable()
 
-	return m, nil
+	return loadPodContainersCmd(m.cache, m.ctx, selectedName, selectedNamespace)
 }
+

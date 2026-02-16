@@ -13,12 +13,14 @@ import (
 // overlays (YAML viewer, logs viewer, etc.). Specific overlays embed this and
 // add their own extra fields.
 type OverlayModel struct {
-	Active       bool
-	Viewport     viewport.Model
-	Content      string // raw content (before any transforms)
-	SearchActive bool
-	SearchInput  textinput.Model
-	SearchText   string
+	Active           bool
+	Viewport         viewport.Model
+	Content          string                 // raw content (before any transforms)
+	ContentTransform func(string) string    // optional transform applied before display/search (nil = identity)
+	SearchTransform  func(string) string    // optional separate transform for search matching (nil = use ContentTransform)
+	SearchActive     bool
+	SearchInput      textinput.Model
+	SearchText       string
 }
 
 // Open activates the overlay with initial content and dimensions.
@@ -109,24 +111,12 @@ func (o *OverlayModel) HandleKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	return false, nil
 }
 
-// UpdateViewportContent sets the viewport content from Content with search
-// highlighting applied. No content transformation is done — callers that need
-// transforms (e.g. wrap, horizontal slice) should use UpdateViewportContentWithTransform.
+// UpdateViewportContent sets the viewport content from Content, applying
+// ContentTransform (if set) before search highlighting.
 func (o *OverlayModel) UpdateViewportContent() {
 	content := o.Content
-	if o.SearchText != "" && content != "" {
-		content = highlightSearchMatches(content, o.SearchText)
-	}
-	o.Viewport.SetContent(content)
-}
-
-// UpdateViewportContentWithTransform sets the viewport content from Content,
-// applying the given transform before search highlighting. The transform is
-// applied to the raw content; highlighting is applied to the result.
-func (o *OverlayModel) UpdateViewportContentWithTransform(transform func(string) string) {
-	content := o.Content
-	if transform != nil {
-		content = transform(content)
+	if o.ContentTransform != nil {
+		content = o.ContentTransform(content)
 	}
 	if o.SearchText != "" && content != "" {
 		content = highlightSearchMatches(content, o.SearchText)
@@ -134,32 +124,55 @@ func (o *OverlayModel) UpdateViewportContentWithTransform(transform func(string)
 	o.Viewport.SetContent(content)
 }
 
-// ApplySearch scrolls to the first search match in the raw content.
+// ApplySearch scrolls to the first search match, applying SearchTransform
+// (falling back to ContentTransform) to the content before matching.
 func (o *OverlayModel) ApplySearch() {
-	viewportSearchFirst(o.Content, o.SearchText, &o.Viewport)
-}
-
-// ApplySearchWithTransform scrolls to the first search match in transformed content.
-func (o *OverlayModel) ApplySearchWithTransform(transform func(string) string) {
 	content := o.Content
-	if transform != nil {
-		content = transform(content)
+	if t := o.searchTransform(); t != nil {
+		content = t(content)
 	}
 	viewportSearchFirst(content, o.SearchText, &o.Viewport)
 }
 
-// SearchNext jumps to the next (or previous) search match in the raw content.
+// SearchNext jumps to the next (or previous) search match, applying
+// SearchTransform (falling back to ContentTransform) before matching.
 func (o *OverlayModel) SearchNext(reverse bool) {
-	viewportSearchNext(o.Content, o.SearchText, &o.Viewport, reverse)
-}
-
-// SearchNextWithTransform jumps to the next/previous match in transformed content.
-func (o *OverlayModel) SearchNextWithTransform(reverse bool, transform func(string) string) {
 	content := o.Content
-	if transform != nil {
-		content = transform(content)
+	if t := o.searchTransform(); t != nil {
+		content = t(content)
 	}
 	viewportSearchNext(content, o.SearchText, &o.Viewport, reverse)
+}
+
+// searchTransform returns the effective transform for search operations:
+// SearchTransform if set, otherwise ContentTransform.
+func (o *OverlayModel) searchTransform() func(string) string {
+	if o.SearchTransform != nil {
+		return o.SearchTransform
+	}
+	return o.ContentTransform
+}
+
+// HandleKeyMsg is a unified key handler for overlays. It handles:
+//  1. Search-active input delegation (via HandleSearchKey)
+//  2. Viewport content refresh + search apply after search commit/cancel
+//  3. Common keys (close, viewport nav, search triggers, n/N)
+//
+// Returns (handled, cmd). If handled is false, the caller should handle the
+// key with overlay-specific logic (e.g. logs wrap toggle, horizontal scroll).
+func (o *OverlayModel) HandleKeyMsg(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	if o.SearchActive {
+		needsUpdate, cmd := o.HandleSearchKey(msg)
+		if needsUpdate {
+			o.UpdateViewportContent()
+			if o.SearchText != "" {
+				o.ApplySearch()
+			}
+		}
+		return true, cmd
+	}
+
+	return o.HandleKey(msg)
 }
 
 // RenderSearchFrame renders the search input as a framed box.

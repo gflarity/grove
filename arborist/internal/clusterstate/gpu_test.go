@@ -14,7 +14,7 @@
 // limitations under the License.
 // */
 
-package data
+package clusterstate
 
 import (
 	"strings"
@@ -246,7 +246,14 @@ func TestComputeDomainGPUSummary_SingleGPUType(t *testing.T) {
 	}
 	matchingNodes := []string{"node-1", "node-2", "node-3"}
 
-	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+	summary := ComputeDomainGPUSummary(DomainGPUInput{
+		DomainKey:       "topology.io/block",
+		MatchingNodes:   matchingNodes,
+		NodeLabels:      nodeLabels,
+		NodeGPUProducts: nodeGPUProducts,
+		NodeGPUCapacity: nodeGPUCapacity,
+		Pods:            pods,
+	})
 
 	if len(summary.GPUTypes) != 1 || summary.GPUTypes[0] != "H200" {
 		t.Fatalf("GPUTypes = %v, want [H200]", summary.GPUTypes)
@@ -296,7 +303,14 @@ func TestComputeDomainGPUSummary_MixedGPUTypes(t *testing.T) {
 	}
 	matchingNodes := []string{"node-1", "node-2"}
 
-	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+	summary := ComputeDomainGPUSummary(DomainGPUInput{
+		DomainKey:       "topology.io/block",
+		MatchingNodes:   matchingNodes,
+		NodeLabels:      nodeLabels,
+		NodeGPUProducts: nodeGPUProducts,
+		NodeGPUCapacity: nodeGPUCapacity,
+		Pods:            pods,
+	})
 
 	if len(summary.GPUTypes) != 2 || summary.GPUTypes[0] != "B200" || summary.GPUTypes[1] != "H200" {
 		t.Fatalf("GPUTypes = %v, want [B200 H200]", summary.GPUTypes)
@@ -331,7 +345,14 @@ func TestComputeDomainGPUSummary_NoGPUNodes(t *testing.T) {
 	}
 	matchingNodes := []string{"node-1"}
 
-	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+	summary := ComputeDomainGPUSummary(DomainGPUInput{
+		DomainKey:       "topology.io/block",
+		MatchingNodes:   matchingNodes,
+		NodeLabels:      nodeLabels,
+		NodeGPUProducts: nodeGPUProducts,
+		NodeGPUCapacity: nodeGPUCapacity,
+		Pods:            pods,
+	})
 
 	if len(summary.GPUTypes) != 0 {
 		t.Errorf("expected no GPU types, got %v", summary.GPUTypes)
@@ -357,7 +378,14 @@ func TestComputeDomainGPUSummary_PendingPods(t *testing.T) {
 	}
 	matchingNodes := []string{"node-1"}
 
-	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+	summary := ComputeDomainGPUSummary(DomainGPUInput{
+		DomainKey:       "topology.io/block",
+		MatchingNodes:   matchingNodes,
+		NodeLabels:      nodeLabels,
+		NodeGPUProducts: nodeGPUProducts,
+		NodeGPUCapacity: nodeGPUCapacity,
+		Pods:            pods,
+	})
 
 	b01 := summary.ByValue["block-01"]["H200"]
 	// Only running-pod should be counted (pending has no node); no part-of label → Other
@@ -385,7 +413,14 @@ func TestComputeDomainGPUSummary_EmptyNodes(t *testing.T) {
 	pods := []TopologyPodInput{} // no pods
 	matchingNodes := []string{"node-1"}
 
-	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+	summary := ComputeDomainGPUSummary(DomainGPUInput{
+		DomainKey:       "topology.io/block",
+		MatchingNodes:   matchingNodes,
+		NodeLabels:      nodeLabels,
+		NodeGPUProducts: nodeGPUProducts,
+		NodeGPUCapacity: nodeGPUCapacity,
+		Pods:            pods,
+	})
 
 	b01 := summary.ByValue["block-01"]["H200"]
 	if b01.Grove != 0 {
@@ -430,7 +465,14 @@ func TestComputeDomainGPUSummary_ThreeWaySplit(t *testing.T) {
 	}
 	matchingNodes := []string{"node-1", "node-2"}
 
-	summary := ComputeDomainGPUSummary("topology.io/block", matchingNodes, nodeLabels, nodeGPUProducts, nodeGPUCapacity, pods)
+	summary := ComputeDomainGPUSummary(DomainGPUInput{
+		DomainKey:       "topology.io/block",
+		MatchingNodes:   matchingNodes,
+		NodeLabels:      nodeLabels,
+		NodeGPUProducts: nodeGPUProducts,
+		NodeGPUCapacity: nodeGPUCapacity,
+		Pods:            pods,
+	})
 
 	b01 := summary.ByValue["block-01"]["H200"]
 	// Grove: 4 + 3 = 7
@@ -444,6 +486,77 @@ func TestComputeDomainGPUSummary_ThreeWaySplit(t *testing.T) {
 	// Total: 8 + 8 = 16
 	if b01.Total != 16 {
 		t.Errorf("block-01 H200 Total = %d, want 16", b01.Total)
+	}
+}
+
+func TestFormatGPUBarOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		grove    int64
+		other    int64
+		total    int64
+		barWidth int
+		want     string
+	}{
+		{
+			name:     "normal grove only",
+			grove:    7,
+			other:    0,
+			total:    56,
+			barWidth: 20,
+		},
+		{
+			name:     "zero bar width",
+			grove:    7,
+			other:    3,
+			total:    56,
+			barWidth: 0,
+			want:     "[]",
+		},
+		{
+			name:     "fully used by grove",
+			grove:    56,
+			other:    0,
+			total:    56,
+			barWidth: 10,
+		},
+		{
+			name:     "all free",
+			grove:    0,
+			other:    0,
+			total:    56,
+			barWidth: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatGPUBarOnly(tt.grove, tt.other, tt.total, tt.barWidth)
+
+			// Must start with [ and end with ]
+			if !strings.HasPrefix(got, "[") || !strings.HasSuffix(got, "]") {
+				t.Errorf("FormatGPUBarOnly() = %q, want bracketed", got)
+			}
+
+			// Must NOT contain numeric suffix
+			if strings.Contains(got, "(") {
+				t.Errorf("FormatGPUBarOnly() = %q, should not contain numeric suffix", got)
+			}
+
+			if tt.want != "" {
+				if got != tt.want {
+					t.Errorf("FormatGPUBarOnly() = %q, want %q", got, tt.want)
+				}
+				return
+			}
+
+			// Verify bar width
+			barContent := got[1 : len(got)-1]
+			barRunes := utf8.RuneCountInString(barContent)
+			if barRunes != tt.barWidth {
+				t.Errorf("bar width = %d runes, want %d; bar=%q", barRunes, tt.barWidth, barContent)
+			}
+		})
 	}
 }
 

@@ -28,15 +28,12 @@ import (
 
 // DiagnosticsCmd collects cluster diagnostics for a PodCliqueSet.
 type DiagnosticsCmd struct {
-	PodCliqueSet  string `arg:"" optional:"" help:"Name of the PodCliqueSet (optional, collects all if omitted)."`
-	Namespace     string `short:"n" help:"Kubernetes namespace (defaults to current kubeconfig context namespace)."`
-	AllNamespaces bool   `short:"A" help:"Collect diagnostics across all namespaces."`
-	Output        string `short:"o" help:"Output directory for diagnostics bundle." default:"."`
+	NamespaceFlags
+	Output string `short:"o" help:"Output directory for diagnostics bundle." default:"."`
 }
 
 // Run executes the diagnostics command.
-func (c *DiagnosticsCmd) Run(globals *CLI) (retErr error) {
-	defer recoverPanic()
+func (c *DiagnosticsCmd) Run(globals *CLI) error {
 	ns, err := resolveNamespace(c.Namespace, c.AllNamespaces)
 	if err != nil {
 		return err
@@ -45,7 +42,7 @@ func (c *DiagnosticsCmd) Run(globals *CLI) (retErr error) {
 	// Create Kubernetes clients
 	k8sClient, err := k8s.NewK8sClient()
 	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes client: %w", err)
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

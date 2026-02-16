@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -19,6 +19,26 @@ func (m Model) errorLogFrameHeight() int {
 		entries = 1 // empty-state placeholder line
 	}
 	return 2 + entries // border top + border bottom + content lines
+}
+
+// fixedLayoutLines returns the number of terminal lines consumed by fixed-height
+// UI elements (header, frame borders, table headers, filter/command bars, error
+// log, topology footnote). Both View() and resizeLayout() use this to calculate
+// how much vertical space remains for the two main panes.
+func (m Model) fixedLayoutLines() int {
+	// 7(header: context+cluster+user+arborist+k8s+namespace+lens) + 2*(2 border + 1 table header) = 13
+	fixed := 13
+	if m.filterActive {
+		fixed += 3 // filter frame: top border + content + bottom border
+	}
+	if m.commandActive {
+		fixed += 3 // command frame: top border + content + bottom border
+	}
+	fixed += m.errorLogFrameHeight()
+	if m.viewState.ViewType == clusterstate.TopologyView && m.topologyHasGPUColumns() {
+		fixed++ // 1 line for the footnote
+	}
+	return fixed
 }
 
 // View renders the entire TUI. This is the main entry point for Bubble Tea rendering.
@@ -57,28 +77,7 @@ func (m Model) View() string {
 	}
 
 	// Calculate available height for the main viewport.
-	// Must match handleWindowSize — see that function for the full breakdown.
-	// Fixed: 7(header) + 2*(2 border + 1 table header) = 13
-	// (section headers are now embedded in the top border, not separate lines)
-	fixedLines := 13
-	if m.filterActive {
-		fixedLines += 3 // filter frame: top border + content + bottom border
-	}
-	if m.commandActive {
-		fixedLines += 3 // command frame: top border + content + bottom border
-	}
-
-	// Account for footnote line in topology view with GPU columns
-	topologyFootnoteVisible := m.viewState.ViewType == data.TopologyView && m.topologyHasGPUColumns()
-	if topologyFootnoteVisible {
-		fixedLines++ // 1 line for the footnote
-	}
-
-	// Account for error log frame height
-	errorLogHeight := m.errorLogFrameHeight()
-	fixedLines += errorLogHeight
-
-	availableHeight := m.height - fixedLines
+	availableHeight := m.height - m.fixedLayoutLines()
 	resourcesHeight := availableHeight / 2
 	eventsHeight := availableHeight - resourcesHeight
 	if resourcesHeight < 3 {
@@ -89,26 +88,12 @@ func (m Model) View() string {
 	}
 
 	// Render view-specific panes
-	switch m.viewState.ViewType {
-	case data.TopologyView:
-		sections = append(sections, m.renderTopologyDomainsFrame(resourcesHeight))
-		sections = append(sections, m.renderTopologyPodsFrame(eventsHeight))
-		if topologyFootnoteVisible {
-			sections = append(sections, m.renderTopologyFootnote())
-		}
-	default:
-		sections = append(sections, m.renderResourcesFrame(resourcesHeight))
-		sections = append(sections, m.renderEventsFrame(eventsHeight))
-	}
+	sections = append(sections, m.behavior().RenderPanes(&m, resourcesHeight, eventsHeight)...)
 
 	// Error log frame (appears at the bottom when visible)
 	if m.errorLogVisible {
 		sections = append(sections, m.renderErrorLogFrame())
 	}
-
-	// Note: bottom menu bar removed — shortcuts are now displayed in the header
-	// (see renderHeaderFrame middle column). renderMenuBar() and buildShortcutsString()
-	// are kept as internal helpers for test compatibility.
 
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
@@ -116,10 +101,54 @@ func (m Model) View() string {
 // viewDisplayName returns the lens name. There are only two lenses:
 // "forest" (all hierarchy views) and "topology".
 func (m Model) viewDisplayName() string {
-	if m.viewState.ViewType == data.TopologyView {
+	if m.viewState.ViewType == clusterstate.TopologyView {
 		return "topology"
 	}
 	return "forest"
+}
+
+// menuItem represents a single key/action pair in the menu/shortcuts bar.
+type menuItem struct {
+	key    string
+	action string
+}
+
+// buildMenuItems returns the context-sensitive list of menu items for the
+// current view state. This is the single source of truth — renderHeaderFrame
+// and buildShortcutsString both derive their output from it.
+func (m Model) buildMenuItems() []menuItem {
+	items := []menuItem{
+		{":", "Cmd"},
+		{"v", "View"},
+		{"/", "Filter"},
+		{"tab", "Switch"},
+	}
+
+	if m.viewState.ViewType == clusterstate.PodView {
+		items = append(items, menuItem{"↑↓", "Scroll"})
+	} else {
+		items = append(items, menuItem{"↑↓", "Nav"})
+		items = append(items, menuItem{"enter", "Drill"})
+	}
+
+	items = append(items, menuItem{"y", "YAML"})
+	if m.podActionAvailable() {
+		items = append(items, menuItem{"l", "Logs"})
+	}
+	if m.shellAvailable() {
+		items = append(items, menuItem{"s", "Shell"})
+	}
+	if m.topologyAvailable() {
+		items = append(items, menuItem{"t", "Topology"})
+	}
+	items = append(items, menuItem{"!", "Errors"})
+
+	if m.viewState.ViewType != clusterstate.ForestView {
+		items = append(items, menuItem{"esc", "Back"})
+	}
+
+	items = append(items, menuItem{"q", "Quit"})
+	return items
 }
 
 // renderHeaderFrame renders the k9s-style header with context info on the left,
@@ -154,42 +183,7 @@ func (m Model) renderHeaderFrame() string {
 	leftCol := lipgloss.JoinVertical(lipgloss.Left, contextLine, clusterLine, userLine, arboristLine, k8sLine, namespaceLine, viewLine)
 
 	// --- Middle column: key helpers in 2 rows ---
-	type menuItem struct {
-		key    string
-		action string
-	}
-
-	items := []menuItem{
-		{":", "Cmd"},
-		{"v", "View"},
-		{"/", "Filter"},
-		{"tab", "Switch"},
-	}
-
-	if m.viewState.ViewType == data.PodView {
-		items = append(items, menuItem{"↑↓", "Scroll"})
-	} else {
-		items = append(items, menuItem{"↑↓", "Nav"})
-		items = append(items, menuItem{"enter", "Drill"})
-	}
-
-	items = append(items, menuItem{"y", "YAML"})
-	if m.logsAvailable() {
-		items = append(items, menuItem{"l", "Logs"})
-	}
-	if m.shellAvailable() {
-		items = append(items, menuItem{"s", "Shell"})
-	}
-	if m.topologyAvailable() {
-		items = append(items, menuItem{"t", "Topology"})
-	}
-	items = append(items, menuItem{"!", "Errors"})
-
-	if m.viewState.ViewType != data.ForestView {
-		items = append(items, menuItem{"esc", "Back"})
-	}
-
-	items = append(items, menuItem{"q", "Quit"})
+	items := m.buildMenuItems()
 
 	// Split items into 2 rows
 	half := (len(items) + 1) / 2
@@ -243,32 +237,18 @@ func (m Model) renderHeaderFrame() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftStyled, middleStyled, rightCol)
 }
 
-// renderHeader renders the top header bar with logo and optional context info.
-func (m Model) renderHeader() string {
-	logo := LogoStyle.Render("Arborist")
-	return logo
-}
-
 // renderFilterBar renders the filter input bar (plain text, no frame).
 func (m Model) renderFilterBar() string {
 	return FilterBarStyle.Render("/") + " " + m.filterInput.View()
 }
 
-// renderFilterFrame renders the filter input as a standalone framed box between
-// the header and the resources table, k9s-style. Uses a normal (non-rounded)
-// border and a tree emoji prefix like k9s uses a poodle.
-//
-//	┌──────────────────────────────────────────┐
-//	│ 🌲/                                      │
-//	└──────────────────────────────────────────┘
-func (m Model) renderFilterFrame() string {
+// renderInputFrame renders a single-line input inside a normal-bordered frame.
+// Used by both the filter and command frames.
+func (m Model) renderInputFrame(content string) string {
 	border := lipgloss.NormalBorder()
 	bc := lipgloss.NewStyle().Foreground(ColorBorderFocused)
 	contentWidth := m.width - 2 // inside left + right border chars
 
-	// Content: tree emoji + filter input.
-	// Clamp to contentWidth so the right border is never pushed off-screen.
-	content := "🌲" + m.filterInput.View()
 	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
 
 	lineWidth := lipgloss.Width(content)
@@ -284,32 +264,16 @@ func (m Model) renderFilterFrame() string {
 	return topLine + "\n" + contentLine + "\n" + bottomLine
 }
 
+// renderFilterFrame renders the filter input as a standalone framed box between
+// the header and the resources table, k9s-style.
+func (m Model) renderFilterFrame() string {
+	return m.renderInputFrame("🌲" + m.filterInput.View())
+}
+
 // renderCommandFrame renders the command input as a standalone framed box,
-// vim-style. Uses a normal border and a ":" prefix.
-//
-//	┌──────────────────────────────────────────┐
-//	│ :topology                                │
-//	└──────────────────────────────────────────┘
+// vim-style.
 func (m Model) renderCommandFrame() string {
-	border := lipgloss.NormalBorder()
-	bc := lipgloss.NewStyle().Foreground(ColorBorderFocused)
-	contentWidth := m.width - 2 // inside left + right border chars
-
-	// Content: command input with ":" prompt (handled by textinput itself).
-	content := m.commandInput.View()
-	content = lipgloss.NewStyle().MaxWidth(contentWidth).Render(content)
-
-	lineWidth := lipgloss.Width(content)
-	pad := contentWidth - lineWidth
-	if pad < 0 {
-		pad = 0
-	}
-
-	topLine := bc.Render(border.TopLeft + strings.Repeat(border.Top, contentWidth) + border.TopRight)
-	contentLine := bc.Render(border.Left) + content + strings.Repeat(" ", pad) + bc.Render(border.Right)
-	bottomLine := bc.Render(border.BottomLeft + strings.Repeat(border.Bottom, contentWidth) + border.BottomRight)
-
-	return topLine + "\n" + contentLine + "\n" + bottomLine
+	return m.renderInputFrame(m.commandInput.View())
 }
 
 // truncateStyled truncates a styled string (may contain ANSI escape sequences)
@@ -464,7 +428,7 @@ func (m Model) renderTopologyDomainsFrame(height int) string {
 // topologyHasGPUColumns returns true when the topology view is drilled into
 // a domain level that has GPU columns (i.e., there are GPU types discovered).
 func (m Model) topologyHasGPUColumns() bool {
-	if m.topologyViewData == nil || len(m.topologyDrillStack) == 0 {
+	if m.topologyViewData == nil || m.topologyDrill.IsEmpty() {
 		return false
 	}
 	// Check if node GPU products are present
@@ -521,8 +485,8 @@ func (m Model) renderTopologyPodsFrame(height int) string {
 func (m Model) renderTopologyDomainsSectionHeader() string {
 	count := len(m.topologyDomainsTable.Rows())
 
-	if len(m.topologyDrillStack) == 0 {
-		return renderSectionHeader("Topology Domains", count, m.activePane == data.TopologyDomainsPane, "")
+	if m.topologyDrill.IsEmpty() {
+		return renderSectionHeader("Topology Domains", count, m.activePane == clusterstate.TopologyDomainsPane, "")
 	}
 
 	// Drilled in — show the current domain name and breadcrumb
@@ -533,7 +497,7 @@ func (m Model) renderTopologyDomainsSectionHeader() string {
 		label = "Topology Domains"
 	}
 
-	return renderSectionHeader(label, count, m.activePane == data.TopologyDomainsPane, breadcrumb)
+	return renderSectionHeader(label, count, m.activePane == clusterstate.TopologyDomainsPane, breadcrumb)
 }
 
 // renderTopologyPodsSectionHeader renders the section header for the topology pods pane.
@@ -541,7 +505,7 @@ func (m Model) renderTopologyPodsSectionHeader() string {
 	count := len(m.topologyPodsTable.Rows())
 	breadcrumb := m.topologyBreadcrumbString()
 	if breadcrumb == "" {
-		if len(m.topologyDrillStack) == 0 {
+		if m.topologyDrill.IsEmpty() {
 			// Top-level domain list — pods aren't scoped yet
 			breadcrumb = "N/A"
 		} else if selectedRow := m.topologyDomainsTable.SelectedRow(); len(selectedRow) >= 1 {
@@ -549,27 +513,7 @@ func (m Model) renderTopologyPodsSectionHeader() string {
 			breadcrumb = selectedRow[0]
 		}
 	}
-	return renderSectionHeader("Pods", count, m.activePane == data.TopologyPodsPane, breadcrumb)
-}
-
-// renderResourcesSection renders the resources section: header + table (no border).
-// Kept for compatibility - now delegates to frame version internals.
-func (m Model) renderResourcesSection(height int) string {
-	// Section header
-	header := m.renderResourcesSectionHeader()
-
-	// Content
-	content := m.renderResourcesTable()
-
-	return header + "\n" + content
-}
-
-// renderEventsSection renders the events section: header + table (no border).
-// Kept for compatibility - now delegates to frame version internals.
-func (m Model) renderEventsSection(height int) string {
-	header := m.renderEventsSectionHeader()
-	content := m.renderEventsTable()
-	return header + "\n" + content
+	return renderSectionHeader("Pods", count, m.activePane == clusterstate.TopologyPodsPane, breadcrumb)
 }
 
 // renderSectionHeader renders a generic section header in k9s style.
@@ -597,14 +541,14 @@ func renderSectionHeader(label string, count int, isActive bool, suffix string) 
 // Example: "Resources [3] Forest > my-pcs > replica-0"
 func (m Model) renderResourcesSectionHeader() string {
 	var count int
-	if m.viewState.ViewType == data.ContainersView {
+	if m.viewState.ViewType == clusterstate.ContainersView {
 		count = len(m.containerInfos)
 	} else {
 		viewKey := m.getCurrentViewKey()
 		count = len(m.allResources[viewKey])
 	}
 	label := "Resources"
-	if m.viewState.ViewType == data.ContainersView {
+	if m.viewState.ViewType == clusterstate.ContainersView {
 		label = "Containers"
 	}
 
@@ -616,14 +560,14 @@ func (m Model) renderResourcesSectionHeader() string {
 			FilterBarStyle.Render("filter:") + " " + m.filterText
 	}
 
-	return renderSectionHeader(label, count, m.activePane == data.ResourcesPane, suffix)
+	return renderSectionHeader(label, count, m.activePane == clusterstate.ResourcesPane, suffix)
 }
 
 // renderEventsSectionHeader renders the events section header in k9s style.
 // Example: "Events [5]"
 func (m Model) renderEventsSectionHeader() string {
 	events := m.getFilteredEvents()
-	return renderSectionHeader("Events", len(events), m.activePane == data.EventsPane, "")
+	return renderSectionHeader("Events", len(events), m.activePane == clusterstate.EventsPane, "")
 }
 
 // renderResourcesTable renders the resources table.
@@ -641,44 +585,25 @@ func (m Model) renderPodViewport() string {
 	return m.podViewport.View()
 }
 
-// renderYAMLOverlay renders the full-screen YAML overlay with framed viewport.
-func (m Model) renderYAMLOverlay() string {
+// renderFullScreenOverlay renders a full-screen overlay (YAML, logs, etc.)
+// with a framed viewport, search bar, and key hints. Callers build their own
+// title and hints strings to allow overlay-specific customizations.
+func (m Model) renderFullScreenOverlay(overlay OverlayModel, title, hints string) string {
 	var sections []string
 
-	// Title: "YAML: PodCliqueSet/my-resource"
-	title := SectionHeaderActiveStyle.Render("YAML") + " " +
-		SectionCountStyle.Render(m.yamlResourceType+"/"+m.yamlResourceName)
-
-	// Scroll position indicator
-	scrollPct := ""
-	if m.yamlOverlay.Viewport.TotalLineCount() > 0 {
-		pct := int(m.yamlOverlay.Viewport.ScrollPercent() * 100)
-		scrollPct = fmt.Sprintf(" %d%%", pct)
-	}
-
-	// Key hints for the overlay
-	hints := MenuKeyStyle.Render("<esc>") + MenuActionStyle.Render("Close") + "  " +
-		MenuKeyStyle.Render("<↑↓>") + MenuActionStyle.Render("Scroll") + "  " +
-		MenuKeyStyle.Render("</>") + MenuActionStyle.Render("Search")
-	if m.yamlOverlay.SearchText != "" {
-		hints += "  " + MenuKeyStyle.Render("<n/N>") + MenuActionStyle.Render("Next/Prev")
-	}
-	hints += "  " + SectionCountStyle.Render(scrollPct)
-
-	// Add search bar if active
-	if m.yamlOverlay.SearchActive {
-		sections = append(sections, m.yamlOverlay.RenderSearchFrame(m.width))
-	} else if m.yamlOverlay.SearchText != "" {
-		// Show persistent search indicator
-		searchIndicator := FilterBarStyle.Render("search: "+m.yamlOverlay.SearchText)
+	// Add search bar if active, or persistent search indicator
+	if overlay.SearchActive {
+		sections = append(sections, overlay.RenderSearchFrame(m.width))
+	} else if overlay.SearchText != "" {
+		searchIndicator := FilterBarStyle.Render("search: " + overlay.SearchText)
 		sections = append(sections, searchIndicator)
 	}
 
 	// Calculate content height: total height minus header, footer, frame borders, search
 	fixedLines := 4 // frame top + bottom + title line + hints line
-	if m.yamlOverlay.SearchActive {
+	if overlay.SearchActive {
 		fixedLines += 3 // search frame
-	} else if m.yamlOverlay.SearchText != "" {
+	} else if overlay.SearchText != "" {
 		fixedLines += 1 // search indicator
 	}
 
@@ -687,11 +612,11 @@ func (m Model) renderYAMLOverlay() string {
 		contentHeight = 3
 	}
 
-	// Ensure viewport height matches
-	m.yamlOverlay.Viewport.Height = contentHeight
+	// Ensure viewport height matches (operates on the local copy)
+	overlay.Viewport.Height = contentHeight
 
-	// Render the YAML viewport content inside a frame
-	content := m.yamlOverlay.Viewport.View()
+	// Render viewport content inside a frame
+	content := overlay.Viewport.View()
 	frame := renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
 
 	// Build output: search (if any) + frame + hints
@@ -704,21 +629,39 @@ func (m Model) renderYAMLOverlay() string {
 	return result
 }
 
+// renderYAMLOverlay renders the full-screen YAML overlay with framed viewport.
+func (m Model) renderYAMLOverlay() string {
+	title := SectionHeaderActiveStyle.Render("YAML") + " " +
+		SectionCountStyle.Render(m.yamlOverlay.ResourceType+"/"+m.yamlOverlay.ResourceName)
+
+	scrollPct := ""
+	if m.yamlOverlay.Viewport.TotalLineCount() > 0 {
+		pct := int(m.yamlOverlay.Viewport.ScrollPercent() * 100)
+		scrollPct = fmt.Sprintf(" %d%%", pct)
+	}
+
+	hints := MenuKeyStyle.Render("<esc>") + MenuActionStyle.Render("Close") + "  " +
+		MenuKeyStyle.Render("<↑↓>") + MenuActionStyle.Render("Scroll") + "  " +
+		MenuKeyStyle.Render("</>") + MenuActionStyle.Render("Search")
+	if m.yamlOverlay.SearchText != "" {
+		hints += "  " + MenuKeyStyle.Render("<n/N>") + MenuActionStyle.Render("Next/Prev")
+	}
+	hints += "  " + SectionCountStyle.Render(scrollPct)
+
+	return m.renderFullScreenOverlay(m.yamlOverlay.OverlayModel, title, hints)
+}
+
 // renderLogsOverlay renders the full-screen logs overlay with framed viewport.
 func (m Model) renderLogsOverlay() string {
-	var sections []string
-
-	// Title: "Logs: pod-name / container-name"
 	title := SectionHeaderActiveStyle.Render("Logs") + " " +
-		SectionCountStyle.Render(m.logsPodName+"/"+m.logsContainerName)
+		SectionCountStyle.Render(m.logsOverlay.PodName+"/"+m.logsOverlay.ContainerName)
 
-	// Status indicators
 	wrapStatus := "OFF"
-	if m.logsWrapEnabled {
+	if m.logsOverlay.WrapEnabled {
 		wrapStatus = "ON"
 	}
 	autoScrollStatus := "OFF"
-	if m.logsAutoScroll {
+	if m.logsOverlay.AutoScroll {
 		autoScrollStatus = "ON"
 	}
 
@@ -728,13 +671,11 @@ func (m Model) renderLogsOverlay() string {
 		scrollPct = fmt.Sprintf(" %d%%", pct)
 	}
 
-	// Col indicator (shows when horizontally scrolled)
 	colIndicator := ""
-	if m.logsHorizontalOffset > 0 {
-		colIndicator = fmt.Sprintf(" Col:%d", m.logsHorizontalOffset)
+	if m.logsOverlay.HorizontalOffset > 0 {
+		colIndicator = fmt.Sprintf(" Col:%d", m.logsOverlay.HorizontalOffset)
 	}
 
-	// Key hints
 	hints := MenuKeyStyle.Render("<esc>") + MenuActionStyle.Render("Close") + "  " +
 		MenuKeyStyle.Render("<↑↓←→>") + MenuActionStyle.Render("Scroll") + "  " +
 		MenuKeyStyle.Render("<w>") + MenuActionStyle.Render("Wrap:"+wrapStatus) + "  " +
@@ -745,230 +686,78 @@ func (m Model) renderLogsOverlay() string {
 	}
 	hints += "  " + SectionCountStyle.Render(scrollPct+colIndicator)
 
-	// Add search bar if active
-	if m.logsOverlay.SearchActive {
-		sections = append(sections, m.logsOverlay.RenderSearchFrame(m.width))
-	} else if m.logsOverlay.SearchText != "" {
-		searchIndicator := FilterBarStyle.Render("search: " + m.logsOverlay.SearchText)
-		sections = append(sections, searchIndicator)
-	}
-
-	// Calculate content height
-	fixedLines := 4 // frame top + bottom + title line + hints line
-	if m.logsOverlay.SearchActive {
-		fixedLines += 3
-	} else if m.logsOverlay.SearchText != "" {
-		fixedLines += 1
-	}
-
-	contentHeight := m.height - fixedLines
-	if contentHeight < 3 {
-		contentHeight = 3
-	}
-
-	m.logsOverlay.Viewport.Height = contentHeight
-
-	content := m.logsOverlay.Viewport.View()
-	frame := renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
-
-	result := ""
-	if len(sections) > 0 {
-		result = lipgloss.JoinVertical(lipgloss.Left, sections...) + "\n"
-	}
-	result += frame + "\n" + hints
-
-	return result
+	return m.renderFullScreenOverlay(m.logsOverlay.OverlayModel, title, hints)
 }
 
-// renderBreadcrumb returns the breadcrumb title for the current view with lipgloss styling.
-func (m Model) renderBreadcrumb() string {
+// breadcrumbPart is a single segment of the breadcrumb trail with its style.
+type breadcrumbPart struct {
+	label string
+	style lipgloss.Style
+}
+
+// appendBreadcrumb appends a breadcrumb part only if value is non-empty.
+func appendBreadcrumb(parts *[]breadcrumbPart, value string, style lipgloss.Style) {
+	if value != "" {
+		*parts = append(*parts, breadcrumbPart{value, style})
+	}
+}
+
+// buildBreadcrumbParts returns the breadcrumb segments for the current view state.
+// Parts are derived from which ViewState fields are non-empty, avoiding the need
+// for a per-ViewType switch.
+func (m Model) buildBreadcrumbParts() []breadcrumbPart {
 	forestStyle := BreadcrumbStyles["Forest"]
 	pcsStyle := BreadcrumbStyles["PodCliqueSet"]
 	pcsgStyle := BreadcrumbStyles["PodCliqueScalingGroup"]
 	pcStyle := BreadcrumbStyles["PodClique"]
 	podStyle := BreadcrumbStyles["Pod"]
+
+	var parts []breadcrumbPart
+
+	// Root segment
+	if m.viewState.SelectedPodCliqueSet != "" {
+		parts = append(parts, breadcrumbPart{"Forest", forestStyle})
+		parts = append(parts, breadcrumbPart{m.viewState.SelectedPodCliqueSet, pcsStyle})
+		if m.viewState.SelectedReplicaIndex != "" {
+			parts = append(parts, breadcrumbPart{"replica-" + m.viewState.SelectedReplicaIndex, pcsStyle})
+		}
+	} else {
+		parts = append(parts, breadcrumbPart{forestResourceTypeLabel(m.forestResourceType), forestStyle})
+	}
+
+	// PCSG segment (name + optional replica)
+	appendBreadcrumb(&parts, m.viewState.SelectedScalingGroup, pcsgStyle)
+	if m.viewState.SelectedPCSGReplicaIndex != "" {
+		parts = append(parts, breadcrumbPart{"replica-" + m.viewState.SelectedPCSGReplicaIndex, pcsgStyle})
+	}
+
+	appendBreadcrumb(&parts, m.viewState.SelectedPodClique, pcStyle)
+	appendBreadcrumb(&parts, m.viewState.SelectedPod, podStyle)
+
+	return parts
+}
+
+// renderBreadcrumb returns the breadcrumb title for the current view with lipgloss styling.
+func (m Model) renderBreadcrumb() string {
+	parts := m.buildBreadcrumbParts()
 	sep := BreadcrumbSeparator.String()
 
-	// For flat-list drill-ins (no PCS parent context), build breadcrumb from
-	// the forest resource type label instead of the full PCS hierarchy.
-	hasPCS := m.viewState.SelectedPodCliqueSet != ""
-
-	switch m.viewState.ViewType {
-	case data.ForestView:
-		label := forestResourceTypeLabel(m.forestResourceType)
-		return forestStyle.Render(label)
-
-	case data.PodCliqueSetView:
-		return forestStyle.Render("Forest") + sep + pcsStyle.Render(m.viewState.SelectedPodCliqueSet)
-
-	case data.PodCliqueSetReplicaView:
-		return forestStyle.Render("Forest") + sep +
-			pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
-			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex)
-
-	case data.PodCliqueScalingGroupView:
-		if !hasPCS {
-			label := forestResourceTypeLabel(m.forestResourceType)
-			return forestStyle.Render(label) + sep +
-				pcsgStyle.Render(m.viewState.SelectedScalingGroup)
-		}
-		return forestStyle.Render("Forest") + sep +
-			pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
-			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex) + sep +
-			pcsgStyle.Render(m.viewState.SelectedScalingGroup)
-
-	case data.PodCliqueScalingGroupReplicaView:
-		if !hasPCS {
-			label := forestResourceTypeLabel(m.forestResourceType)
-			return forestStyle.Render(label) + sep +
-				pcsgStyle.Render(m.viewState.SelectedScalingGroup) + sep +
-				pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
-		}
-		return forestStyle.Render("Forest") + sep +
-			pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
-			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex) + sep +
-			pcsgStyle.Render(m.viewState.SelectedScalingGroup) + sep +
-			pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
-
-	case data.PodCliqueView:
-		if !hasPCS {
-			label := forestResourceTypeLabel(m.forestResourceType)
-			bc := forestStyle.Render(label)
-			if m.viewState.SelectedScalingGroup != "" {
-				bc += sep + pcsgStyle.Render(m.viewState.SelectedScalingGroup)
-				if m.viewState.SelectedPCSGReplicaIndex != "" {
-					bc += sep + pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
-				}
-			}
-			return bc + sep + pcStyle.Render(m.viewState.SelectedPodClique)
-		}
-		parent := pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
-			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex)
-		if m.viewState.SelectedScalingGroup != "" {
-			parent += sep + pcsgStyle.Render(m.viewState.SelectedScalingGroup)
-			if m.viewState.SelectedPCSGReplicaIndex != "" {
-				parent += sep + pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
-			}
-		}
-		return forestStyle.Render("Forest") + sep + parent + sep + pcStyle.Render(m.viewState.SelectedPodClique)
-
-	case data.ContainersView, data.PodView:
-		if !hasPCS {
-			label := forestResourceTypeLabel(m.forestResourceType)
-			bc := forestStyle.Render(label)
-			if m.viewState.SelectedScalingGroup != "" {
-				bc += sep + pcsgStyle.Render(m.viewState.SelectedScalingGroup)
-				if m.viewState.SelectedPCSGReplicaIndex != "" {
-					bc += sep + pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
-				}
-			}
-			if m.viewState.SelectedPodClique != "" {
-				bc += sep + pcStyle.Render(m.viewState.SelectedPodClique)
-			}
-			return bc + sep + podStyle.Render(m.viewState.SelectedPod)
-		}
-		parent := pcsStyle.Render(m.viewState.SelectedPodCliqueSet) + sep +
-			pcsStyle.Render("replica-"+m.viewState.SelectedReplicaIndex)
-		if m.viewState.SelectedScalingGroup != "" {
-			parent += sep + pcsgStyle.Render(m.viewState.SelectedScalingGroup)
-			if m.viewState.SelectedPCSGReplicaIndex != "" {
-				parent += sep + pcsgStyle.Render("replica-"+m.viewState.SelectedPCSGReplicaIndex)
-			}
-		}
-		return forestStyle.Render("Forest") + sep + parent + sep +
-			pcStyle.Render(m.viewState.SelectedPodClique) + sep +
-			podStyle.Render(m.viewState.SelectedPod)
+	rendered := make([]string, len(parts))
+	for i, p := range parts {
+		rendered[i] = p.style.Render(p.label)
 	}
-	return forestStyle.Render("Forest")
-}
-
-// renderMenuBar renders the bottom menu bar in k9s style: <key>Action  <key>Action ...
-func (m Model) renderMenuBar() string {
-	type menuItem struct {
-		key    string
-		action string
-	}
-
-	items := []menuItem{
-		{":", "Cmd"},
-		{"v", "View"},
-		{"/", "Filter"},
-		{"tab", "Switch"},
-	}
-
-	if m.viewState.ViewType == data.PodView {
-		items = append(items, menuItem{"↑↓", "Scroll"})
-	} else {
-		items = append(items, menuItem{"↑↓", "Nav"})
-		items = append(items, menuItem{"enter", "Drill"})
-	}
-
-	items = append(items, menuItem{"y", "YAML"})
-	if m.logsAvailable() {
-		items = append(items, menuItem{"l", "Logs"})
-	}
-	if m.shellAvailable() {
-		items = append(items, menuItem{"s", "Shell"})
-	}
-	if m.topologyAvailable() {
-		items = append(items, menuItem{"t", "Topology"})
-	}
-	items = append(items, menuItem{"!", "Errors"})
-
-	if m.viewState.ViewType != data.ForestView {
-		items = append(items, menuItem{"esc", "Back"})
-	}
-
-	items = append(items, menuItem{"q", "Quit"})
-
-	var parts []string
-	for _, item := range items {
-		part := MenuKeyStyle.Render("<"+item.key+">") + MenuActionStyle.Render(item.action)
-		parts = append(parts, part)
-	}
-
-	return strings.Join(parts, "  ")
-}
-
-// renderStatusBar is the legacy name kept for compatibility. Delegates to renderMenuBar.
-func (m Model) renderStatusBar() string {
-	return m.renderMenuBar()
+	return strings.Join(rendered, sep)
 }
 
 // buildShortcutsString builds the keyboard shortcuts string for testing.
 // Returns plain text in k9s format: <key>Action
 func (m Model) buildShortcutsString() string {
-	var parts []string
+	items := m.buildMenuItems()
 
-	parts = append(parts, "<:>Cmd")
-	parts = append(parts, "<v>View")
-	parts = append(parts, "</>Filter")
-	parts = append(parts, "<tab>Switch")
-
-	if m.viewState.ViewType == data.PodView {
-		parts = append(parts, "<↑↓>Scroll")
-	} else {
-		parts = append(parts, "<↑↓>Nav")
-		parts = append(parts, "<enter>Drill")
+	parts := make([]string, len(items))
+	for i, item := range items {
+		parts[i] = "<" + item.key + ">" + item.action
 	}
-
-	parts = append(parts, "<y>YAML")
-	if m.logsAvailable() {
-		parts = append(parts, "<l>Logs")
-	}
-	if m.shellAvailable() {
-		parts = append(parts, "<s>Shell")
-	}
-	if m.topologyAvailable() {
-		parts = append(parts, "<t>Topology")
-	}
-	parts = append(parts, "<!>Errors")
-
-	if m.viewState.ViewType != data.ForestView {
-		parts = append(parts, "<esc>Back")
-	}
-
-	parts = append(parts, "<q>Quit")
 
 	return strings.Join(parts, "  ")
 }
@@ -990,30 +779,13 @@ func forestResourceTypeLabel(rt string) string {
 }
 
 // shellAvailable returns true when the 's' key should be shown in the menu.
-// This is true in ContainersView, or when a Pod is selected in the resources table.
 func (m Model) shellAvailable() bool {
-	if m.viewState.ViewType == data.ContainersView {
-		return true
-	}
-	if m.viewState.ViewType == data.PodCliqueView || m.viewState.ViewType == data.ForestView {
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 2 && selectedRow[1] == "Pod" {
-			return true
-		}
-	}
-	return false
-}
-
-// colorizeResourceRow returns plain text for each column value.
-// Note: bubbles/table doesn't handle per-cell ANSI styling well,
-// so we return plain text and rely on row-level styling (Selected style).
-func colorizeResourceRow(r data.Resource) []string {
-	return []string{r.Namespace, r.Type, r.Name, r.Topology, r.Ready, r.Scheduled}
+	return m.podActionAvailable()
 }
 
 // colorizeEventRow returns plain text for each column value.
 // Note: bubbles/table doesn't handle per-cell ANSI styling well,
 // so we return plain text and rely on row-level styling (Selected style).
-func colorizeEventRow(e data.Event) []string {
+func colorizeEventRow(e clusterstate.Event) []string {
 	return []string{e.Type, e.Kind, e.Reason, e.Age, e.From, e.Message}
 }

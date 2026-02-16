@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/ai-dynamo/grove/arborist/internal/data"
+import "github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 
 // messages.go defines all tea.Msg types used by the Bubble Tea TUI.
 // The Update loop handles these messages to update model state.
@@ -45,7 +45,7 @@ type WarningMsg struct {
 type PodContainersMsg struct {
 	PodName    string
 	Namespace  string
-	Containers []data.ContainerInfo
+	Containers []clusterstate.ContainerInfo
 	Err        error
 }
 
