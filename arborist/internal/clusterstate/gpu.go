@@ -14,7 +14,7 @@
 // limitations under the License.
 // */
 
-package data
+package clusterstate
 
 import (
 	"fmt"
@@ -66,6 +66,31 @@ func ParseGPUProductShortName(label string) string {
 	return parts[1]
 }
 
+// discoverGPUTypes returns sorted unique GPU type names from node GPU products.
+// If nodeFilter is non-nil, only includes nodes in that set.
+func discoverGPUTypes(nodeGPUProducts map[string]string, nodeFilter map[string]bool) []string {
+	gpuTypeSet := make(map[string]bool)
+	for nodeName, gpuType := range nodeGPUProducts {
+		if gpuType != "" && (nodeFilter == nil || nodeFilter[nodeName]) {
+			gpuTypeSet[gpuType] = true
+		}
+	}
+	gpuTypes := make([]string, 0, len(gpuTypeSet))
+	for t := range gpuTypeSet {
+		gpuTypes = append(gpuTypes, t)
+	}
+	sort.Strings(gpuTypes)
+	return gpuTypes
+}
+
+// podGPUType returns the GPU type for a pod based on its node, or "" if unknown/pending.
+func podGPUType(nodeName string, nodeGPUProducts map[string]string) string {
+	if nodeName == "" {
+		return ""
+	}
+	return nodeGPUProducts[nodeName]
+}
+
 // BuildGPUSummary constructs a GPUSummary from raw pod data and node GPU product mappings.
 // It scans nodeGPUProduct to discover GPU types, then iterates pods to aggregate GPU counts
 // at every hierarchy level using grove labels.
@@ -80,19 +105,8 @@ func BuildGPUSummary(pods []TopologyPodInput, nodeGPUProduct map[string]string) 
 		PendingGPUPods: make(map[string]int64),
 	}
 
-	// 1. Collect sorted set of distinct GPU types from nodes.
-	gpuTypeSet := make(map[string]bool)
-	for _, gpuType := range nodeGPUProduct {
-		if gpuType != "" {
-			gpuTypeSet[gpuType] = true
-		}
-	}
-	gpuTypes := make([]string, 0, len(gpuTypeSet))
-	for t := range gpuTypeSet {
-		gpuTypes = append(gpuTypes, t)
-	}
-	sort.Strings(gpuTypes)
-	summary.GPUTypes = gpuTypes
+	// 1. Collect sorted set of distinct GPU types from all nodes.
+	summary.GPUTypes = discoverGPUTypes(nodeGPUProduct, nil)
 
 	// 2. Iterate pods: for each pod with GPURequests > 0, attribute to the node's GPU type.
 	for _, pod := range pods {
@@ -103,15 +117,12 @@ func BuildGPUSummary(pods []TopologyPodInput, nodeGPUProduct map[string]string) 
 		// If the pod has no node, it's pending — track separately.
 		if pod.NodeName == "" {
 			summary.PendingGPUPods[pod.Name] = pod.GPURequests
-			// Still aggregate upward so parent rows know there are pending GPU pods,
-			// but we don't attribute to any GPU type.
 			continue
 		}
 
 		// Look up the node's GPU type
-		gpuType := nodeGPUProduct[pod.NodeName]
+		gpuType := podGPUType(pod.NodeName, nodeGPUProduct)
 		if gpuType == "" {
-			// Node has no recognized GPU type — don't attribute to any column.
 			continue
 		}
 
@@ -121,10 +132,10 @@ func BuildGPUSummary(pods []TopologyPodInput, nodeGPUProduct map[string]string) 
 		addGPUCount(summary.ByPod, pod.Name, gpuType, count)
 
 		// Extract grove hierarchy labels
-		pcsName := pod.Labels["app.kubernetes.io/part-of"]
-		replicaIndex := pod.Labels["grove.io/podcliqueset-replica-index"]
-		pcsgName := pod.Labels["grove.io/podcliquescalinggroup"]
-		podCliqueName := pod.Labels["grove.io/podclique"]
+		pcsName := pod.Labels[LabelPartOf]
+		replicaIndex := pod.Labels[LabelPCSReplicaIndex]
+		pcsgName := pod.Labels[LabelPCSG]
+		podCliqueName := pod.Labels[LabelPodClique]
 
 		// Attribute to PodClique level
 		if podCliqueName != "" {
@@ -137,15 +148,15 @@ func BuildGPUSummary(pods []TopologyPodInput, nodeGPUProduct map[string]string) 
 		}
 
 		// Attribute to PCSG Replica level (pcsgName/pcsgReplicaIndex)
-		pcsgReplicaIndex := pod.Labels["grove.io/podcliquescalinggroup-replica-index"]
+		pcsgReplicaIndex := pod.Labels[LabelPCSGReplicaIndex]
 		if pcsgName != "" && pcsgReplicaIndex != "" {
-			pcsgReplicaKey := pcsgName + "/" + pcsgReplicaIndex
+			pcsgReplicaKey := CompositeKey(pcsgName, pcsgReplicaIndex)
 			addGPUCount(summary.ByPCSGReplica, pcsgReplicaKey, gpuType, count)
 		}
 
 		// Attribute to Replica level (pcsName/replicaIndex)
 		if pcsName != "" && replicaIndex != "" {
-			replicaKey := pcsName + "/" + replicaIndex
+			replicaKey := CompositeKey(pcsName, replicaIndex)
 			addGPUCount(summary.ByReplica, replicaKey, gpuType, count)
 		}
 
@@ -182,19 +193,49 @@ type DomainGPUSummary struct {
 	ByValue  map[string]map[string]DomainGPUCounts // value -> gpuType -> counts
 }
 
+// PodClassifier determines whether a pod should be classified as "Grove" (true)
+// or "Other" (false) for GPU accounting purposes. The default classifier used by
+// the TUI checks for the app.kubernetes.io/part-of label. The CLI can supply a
+// custom classifier (e.g. filter by specific PCS name).
+type PodClassifier func(pod TopologyPodInput) bool
+
+// DefaultPodClassifier classifies pods as "Grove" when they have an
+// app.kubernetes.io/part-of label (i.e. PCS-managed pods).
+func DefaultPodClassifier(pod TopologyPodInput) bool {
+	return pod.Labels[LabelPartOf] != ""
+}
+
+// DomainGPUInput holds the parameters for ComputeDomainGPUSummary.
+type DomainGPUInput struct {
+	DomainKey       string
+	MatchingNodes   []string
+	NodeLabels      map[string]map[string]string
+	NodeGPUProducts map[string]string
+	NodeGPUCapacity map[string]int64
+	Pods            []TopologyPodInput
+	Classifier      PodClassifier // nil means DefaultPodClassifier
+}
+
 // ComputeDomainGPUSummary computes GPU Grove/Other/Total for each distinct value
 // of a topology domain key, scoped to the given set of matching nodes.
-//   - Grove = GPUs used by PCS-managed pods (pods with app.kubernetes.io/part-of label)
-//   - Other = GPUs used by non-PCS pods (no app.kubernetes.io/part-of label)
+// The Classifier determines how pods are split into Grove vs Other categories.
+// If Classifier is nil, DefaultPodClassifier is used.
+//   - Grove = GPUs used by pods where classifier returns true
+//   - Other = GPUs used by pods where classifier returns false
 //   - Total = total GPU capacity from node nvidia.com/gpu resource
-func ComputeDomainGPUSummary(
-	domainKey string,
-	matchingNodes []string,
-	nodeLabels map[string]map[string]string,
-	nodeGPUProducts map[string]string,
-	nodeGPUCapacity map[string]int64,
-	pods []TopologyPodInput,
-) *DomainGPUSummary {
+func ComputeDomainGPUSummary(input DomainGPUInput) *DomainGPUSummary {
+	classify := DefaultPodClassifier
+	if input.Classifier != nil {
+		classify = input.Classifier
+	}
+
+	domainKey := input.DomainKey
+	matchingNodes := input.MatchingNodes
+	nodeLabels := input.NodeLabels
+	nodeGPUProducts := input.NodeGPUProducts
+	nodeGPUCapacity := input.NodeGPUCapacity
+	pods := input.Pods
+
 	summary := &DomainGPUSummary{
 		ByValue: make(map[string]map[string]DomainGPUCounts),
 	}
@@ -207,7 +248,6 @@ func ComputeDomainGPUSummary(
 
 	// 1. Aggregate "Total" (capacity) from matching nodes: for each node, get its domain value,
 	// GPU type, and GPU capacity.
-	gpuTypeSet := make(map[string]bool)
 	for _, nodeName := range matchingNodes {
 		labels := nodeLabels[nodeName]
 		if labels == nil {
@@ -217,11 +257,10 @@ func ComputeDomainGPUSummary(
 		if domainValue == "" {
 			continue
 		}
-		gpuType := nodeGPUProducts[nodeName]
+		gpuType := podGPUType(nodeName, nodeGPUProducts)
 		if gpuType == "" {
 			continue
 		}
-		gpuTypeSet[gpuType] = true
 		capacity := nodeGPUCapacity[nodeName]
 
 		if summary.ByValue[domainValue] == nil {
@@ -233,8 +272,6 @@ func ComputeDomainGPUSummary(
 	}
 
 	// 2. Aggregate Grove/Other from pods on matching nodes.
-	// Grove = pods with app.kubernetes.io/part-of label (PCS-managed)
-	// Other = pods without that label
 	for _, pod := range pods {
 		if pod.GPURequests <= 0 || pod.NodeName == "" {
 			continue
@@ -250,7 +287,7 @@ func ComputeDomainGPUSummary(
 		if domainValue == "" {
 			continue
 		}
-		gpuType := nodeGPUProducts[pod.NodeName]
+		gpuType := podGPUType(pod.NodeName, nodeGPUProducts)
 		if gpuType == "" {
 			continue
 		}
@@ -259,7 +296,7 @@ func ComputeDomainGPUSummary(
 			summary.ByValue[domainValue] = make(map[string]DomainGPUCounts)
 		}
 		counts := summary.ByValue[domainValue][gpuType]
-		if pod.Labels["app.kubernetes.io/part-of"] != "" {
+		if classify(pod) {
 			counts.Grove += pod.GPURequests
 		} else {
 			counts.Other += pod.GPURequests
@@ -268,12 +305,7 @@ func ComputeDomainGPUSummary(
 	}
 
 	// 3. Build sorted GPU types from matching nodes.
-	gpuTypes := make([]string, 0, len(gpuTypeSet))
-	for t := range gpuTypeSet {
-		gpuTypes = append(gpuTypes, t)
-	}
-	sort.Strings(gpuTypes)
-	summary.GPUTypes = gpuTypes
+	summary.GPUTypes = discoverGPUTypes(nodeGPUProducts, nodeSet)
 
 	return summary
 }
@@ -281,6 +313,86 @@ func ComputeDomainGPUSummary(
 // FormatGPUGroveOtherTotal formats GPU counts as "grove/other/total".
 func FormatGPUGroveOtherTotal(grove, other, total int64) string {
 	return fmt.Sprintf("%d/%d/%d", grove, other, total)
+}
+
+// barSegments holds the character counts for each section of a GPU bar.
+type barSegments struct {
+	grove int
+	other int
+	free  int
+}
+
+// computeBarSegments calculates how many characters each segment (grove, other, free)
+// should occupy within the given barWidth based on GPU counts.
+func computeBarSegments(grove, other, total int64, barWidth int) barSegments {
+	if total <= 0 {
+		return barSegments{free: barWidth}
+	}
+
+	used := grove + other
+	if used > total {
+		// Overcommit: scale grove and other proportionally to fill the bar
+		groveChars := int(float64(grove) / float64(used) * float64(barWidth))
+		otherChars := int(float64(other) / float64(used) * float64(barWidth))
+		// Distribute truncation remainder to grove (largest contributor)
+		groveChars += barWidth - groveChars - otherChars
+		return barSegments{grove: groveChars, other: otherChars}
+	}
+
+	groveChars := int(float64(grove) / float64(total) * float64(barWidth))
+	otherChars := int(float64(other) / float64(total) * float64(barWidth))
+	return barSegments{
+		grove: groveChars,
+		other: otherChars,
+		free:  barWidth - groveChars - otherChars,
+	}
+}
+
+// renderBarOnly writes a bracketed bar string without the numeric suffix.
+func renderBarOnly(seg barSegments) string {
+	var b strings.Builder
+	b.WriteRune('[')
+	for i := 0; i < seg.grove; i++ {
+		b.WriteRune('▓')
+	}
+	for i := 0; i < seg.other; i++ {
+		b.WriteRune('░')
+	}
+	for i := 0; i < seg.free; i++ {
+		b.WriteRune(' ')
+	}
+	b.WriteRune(']')
+	return b.String()
+}
+
+// renderBar writes a bracketed bar string using the given segment counts.
+func renderBar(seg barSegments, grove, other, total int64) string {
+	var b strings.Builder
+	b.WriteRune('[')
+	for i := 0; i < seg.grove; i++ {
+		b.WriteRune('▓')
+	}
+	for i := 0; i < seg.other; i++ {
+		b.WriteRune('░')
+	}
+	for i := 0; i < seg.free; i++ {
+		b.WriteRune(' ')
+	}
+	b.WriteRune(']')
+	b.WriteRune(' ')
+	b.WriteString(fmt.Sprintf("(%d/%d/%d)", grove, other, total))
+	return b.String()
+}
+
+// FormatGPUBarOnly renders just the bracketed bar portion (e.g. "[▓▓░   ]")
+// without the numeric suffix. Use this when you need to compose your own
+// annotated output around the bar.
+func FormatGPUBarOnly(grove, other, total int64, barWidth int) string {
+	if barWidth <= 0 {
+		return "[]"
+	}
+	seg := computeBarSegments(grove, other, total, barWidth)
+	return renderBarOnly(seg)
 }
 
 // FormatGPUBar renders a unicode bar graph showing grove/other/free proportions
@@ -296,46 +408,6 @@ func FormatGPUBar(grove, other, total int64, barWidth int) string {
 	if barWidth <= 0 {
 		return fmt.Sprintf("[] (%d/%d/%d)", grove, other, total)
 	}
-
-	var groveChars, otherChars, freeChars int
-
-	if total <= 0 {
-		// No capacity: entire bar is free
-		freeChars = barWidth
-	} else {
-		// Clamp used counts so grove+other doesn't exceed total for bar purposes
-		used := grove + other
-		if used > total {
-			// Overcommit: scale grove and other proportionally to fill the bar
-			groveChars = int(float64(grove) / float64(used) * float64(barWidth))
-			otherChars = int(float64(other) / float64(used) * float64(barWidth))
-			// Ensure they sum to barWidth
-			freeChars = 0
-			remainder := barWidth - groveChars - otherChars
-			// Distribute remainder to grove first (largest contributor)
-			groveChars += remainder
-		} else {
-			// Normal case: compute proportional widths
-			groveChars = int(float64(grove) / float64(total) * float64(barWidth))
-			otherChars = int(float64(other) / float64(total) * float64(barWidth))
-			freeChars = barWidth - groveChars - otherChars
-		}
-	}
-
-	// Build bar string
-	var b strings.Builder
-	b.WriteRune('[')
-	for i := 0; i < groveChars; i++ {
-		b.WriteRune('▓')
-	}
-	for i := 0; i < otherChars; i++ {
-		b.WriteRune('░')
-	}
-	for i := 0; i < freeChars; i++ {
-		b.WriteRune(' ')
-	}
-	b.WriteRune(']')
-	b.WriteRune(' ')
-	b.WriteString(fmt.Sprintf("(%d/%d/%d)", grove, other, total))
-	return b.String()
+	seg := computeBarSegments(grove, other, total, barWidth)
+	return renderBar(seg, grove, other, total)
 }

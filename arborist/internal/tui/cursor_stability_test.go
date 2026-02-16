@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -40,7 +40,7 @@ func assertCursorValid(t *testing.T, m Model) {
 
 // cacheUpdate modifies the MockGlobalCache snapshot via mutate, then delivers
 // CacheUpdateMsg to trigger a full rebuild. Returns the updated model.
-func cacheUpdate(m Model, mc *data.MockGlobalCache, mutate func(*data.CacheSnapshot)) Model {
+func cacheUpdate(m Model, mc *clusterstate.MockGlobalCache, mutate func(*clusterstate.CacheSnapshot)) Model {
 	snap := mc.Snapshot()
 	mutate(snap)
 	mc.SetSnapshot(snap)
@@ -61,7 +61,7 @@ func TestC1_ForestView_CacheUpdatePreservesSelectedPCS(t *testing.T) {
 		assertCursorOnName(t, m, "beta-pcs")
 
 		// Cache update: change beta-pcs Ready
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			for i := range snap.PodCliqueSets {
 				if snap.PodCliqueSets[i].Name == "beta-pcs" {
 					snap.PodCliqueSets[i].Ready = "1/3"
@@ -81,9 +81,9 @@ func TestC1_ForestView_CacheUpdatePreservesSelectedPCS(t *testing.T) {
 
 		// Add "aaa-pcs" that sorts before all existing PCSes.
 		// beta-pcs shifts from index 1 to index 2; cursor should follow by name.
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.PodCliqueSets = append(
-				[]data.Resource{{Name: "aaa-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
+				[]clusterstate.Resource{{Name: "aaa-pcs", Type: "PodCliqueSet", Namespace: "default", Ready: "1/1", Scheduled: "1/1"}},
 				snap.PodCliqueSets...,
 			)
 		})
@@ -99,8 +99,8 @@ func TestC1_ForestView_CacheUpdatePreservesSelectedPCS(t *testing.T) {
 		assertCursorOnName(t, m, "beta-pcs")
 
 		// Remove gamma-pcs (a different PCS)
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			var kept []data.Resource
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			var kept []clusterstate.Resource
 			for _, r := range snap.PodCliqueSets {
 				if r.Name != "gamma-pcs" {
 					kept = append(kept, r)
@@ -120,8 +120,8 @@ func TestC1_ForestView_CacheUpdatePreservesSelectedPCS(t *testing.T) {
 		assertCursorOnName(t, m, "beta-pcs")
 
 		// Remove beta-pcs itself
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			var kept []data.Resource
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			var kept []clusterstate.Resource
 			for _, r := range snap.PodCliqueSets {
 				if r.Name != "beta-pcs" {
 					kept = append(kept, r)
@@ -150,8 +150,8 @@ func TestC2_PodCliqueSetView_CacheUpdatePreservesSelectedReplica(t *testing.T) {
 		// Navigate to beta-pcs (2 replicas → PodCliqueSetView)
 		m = sendKey(m, tea.KeyDown) // beta-pcs
 		m = sendKey(m, tea.KeyEnter)
-		if m.viewState.ViewType != data.PodCliqueSetView {
-			t.Fatalf("expected PodCliqueSetView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		if m.viewState.ViewType != clusterstate.PodCliqueSetView {
+			t.Fatalf("expected PodCliqueSetView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 		}
 
 		// Move cursor to replica-1
@@ -159,8 +159,8 @@ func TestC2_PodCliqueSetView_CacheUpdatePreservesSelectedReplica(t *testing.T) {
 		assertCursorOnName(t, m, "beta-pcs-replica-1")
 
 		// Change Ready counts for replica-1's scaling group
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.ScalingGroupsByReplica["beta-pcs/1"] = []data.Resource{
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.ScalingGroupsByReplica["beta-pcs/1"] = []clusterstate.Resource{
 				{Name: "beta-pcs-1-sg-main", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "0/1", Scheduled: "0/1"},
 			}
 		})
@@ -179,9 +179,9 @@ func TestC2_PodCliqueSetView_CacheUpdatePreservesSelectedReplica(t *testing.T) {
 		assertCursorOnName(t, m, "beta-pcs-replica-0")
 
 		// Add replica-2
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.ReplicaIndexesByPCS["beta-pcs"] = []string{"0", "1", "2"}
-			snap.ScalingGroupsByReplica["beta-pcs/2"] = []data.Resource{
+			snap.ScalingGroupsByReplica["beta-pcs/2"] = []clusterstate.Resource{
 				{Name: "beta-pcs-2-sg-main", Type: "PodCliqueScalingGroup", Namespace: "staging", Ready: "1/1", Scheduled: "1/1"},
 			}
 		})
@@ -199,7 +199,7 @@ func TestC2_PodCliqueSetView_CacheUpdatePreservesSelectedReplica(t *testing.T) {
 		assertCursorOnName(t, m, "beta-pcs-replica-1")
 
 		// Remove replica-1 from the index list
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.ReplicaIndexesByPCS["beta-pcs"] = []string{"0"}
 			delete(snap.ScalingGroupsByReplica, "beta-pcs/1")
 		})
@@ -223,15 +223,15 @@ func TestC3_PodCliqueSetReplicaView_CacheUpdatePreservesSelectedResource(t *test
 
 		// alpha-pcs has 1 replica → auto-skip to PodCliqueSetReplicaView
 		m = sendKey(m, tea.KeyEnter)
-		if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-			t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		if m.viewState.ViewType != clusterstate.PodCliqueSetReplicaView {
+			t.Fatalf("expected PodCliqueSetReplicaView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 		}
 		// First row is the PCSG
 		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill")
 
 		// Change PCSG Ready
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.ScalingGroupsByReplica["alpha-pcs/0"] = []data.Resource{
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.ScalingGroupsByReplica["alpha-pcs/0"] = []clusterstate.Resource{
 				{Name: "alpha-pcs-0-sg-prefill", Type: "PodCliqueScalingGroup", Namespace: "default", Ready: "0/2", Scheduled: "2/2"},
 			}
 		})
@@ -249,10 +249,10 @@ func TestC3_PodCliqueSetReplicaView_CacheUpdatePreservesSelectedResource(t *test
 		assertCursorOnName(t, m, "alpha-pcs-0-standalone-pc")
 
 		// Add a new PCSG
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.ScalingGroupsByReplica["alpha-pcs/0"] = append(
 				snap.ScalingGroupsByReplica["alpha-pcs/0"],
-				data.Resource{Name: "alpha-pcs-0-sg-new", Type: "PodCliqueScalingGroup", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
+				clusterstate.Resource{Name: "alpha-pcs-0-sg-new", Type: "PodCliqueScalingGroup", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 			)
 		})
 
@@ -267,8 +267,8 @@ func TestC3_PodCliqueSetReplicaView_CacheUpdatePreservesSelectedResource(t *test
 		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill")
 
 		// Remove the PCSG, only standalone PodClique remains
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.ScalingGroupsByReplica["alpha-pcs/0"] = []data.Resource{}
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.ScalingGroupsByReplica["alpha-pcs/0"] = []clusterstate.Resource{}
 		})
 
 		assertCursorValid(t, m)
@@ -290,14 +290,14 @@ func TestC4_PodCliqueScalingGroupView_CacheUpdatePreservesSelectedReplica(t *tes
 
 		m = sendKey(m, tea.KeyEnter) // alpha-pcs → PodCliqueSetReplicaView (single replica skip)
 		m = sendKey(m, tea.KeyEnter) // PCSG → PodCliqueScalingGroupView
-		if m.viewState.ViewType != data.PodCliqueScalingGroupView {
-			t.Fatalf("expected PodCliqueScalingGroupView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		if m.viewState.ViewType != clusterstate.PodCliqueScalingGroupView {
+			t.Fatalf("expected PodCliqueScalingGroupView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 		}
 		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill-replica-0")
 
 		// Change underlying PodClique data for replica-0
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/0"] = []data.Resource{
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/0"] = []clusterstate.Resource{
 				{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "0/1", Scheduled: "0/1"},
 			}
 		})
@@ -314,9 +314,9 @@ func TestC4_PodCliqueScalingGroupView_CacheUpdatePreservesSelectedReplica(t *tes
 		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill-replica-0")
 
 		// Add replica-2
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.ReplicaIndexesByPCSG["alpha-pcs-0-sg-prefill"] = []string{"0", "1", "2"}
-			snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/2"] = []data.Resource{
+			snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/2"] = []clusterstate.Resource{
 				{Name: "alpha-pcs-0-sg-prefill-2-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 			}
 		})
@@ -332,11 +332,11 @@ func TestC4_PodCliqueScalingGroupView_CacheUpdatePreservesSelectedReplica(t *tes
 func TestC5_PodCliqueScalingGroupReplicaView_CacheUpdatePreservesSelectedPodClique(t *testing.T) {
 	// Setup helper: add a second PodClique to PCSG replica-0 for richer testing.
 	// Names are chosen so that sorted order is: backup (0), worker (1).
-	setupWithTwoPodCliques := func(t *testing.T) (*data.MockGlobalCache, Model) {
+	setupWithTwoPodCliques := func(t *testing.T) (*clusterstate.MockGlobalCache, Model) {
 		t.Helper()
 		mc := buildFullMockCache()
 		snap := mc.Snapshot()
-		snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/0"] = []data.Resource{
+		snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/0"] = []clusterstate.Resource{
 			{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 			{Name: "alpha-pcs-0-sg-prefill-0-backup", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 		}
@@ -347,8 +347,8 @@ func TestC5_PodCliqueScalingGroupReplicaView_CacheUpdatePreservesSelectedPodCliq
 		m = sendKey(m, tea.KeyEnter) // PCSG → PodCliqueScalingGroupView
 		m = sendKey(m, tea.KeyEnter) // replica-0 → PodCliqueScalingGroupReplicaView
 
-		if m.viewState.ViewType != data.PodCliqueScalingGroupReplicaView {
-			t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		if m.viewState.ViewType != clusterstate.PodCliqueScalingGroupReplicaView {
+			t.Fatalf("expected PodCliqueScalingGroupReplicaView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 		}
 		return mc, m
 	}
@@ -363,8 +363,8 @@ func TestC5_PodCliqueScalingGroupReplicaView_CacheUpdatePreservesSelectedPodCliq
 		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill-0-worker")
 
 		// Change PodClique Ready
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/0"] = []data.Resource{
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/0"] = []clusterstate.Resource{
 				{Name: "alpha-pcs-0-sg-prefill-0-worker", Type: "PodClique", Namespace: "default", Ready: "0/1", Scheduled: "0/1"},
 				{Name: "alpha-pcs-0-sg-prefill-0-backup", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 			}
@@ -383,8 +383,8 @@ func TestC5_PodCliqueScalingGroupReplicaView_CacheUpdatePreservesSelectedPodCliq
 		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill-0-worker")
 
 		// Remove the worker, keep only backup
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/0"] = []data.Resource{
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.PodCliquesByPCSGReplica["alpha-pcs-0-sg-prefill/0"] = []clusterstate.Resource{
 				{Name: "alpha-pcs-0-sg-prefill-0-backup", Type: "PodClique", Namespace: "default", Ready: "1/1", Scheduled: "1/1"},
 			}
 		})
@@ -403,14 +403,14 @@ func TestC5_PodCliqueScalingGroupReplicaView_CacheUpdatePreservesSelectedPodCliq
 
 func TestC6_PodCliqueView_CacheUpdatePreservesSelectedPod(t *testing.T) {
 	// Helper: navigate to the PodCliqueView for the standalone PodClique.
-	navigateToPodCliqueView := func(t *testing.T, mc *data.MockGlobalCache) Model {
+	navigateToPodCliqueView := func(t *testing.T, mc *clusterstate.MockGlobalCache) Model {
 		t.Helper()
 		m := newTestModelWithCache(mc)
 		m = sendKey(m, tea.KeyEnter) // alpha-pcs → PodCliqueSetReplicaView (single replica skip)
 		m = sendKey(m, tea.KeyDown)  // move to standalone PodClique
 		m = sendKey(m, tea.KeyEnter) // → PodCliqueView
-		if m.viewState.ViewType != data.PodCliqueView {
-			t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		if m.viewState.ViewType != clusterstate.PodCliqueView {
+			t.Fatalf("expected PodCliqueView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 		}
 		return m
 	}
@@ -423,8 +423,8 @@ func TestC6_PodCliqueView_CacheUpdatePreservesSelectedPod(t *testing.T) {
 		assertCursorOnName(t, m, "alpha-pcs-0-pc-worker-1")
 
 		// Change pod statuses (worker-1 becomes CrashLoopBackOff)
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.PodsByPodClique["alpha-pcs-0-standalone-pc"] = []data.Resource{
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.PodsByPodClique["alpha-pcs-0-standalone-pc"] = []clusterstate.Resource{
 				{Name: "alpha-pcs-0-pc-worker-0", Type: "Pod", Namespace: "default", Ready: "1/1", Scheduled: "Running"},
 				{Name: "alpha-pcs-0-pc-worker-1", Type: "Pod", Namespace: "default", Ready: "0/1", Scheduled: "CrashLoopBackOff"},
 				{Name: "alpha-pcs-0-pc-worker-2", Type: "Pod", Namespace: "default", Ready: "0/1", Scheduled: "Pending"},
@@ -442,10 +442,10 @@ func TestC6_PodCliqueView_CacheUpdatePreservesSelectedPod(t *testing.T) {
 		assertCursorOnName(t, m, "alpha-pcs-0-pc-worker-1")
 
 		// Add a new pod
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.PodsByPodClique["alpha-pcs-0-standalone-pc"] = append(
 				snap.PodsByPodClique["alpha-pcs-0-standalone-pc"],
-				data.Resource{Name: "alpha-pcs-0-pc-worker-3", Type: "Pod", Namespace: "default", Ready: "0/1", Scheduled: "Pending"},
+				clusterstate.Resource{Name: "alpha-pcs-0-pc-worker-3", Type: "Pod", Namespace: "default", Ready: "0/1", Scheduled: "Pending"},
 			)
 		})
 
@@ -460,8 +460,8 @@ func TestC6_PodCliqueView_CacheUpdatePreservesSelectedPod(t *testing.T) {
 		assertCursorOnName(t, m, "alpha-pcs-0-pc-worker-1")
 
 		// Remove worker-1
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			var kept []data.Resource
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			var kept []clusterstate.Resource
 			for _, pod := range snap.PodsByPodClique["alpha-pcs-0-standalone-pc"] {
 				if pod.Name != "alpha-pcs-0-pc-worker-1" {
 					kept = append(kept, pod)
@@ -490,8 +490,8 @@ func TestC6b_PodCliqueView_ReversedPodOrderStable(t *testing.T) {
 	m = sendKey(m, tea.KeyEnter) // alpha-pcs → PodCliqueSetReplicaView (single replica skip)
 	m = sendKey(m, tea.KeyDown)  // move to standalone PodClique
 	m = sendKey(m, tea.KeyEnter) // → PodCliqueView
-	if m.viewState.ViewType != data.PodCliqueView {
-		t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.PodCliqueView {
+		t.Fatalf("expected PodCliqueView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 
 	// Cursor naturally falls on worker-1 (index 1, from parent cursor fallback).
@@ -506,7 +506,7 @@ func TestC6b_PodCliqueView_ReversedPodOrderStable(t *testing.T) {
 	firstNameBefore := rows[0][2]
 
 	// Cache update: reverse pod order (simulates non-deterministic map iteration)
-	m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+	m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 		pods := snap.PodsByPodClique["alpha-pcs-0-standalone-pc"]
 		for i, j := 0, len(pods)-1; i < j; i, j = i+1, j-1 {
 			pods[i], pods[j] = pods[j], pods[i]
@@ -598,8 +598,8 @@ func assertTopologyPodCursorValid(t *testing.T, m Model) {
 
 // buildTopologyMockCache creates a MockGlobalCache with the standard topology
 // data from sampleTopologyViewData plus the forest data from samplePCSResources.
-func buildTopologyMockCache() *data.MockGlobalCache {
-	mc := data.NewMockGlobalCache()
+func buildTopologyMockCache() *clusterstate.MockGlobalCache {
+	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.TopologyViewData = sampleTopologyViewData()
 	snap.PodCliqueSets = samplePCSResources()
@@ -609,7 +609,7 @@ func buildTopologyMockCache() *data.MockGlobalCache {
 
 // newTopologyTestModelWithCache creates a Model backed by the given
 // MockGlobalCache, toggled to TopologyView.
-func newTopologyTestModelWithCache(mc *data.MockGlobalCache) Model {
+func newTopologyTestModelWithCache(mc *clusterstate.MockGlobalCache) Model {
 	m := NewModel(mc)
 	m = mustApply(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m.cacheSynced = true
@@ -621,7 +621,7 @@ func newTopologyTestModelWithCache(mc *data.MockGlobalCache) Model {
 
 // topologyCacheUpdate is like cacheUpdate but works with the topology mock.
 // It mutates the snapshot and delivers CacheUpdateMsg.
-func topologyCacheUpdate(m Model, mc *data.MockGlobalCache, mutate func(*data.CacheSnapshot)) Model {
+func topologyCacheUpdate(m Model, mc *clusterstate.MockGlobalCache, mutate func(*clusterstate.CacheSnapshot)) Model {
 	snap := mc.Snapshot()
 	mutate(snap)
 	mc.SetSnapshot(snap)
@@ -634,7 +634,7 @@ func topologyCacheUpdate(m Model, mc *data.MockGlobalCache, mutate func(*data.Ca
 
 func TestC7_EventsTableCursorDuringCacheUpdate(t *testing.T) {
 	t.Run("ForestView events pane focused — cursor should not jump to 0", func(t *testing.T) {
-		events := map[string][]data.Event{
+		events := map[string][]clusterstate.Event{
 			"PodCliqueSet/alpha-pcs": {
 				{Type: "Normal", Kind: "PodCliqueSet", Reason: "Scaled", Age: "5m", From: "controller", Message: "Scaled up", Parent: "alpha-pcs", Timestamp: time.Now().Add(-5 * time.Minute)},
 				{Type: "Warning", Kind: "PodCliqueSet", Reason: "NotReady", Age: "3m", From: "controller", Message: "Not all replicas ready", Parent: "alpha-pcs", Timestamp: time.Now().Add(-3 * time.Minute)},
@@ -646,7 +646,7 @@ func TestC7_EventsTableCursorDuringCacheUpdate(t *testing.T) {
 
 		// Tab to events pane
 		m = sendKey(m, tea.KeyTab)
-		if m.activePane != data.EventsPane {
+		if m.activePane != clusterstate.EventsPane {
 			t.Fatalf("expected EventsPane, got %d", m.activePane)
 		}
 
@@ -660,7 +660,7 @@ func TestC7_EventsTableCursorDuringCacheUpdate(t *testing.T) {
 		}
 
 		// Cache update changes PCS ready counts
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			for i := range snap.PodCliqueSets {
 				if snap.PodCliqueSets[i].Name == "alpha-pcs" {
 					snap.PodCliqueSets[i].Ready = "2/3"
@@ -679,7 +679,7 @@ func TestC7_EventsTableCursorDuringCacheUpdate(t *testing.T) {
 	})
 
 	t.Run("ForestView resources pane focused — resources cursor stays", func(t *testing.T) {
-		events := map[string][]data.Event{
+		events := map[string][]clusterstate.Event{
 			"PodCliqueSet/alpha-pcs": {
 				{Type: "Normal", Kind: "PodCliqueSet", Reason: "Scaled", Age: "5m", From: "controller", Message: "Scaled up", Parent: "alpha-pcs", Timestamp: time.Now().Add(-5 * time.Minute)},
 			},
@@ -692,7 +692,7 @@ func TestC7_EventsTableCursorDuringCacheUpdate(t *testing.T) {
 		assertCursorOnName(t, m, "beta-pcs")
 
 		// Cache update — resources cursor should stay on beta-pcs
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			for i := range snap.PodCliqueSets {
 				if snap.PodCliqueSets[i].Name == "alpha-pcs" {
 					snap.PodCliqueSets[i].Ready = "2/3"
@@ -704,7 +704,7 @@ func TestC7_EventsTableCursorDuringCacheUpdate(t *testing.T) {
 	})
 
 	t.Run("PodCliqueView events pane focused — no crash on cache update", func(t *testing.T) {
-		events := map[string][]data.Event{
+		events := map[string][]clusterstate.Event{
 			"PodClique/alpha-pcs-0-standalone-pc": {
 				{Type: "Normal", Kind: "PodClique", Reason: "Created", Age: "1m", From: "controller", Message: "Created pod", Parent: "alpha-pcs-0-standalone-pc", Timestamp: time.Now().Add(-1 * time.Minute)},
 				{Type: "Normal", Kind: "Pod", Reason: "Scheduled", Age: "30s", From: "scheduler", Message: "Assigned to node", Parent: "alpha-pcs-0-pc-worker-0", Timestamp: time.Now().Add(-30 * time.Second)},
@@ -720,19 +720,19 @@ func TestC7_EventsTableCursorDuringCacheUpdate(t *testing.T) {
 		m = sendKey(m, tea.KeyEnter) // alpha-pcs → PodCliqueSetReplicaView (single replica skip)
 		m = sendKey(m, tea.KeyDown)  // standalone PodClique
 		m = sendKey(m, tea.KeyEnter) // → PodCliqueView
-		if m.viewState.ViewType != data.PodCliqueView {
-			t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		if m.viewState.ViewType != clusterstate.PodCliqueView {
+			t.Fatalf("expected PodCliqueView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 		}
 
 		// Tab to events pane
 		m = sendKey(m, tea.KeyTab)
-		if m.activePane != data.EventsPane {
+		if m.activePane != clusterstate.EventsPane {
 			t.Fatalf("expected EventsPane, got %d", m.activePane)
 		}
 
 		// Cache update changes pod statuses — should not crash
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.PodsByPodClique["alpha-pcs-0-standalone-pc"] = []data.Resource{
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.PodsByPodClique["alpha-pcs-0-standalone-pc"] = []clusterstate.Resource{
 				{Name: "alpha-pcs-0-pc-worker-0", Type: "Pod", Namespace: "default", Ready: "0/1", Scheduled: "CrashLoopBackOff"},
 				{Name: "alpha-pcs-0-pc-worker-1", Type: "Pod", Namespace: "default", Ready: "1/1", Scheduled: "Running"},
 				{Name: "alpha-pcs-0-pc-worker-2", Type: "Pod", Namespace: "default", Ready: "0/1", Scheduled: "Pending"},
@@ -757,7 +757,7 @@ func TestC8_TopologyViewDomains_CacheUpdatePreservesCursor(t *testing.T) {
 		assertTopologyDomainCursorOnName(t, m, "zone")
 
 		// Cache update: change a node label (doesn't affect domain list)
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.TopologyViewData.NodeLabels["node-01"]["topology.kubernetes.io/rack"] = "rack-01-updated"
 		})
 
@@ -773,9 +773,9 @@ func TestC8_TopologyViewDomains_CacheUpdatePreservesCursor(t *testing.T) {
 		assertTopologyDomainCursorOnName(t, m, "zone")
 
 		// Add a new domain "block" at position 0 (before all others)
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.TopologyViewData.Domains = append(
-				[]data.TopologyDomainRow{{Domain: "block", Key: "topology.kubernetes.io/block", ValuesCount: 2}},
+				[]clusterstate.TopologyDomainRow{{Domain: "block", Key: "topology.kubernetes.io/block", ValuesCount: 2}},
 				snap.TopologyViewData.Domains...,
 			)
 		})
@@ -791,8 +791,8 @@ func TestC8_TopologyViewDomains_CacheUpdatePreservesCursor(t *testing.T) {
 		assertTopologyDomainCursorOnName(t, m, "region")
 
 		// Remove "rack" domain (not selected)
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			var kept []data.TopologyDomainRow
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			var kept []clusterstate.TopologyDomainRow
 			for _, d := range snap.TopologyViewData.Domains {
 				if d.Domain != "rack" {
 					kept = append(kept, d)
@@ -821,7 +821,7 @@ func TestC9_TopologyViewDrilledInValues_CacheUpdatePreservesCursor(t *testing.T)
 		assertTopologyDomainCursorOnName(t, m, "us-west-2")
 
 		// Cache update: change node labels (us-west-2 still exists)
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.TopologyViewData.NodeLabels["node-04"]["topology.kubernetes.io/rack"] = "rack-04-updated"
 		})
 
@@ -838,7 +838,7 @@ func TestC9_TopologyViewDrilledInValues_CacheUpdatePreservesCursor(t *testing.T)
 		assertTopologyDomainCursorOnName(t, m, "us-east-1")
 
 		// Add a new region by adding a node with a different region label
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.TopologyViewData.NodeLabels["node-07"] = map[string]string{
 				"topology.kubernetes.io/region": "eu-west-1",
 				"topology.kubernetes.io/zone":   "eu-west-1a",
@@ -859,7 +859,7 @@ func TestC9_TopologyViewDrilledInValues_CacheUpdatePreservesCursor(t *testing.T)
 		assertTopologyDomainCursorOnName(t, m, "us-west-2")
 
 		// Remove all us-west-2 nodes
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			delete(snap.TopologyViewData.NodeLabels, "node-04")
 			delete(snap.TopologyViewData.NodeLabels, "node-05")
 			delete(snap.TopologyViewData.NodeLabels, "node-06")
@@ -886,13 +886,13 @@ func TestC10_TopologyViewDrillStackValidation(t *testing.T) {
 		m = sendKey(m, tea.KeyDown) // zone
 		m = sendKey(m, tea.KeyDown) // rack
 		m = sendKey(m, tea.KeyEnter)
-		if len(m.topologyDrillStack) != 1 || m.topologyDrillStack[0].Domain != "rack" {
-			t.Fatalf("expected drill into rack, got stack: %+v", m.topologyDrillStack)
+		if m.topologyDrill.Depth() != 1 || m.topologyDrill.Entries()[0].Domain != "rack" {
+			t.Fatalf("expected drill into rack, got stack: %+v", m.topologyDrill.Entries())
 		}
 
 		// Remove "rack" domain from domains list
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			var kept []data.TopologyDomainRow
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			var kept []clusterstate.TopologyDomainRow
 			for _, d := range snap.TopologyViewData.Domains {
 				if d.Domain != "rack" {
 					kept = append(kept, d)
@@ -902,8 +902,8 @@ func TestC10_TopologyViewDrillStackValidation(t *testing.T) {
 		})
 
 		// Drill stack should be reset
-		if len(m.topologyDrillStack) != 0 {
-			t.Fatalf("expected drill stack reset when domain removed, got depth %d: %+v", len(m.topologyDrillStack), m.topologyDrillStack)
+		if m.topologyDrill.Depth() != 0 {
+			t.Fatalf("expected drill stack reset when domain removed, got depth %d: %+v", m.topologyDrill.Depth(), m.topologyDrill.Entries())
 		}
 	})
 
@@ -914,13 +914,13 @@ func TestC10_TopologyViewDrillStackValidation(t *testing.T) {
 		// Drill into region, select us-east-1, advance to zone
 		m = sendKey(m, tea.KeyEnter) // region
 		m = sendKey(m, tea.KeyEnter) // us-east-1 → zone
-		if len(m.topologyDrillStack) != 2 {
-			t.Fatalf("expected drill stack depth 2, got %d", len(m.topologyDrillStack))
+		if m.topologyDrill.Depth() != 2 {
+			t.Fatalf("expected drill stack depth 2, got %d", m.topologyDrill.Depth())
 		}
 
 		// Remove "zone" domain
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			var kept []data.TopologyDomainRow
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			var kept []clusterstate.TopologyDomainRow
 			for _, d := range snap.TopologyViewData.Domains {
 				if d.Domain != "zone" {
 					kept = append(kept, d)
@@ -931,11 +931,11 @@ func TestC10_TopologyViewDrillStackValidation(t *testing.T) {
 
 		// Drill stack should be truncated to depth 1 (region entry preserved,
 		// zone entry removed since the domain no longer exists).
-		if len(m.topologyDrillStack) != 1 {
-			t.Fatalf("expected drill stack truncated to depth 1 when zone removed, got depth %d: %+v", len(m.topologyDrillStack), m.topologyDrillStack)
+		if m.topologyDrill.Depth() != 1 {
+			t.Fatalf("expected drill stack truncated to depth 1 when zone removed, got depth %d: %+v", m.topologyDrill.Depth(), m.topologyDrill.Entries())
 		}
-		if m.topologyDrillStack[0].Domain != "region" {
-			t.Fatalf("expected first entry to be region, got %+v", m.topologyDrillStack[0])
+		if m.topologyDrill.Entries()[0].Domain != "region" {
+			t.Fatalf("expected first entry to be region, got %+v", m.topologyDrill.Entries()[0])
 		}
 	})
 
@@ -946,24 +946,24 @@ func TestC10_TopologyViewDrillStackValidation(t *testing.T) {
 		// Drill into region, select us-east-1, advance to zone
 		m = sendKey(m, tea.KeyEnter) // region
 		m = sendKey(m, tea.KeyEnter) // us-east-1 → zone
-		if len(m.topologyDrillStack) != 2 {
-			t.Fatalf("expected drill stack depth 2, got %d", len(m.topologyDrillStack))
+		if m.topologyDrill.Depth() != 2 {
+			t.Fatalf("expected drill stack depth 2, got %d", m.topologyDrill.Depth())
 		}
 
 		// Cache update that doesn't remove any domains
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.TopologyViewData.NodeLabels["node-01"]["topology.kubernetes.io/rack"] = "rack-01-updated"
 		})
 
 		// Drill stack should be preserved
-		if len(m.topologyDrillStack) != 2 {
-			t.Fatalf("expected drill stack preserved, got depth %d", len(m.topologyDrillStack))
+		if m.topologyDrill.Depth() != 2 {
+			t.Fatalf("expected drill stack preserved, got depth %d", m.topologyDrill.Depth())
 		}
-		if m.topologyDrillStack[0].Domain != "region" || m.topologyDrillStack[0].Value != "us-east-1" {
-			t.Errorf("expected first entry region=us-east-1, got %+v", m.topologyDrillStack[0])
+		if m.topologyDrill.Entries()[0].Domain != "region" || m.topologyDrill.Entries()[0].Value != "us-east-1" {
+			t.Errorf("expected first entry region=us-east-1, got %+v", m.topologyDrill.Entries()[0])
 		}
-		if m.topologyDrillStack[1].Domain != "zone" {
-			t.Errorf("expected second entry domain=zone, got %+v", m.topologyDrillStack[1])
+		if m.topologyDrill.Entries()[1].Domain != "zone" {
+			t.Errorf("expected second entry domain=zone, got %+v", m.topologyDrill.Entries()[1])
 		}
 		assertTopologyDomainCursorValid(t, m)
 	})
@@ -989,8 +989,8 @@ func TestC11_TopologyViewPodsTable_CacheUpdatePreservesCursor(t *testing.T) {
 
 		// Switch to pods pane
 		m = sendKey(m, tea.KeyTab)
-		if m.activePane != data.TopologyPodsPane {
-			t.Fatalf("expected TopologyPodsPane, got %s", data.PaneName(m.activePane))
+		if m.activePane != clusterstate.TopologyPodsPane {
+			t.Fatalf("expected TopologyPodsPane, got %s", clusterstate.PaneName(m.activePane))
 		}
 
 		// Navigate pods to pod-b (row 1)
@@ -998,7 +998,7 @@ func TestC11_TopologyViewPodsTable_CacheUpdatePreservesCursor(t *testing.T) {
 		assertTopologyPodCursorOnName(t, m, "pod-b")
 
 		// Cache update: change pod-b's phase
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			for i := range snap.TopologyViewData.Pods {
 				if snap.TopologyViewData.Pods[i].Name == "pod-b" {
 					snap.TopologyViewData.Pods[i].Phase = "Pending"
@@ -1023,8 +1023,8 @@ func TestC11_TopologyViewPodsTable_CacheUpdatePreservesCursor(t *testing.T) {
 		assertTopologyPodCursorOnName(t, m, "pod-b")
 
 		// Add a new pod on node-02 (same zone us-east-1a, visible in current filter)
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.TopologyViewData.Pods = append(snap.TopologyViewData.Pods, data.TopologyViewPod{
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.TopologyViewData.Pods = append(snap.TopologyViewData.Pods, clusterstate.TopologyViewPod{
 				Namespace: "default", Node: "node-02", Name: "pod-aa-new", Topology: "rack: rack-02", Phase: "Running",
 			})
 		})
@@ -1047,8 +1047,8 @@ func TestC11_TopologyViewPodsTable_CacheUpdatePreservesCursor(t *testing.T) {
 		assertTopologyPodCursorOnName(t, m, "pod-b")
 
 		// Remove pod-b
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			var kept []data.TopologyViewPod
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			var kept []clusterstate.TopologyViewPod
 			for _, p := range snap.TopologyViewData.Pods {
 				if p.Name != "pod-b" {
 					kept = append(kept, p)
@@ -1075,8 +1075,8 @@ func TestC11_TopologyViewPodsTable_CacheUpdatePreservesCursor(t *testing.T) {
 
 		// Switch to pods pane
 		m = sendKey(m, tea.KeyTab)
-		if m.activePane != data.TopologyPodsPane {
-			t.Fatalf("expected TopologyPodsPane, got %s", data.PaneName(m.activePane))
+		if m.activePane != clusterstate.TopologyPodsPane {
+			t.Fatalf("expected TopologyPodsPane, got %s", clusterstate.PaneName(m.activePane))
 		}
 
 		// Navigate to pod-b
@@ -1084,8 +1084,8 @@ func TestC11_TopologyViewPodsTable_CacheUpdatePreservesCursor(t *testing.T) {
 		assertTopologyPodCursorOnName(t, m, "pod-b")
 
 		// Cache update: add a pod on node-01 that sorts before pod-b
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.TopologyViewData.Pods = append(snap.TopologyViewData.Pods, data.TopologyViewPod{
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.TopologyViewData.Pods = append(snap.TopologyViewData.Pods, clusterstate.TopologyViewPod{
 				Namespace: "default", Node: "node-01", Name: "pod-aaa", Topology: "rack: rack-01", Phase: "Running",
 			})
 		})
@@ -1100,7 +1100,7 @@ func TestC11_TopologyViewPodsTable_CacheUpdatePreservesCursor(t *testing.T) {
 
 func TestC12_InactivePaneCursorStability(t *testing.T) {
 	t.Run("ForestView: resources active, events cursor should not reset", func(t *testing.T) {
-		events := map[string][]data.Event{
+		events := map[string][]clusterstate.Event{
 			"PodCliqueSet/alpha-pcs": {
 				{Type: "Normal", Kind: "PodCliqueSet", Reason: "Scaled", Age: "5m", From: "controller", Message: "Event 1", Parent: "alpha-pcs", Timestamp: time.Now().Add(-5 * time.Minute)},
 				{Type: "Warning", Kind: "PodCliqueSet", Reason: "NotReady", Age: "3m", From: "controller", Message: "Event 2", Parent: "alpha-pcs", Timestamp: time.Now().Add(-3 * time.Minute)},
@@ -1116,12 +1116,12 @@ func TestC12_InactivePaneCursorStability(t *testing.T) {
 		eventsCursorBefore := m.eventsTable.Cursor()
 		m = sendKey(m, tea.KeyTab) // back to resources
 
-		if m.activePane != data.ResourcesPane {
+		if m.activePane != clusterstate.ResourcesPane {
 			t.Fatalf("expected ResourcesPane, got %d", m.activePane)
 		}
 
 		// Cache update
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			for i := range snap.PodCliqueSets {
 				if snap.PodCliqueSets[i].Name == "alpha-pcs" {
 					snap.PodCliqueSets[i].Ready = "2/3"
@@ -1153,12 +1153,12 @@ func TestC12_InactivePaneCursorStability(t *testing.T) {
 		assertTopologyPodCursorOnName(t, m, "pod-b")
 		m = sendKey(m, tea.KeyTab) // back to domains
 
-		if m.activePane != data.TopologyDomainsPane {
-			t.Fatalf("expected TopologyDomainsPane, got %s", data.PaneName(m.activePane))
+		if m.activePane != clusterstate.TopologyDomainsPane {
+			t.Fatalf("expected TopologyDomainsPane, got %s", clusterstate.PaneName(m.activePane))
 		}
 
 		// Cache update — should preserve pods cursor by name
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			for i := range snap.TopologyViewData.Pods {
 				if snap.TopologyViewData.Pods[i].Name == "pod-a" {
 					snap.TopologyViewData.Pods[i].Phase = "Pending"
@@ -1179,12 +1179,12 @@ func TestC12_InactivePaneCursorStability(t *testing.T) {
 
 		// Switch to pods pane (now domains is inactive)
 		m = sendKey(m, tea.KeyTab)
-		if m.activePane != data.TopologyPodsPane {
-			t.Fatalf("expected TopologyPodsPane, got %s", data.PaneName(m.activePane))
+		if m.activePane != clusterstate.TopologyPodsPane {
+			t.Fatalf("expected TopologyPodsPane, got %s", clusterstate.PaneName(m.activePane))
 		}
 
 		// Cache update
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.TopologyViewData.NodeLabels["node-01"]["topology.kubernetes.io/rack"] = "rack-01-updated"
 		})
 
@@ -1206,8 +1206,8 @@ func TestC13_CacheUpdateWithEmptyData(t *testing.T) {
 		assertCursorOnName(t, m, "beta-pcs")
 
 		// Cache update: empty PodCliqueSets
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.PodCliqueSets = []data.Resource{}
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.PodCliqueSets = []clusterstate.Resource{}
 		})
 
 		// Should not panic, cursor should be valid
@@ -1229,7 +1229,7 @@ func TestC13_CacheUpdateWithEmptyData(t *testing.T) {
 		}
 
 		// Cache update: empty NodeLabels
-		m = topologyCacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = topologyCacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			snap.TopologyViewData.NodeLabels = map[string]map[string]string{}
 		})
 
@@ -1248,8 +1248,8 @@ func TestC13_CacheUpdateWithEmptyData(t *testing.T) {
 		m = sendKey(m, tea.KeyEnter) // alpha-pcs → PodCliqueSetReplicaView
 		m = sendKey(m, tea.KeyDown)  // standalone PodClique
 		m = sendKey(m, tea.KeyEnter) // → PodCliqueView
-		if m.viewState.ViewType != data.PodCliqueView {
-			t.Fatalf("expected PodCliqueView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		if m.viewState.ViewType != clusterstate.PodCliqueView {
+			t.Fatalf("expected PodCliqueView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 		}
 
 		rows := m.resourcesTable.Rows()
@@ -1258,8 +1258,8 @@ func TestC13_CacheUpdateWithEmptyData(t *testing.T) {
 		}
 
 		// Cache update: empty pods for the current PodClique
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
-			snap.PodsByPodClique["alpha-pcs-0-standalone-pc"] = []data.Resource{}
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.PodsByPodClique["alpha-pcs-0-standalone-pc"] = []clusterstate.Resource{}
 		})
 
 		// Should not panic, table should be empty
@@ -1295,7 +1295,7 @@ func TestC14_RapidSuccessiveCacheUpdates(t *testing.T) {
 
 		// Second update: add a new PCS
 		snap = mc.Snapshot()
-		snap.PodCliqueSets = append(snap.PodCliqueSets, data.Resource{
+		snap.PodCliqueSets = append(snap.PodCliqueSets, clusterstate.Resource{
 			Name: "delta-pcs", Type: "PodCliqueSet", Namespace: "prod", Ready: "5/5", Scheduled: "5/5", Topology: "N/A",
 		})
 		mc.SetSnapshot(snap)
@@ -1341,8 +1341,8 @@ func TestC14_RapidSuccessiveCacheUpdates(t *testing.T) {
 
 		// Navigate to PodCliqueSetReplicaView for alpha-pcs (single replica skip)
 		m = sendKey(m, tea.KeyEnter)
-		if m.viewState.ViewType != data.PodCliqueSetReplicaView {
-			t.Fatalf("expected PodCliqueSetReplicaView, got %s", data.ViewTypeName(m.viewState.ViewType))
+		if m.viewState.ViewType != clusterstate.PodCliqueSetReplicaView {
+			t.Fatalf("expected PodCliqueSetReplicaView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 		}
 
 		// Cursor should be on first row: alpha-pcs-0-sg-prefill
@@ -1358,7 +1358,7 @@ func TestC14_RapidSuccessiveCacheUpdates(t *testing.T) {
 		// Cache update: reverse the order of PodCliques and ScalingGroups.
 		// This simulates what happens when informer store List() returns
 		// items in a different map iteration order.
-		m = cacheUpdate(m, mc, func(snap *data.CacheSnapshot) {
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
 			pcs := snap.PodCliquesByReplica["alpha-pcs/0"]
 			if len(pcs) >= 2 {
 				// Reverse slice

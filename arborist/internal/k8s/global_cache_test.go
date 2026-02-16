@@ -399,22 +399,22 @@ func TestInformerGlobalCache_RebuildSnapshot(t *testing.T) {
 	}
 
 	// Verify node GPU products
-	if snap.NodeGPUProducts["node-1"] != "H100" {
-		t.Errorf("node GPU product = %q, want %q", snap.NodeGPUProducts["node-1"], "H100")
+	if snap.TopologyViewData.NodeGPUProducts["node-1"] != "H100" {
+		t.Errorf("node GPU product = %q, want %q", snap.TopologyViewData.NodeGPUProducts["node-1"], "H100")
 	}
 
 	// Verify node GPU capacity
-	if snap.NodeGPUCapacity["node-1"] != 8 {
-		t.Errorf("node GPU capacity = %d, want 8", snap.NodeGPUCapacity["node-1"])
+	if snap.TopologyViewData.NodeGPUCapacity["node-1"] != 8 {
+		t.Errorf("node GPU capacity = %d, want 8", snap.TopologyViewData.NodeGPUCapacity["node-1"])
 	}
 
 	// Verify node labels (filtered to topology keys)
-	if _, ok := snap.NodeLabels["node-1"]; !ok {
+	if _, ok := snap.TopologyViewData.NodeLabels["node-1"]; !ok {
 		t.Error("NodeLabels missing 'node-1'")
 	}
 
 	// Verify GPU summary is built
-	if snap.GPUSummary == nil {
+	if snap.TopologyViewData.GPUSummary == nil {
 		t.Error("GPUSummary should not be nil")
 	}
 
@@ -720,7 +720,8 @@ func TestIsPCSGReplicaScheduled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isPCSGReplicaScheduled(tt.pcs, tt.sched)
+			sc := &schedulingContext{scheduledByPodClique: tt.sched}
+			got := sc.isPCSGReplicaScheduled(tt.pcs)
 			if got != tt.expected {
 				t.Errorf("isPCSGReplicaScheduled() = %v, want %v", got, tt.expected)
 			}
@@ -791,7 +792,11 @@ func TestComputePCSGScheduledReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computePCSGScheduledReplicas(tt.pcsg, tt.sched, tt.pcObjs)
+			sc := &schedulingContext{
+				scheduledByPodClique:   tt.sched,
+				pcObjectsByPCSGReplica: tt.pcObjs,
+			}
+			got := sc.pcsgScheduledReplicas(tt.pcsg)
 			if got != tt.expected {
 				t.Errorf("computePCSGScheduledReplicas() = %d, want %d", got, tt.expected)
 			}
@@ -899,7 +904,13 @@ func TestComputePCSScheduledReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computePCSScheduledReplicas(tt.pcs, tt.sched, tt.pcObjsByPCSG, tt.standalonePCs, tt.pcsgsByReplica)
+			sc := &schedulingContext{
+				scheduledByPodClique:   tt.sched,
+				pcObjectsByPCSGReplica: tt.pcObjsByPCSG,
+				standalonePCObjects:    tt.standalonePCs,
+				pcsgsByReplica:         tt.pcsgsByReplica,
+			}
+			got := sc.pcsScheduledReplicas(tt.pcs)
 			if got != tt.expected {
 				t.Errorf("computePCSScheduledReplicas() = %d, want %d", got, tt.expected)
 			}
@@ -1283,14 +1294,14 @@ func TestInformerGlobalCache_NamespaceScoped_NodesStillVisible(t *testing.T) {
 	}
 
 	// Nodes are cluster-scoped — should still be visible
-	if _, ok := snap.NodeLabels["node-1"]; !ok {
+	if _, ok := snap.TopologyViewData.NodeLabels["node-1"]; !ok {
 		t.Error("NodeLabels should still contain node-1 under namespace scoping")
 	}
-	if snap.NodeGPUProducts["node-1"] != "H100" {
-		t.Errorf("NodeGPUProducts[node-1] = %q, want %q", snap.NodeGPUProducts["node-1"], "H100")
+	if snap.TopologyViewData.NodeGPUProducts["node-1"] != "H100" {
+		t.Errorf("NodeGPUProducts[node-1] = %q, want %q", snap.TopologyViewData.NodeGPUProducts["node-1"], "H100")
 	}
-	if snap.NodeGPUCapacity["node-1"] != 8 {
-		t.Errorf("NodeGPUCapacity[node-1] = %d, want 8", snap.NodeGPUCapacity["node-1"])
+	if snap.TopologyViewData.NodeGPUCapacity["node-1"] != 8 {
+		t.Errorf("NodeGPUCapacity[node-1] = %d, want 8", snap.TopologyViewData.NodeGPUCapacity["node-1"])
 	}
 }
 
@@ -1364,7 +1375,7 @@ func TestInformerGlobalCache_NamespaceScoped_FullHierarchy(t *testing.T) {
 	}
 
 	// Nodes (cluster-scoped, always visible)
-	if _, ok := snap.NodeLabels["node-1"]; !ok {
+	if _, ok := snap.TopologyViewData.NodeLabels["node-1"]; !ok {
 		t.Error("NodeLabels missing node-1")
 	}
 
@@ -1374,7 +1385,7 @@ func TestInformerGlobalCache_NamespaceScoped_FullHierarchy(t *testing.T) {
 	}
 
 	// GPU summary built from scoped pods only
-	if snap.GPUSummary == nil {
+	if snap.TopologyViewData.GPUSummary == nil {
 		t.Error("GPUSummary should not be nil")
 	}
 

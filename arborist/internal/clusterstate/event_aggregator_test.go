@@ -14,7 +14,7 @@
 // limitations under the License.
 // */
 
-package data
+package clusterstate
 
 import (
 	"testing"
@@ -27,52 +27,60 @@ func TestGetEventsForPCS_ScopedToPCS(t *testing.T) {
 	now := time.Now()
 
 	snapshot := &CacheSnapshot{
-		// Two PCSs exist: "pcs-a" and "pcs-b"
-		PodCliqueSets: []Resource{
-			{Name: "pcs-a", Type: "PodCliqueSet"},
-			{Name: "pcs-b", Type: "PodCliqueSet"},
-		},
-
-		// pcs-a has a PCSG "pcsg-a" under replica 0
-		ScalingGroupsByReplica: map[string][]Resource{
-			"pcs-a/0": {
-				{Name: "pcsg-a", Type: "PodCliqueScalingGroup"},
+		HierarchyData: HierarchyData{
+			// Two PCSs exist: "pcs-a" and "pcs-b"
+			PodCliqueSets: []Resource{
+				{Name: "pcs-a", Type: "PodCliqueSet"},
+				{Name: "pcs-b", Type: "PodCliqueSet"},
 			},
-		},
 
-		// Standalone PodCliques per replica
-		PodCliquesByReplica: map[string][]Resource{
-			"pcs-b/0": {
-				{Name: "pc-b-standalone", Type: "PodClique"},
+			// Replica indexes per PCS
+			ReplicaIndexesByPCS: map[string][]string{
+				"pcs-a": {"0"},
+				"pcs-b": {"0"},
 			},
-		},
 
-		// PodCliques within PCSGs
-		PodCliquesByPCSG: map[string][]Resource{
-			"pcsg-a": {
-				{Name: "pc-a-in-pcsg", Type: "PodClique"},
+			// pcs-a has a PCSG "pcsg-a" under replica 0
+			ScalingGroupsByReplica: map[string][]Resource{
+				"pcs-a/0": {
+					{Name: "pcsg-a", Type: "PodCliqueScalingGroup"},
+				},
 			},
-		},
 
-		// PodCliques within PCSG replicas
-		PodCliquesByPCSGReplica: map[string][]Resource{
-			"pcsg-a/0": {
-				{Name: "pc-a-in-pcsg-replica", Type: "PodClique"},
+			// Standalone PodCliques per replica
+			PodCliquesByReplica: map[string][]Resource{
+				"pcs-b/0": {
+					{Name: "pc-b-standalone", Type: "PodClique"},
+				},
 			},
-		},
 
-		// Pods
-		PodsByPodClique: map[string][]Resource{
-			"pc-a-in-pcsg":         {{Name: "pod-a-1", Type: "Pod"}},
-			"pc-a-in-pcsg-replica": {{Name: "pod-a-2", Type: "Pod"}},
-			"pc-b-standalone":      {{Name: "pod-b-1", Type: "Pod"}},
-		},
+			// PodCliques within PCSGs
+			PodCliquesByPCSG: map[string][]Resource{
+				"pcsg-a": {
+					{Name: "pc-a-in-pcsg", Type: "PodClique"},
+				},
+			},
 
-		// Pod infos with part-of labels
-		PodInfos: map[string]CachedPodInfo{
-			"pod-a-1": {Labels: map[string]string{"app.kubernetes.io/part-of": "pcs-a"}},
-			"pod-a-2": {Labels: map[string]string{"app.kubernetes.io/part-of": "pcs-a"}},
-			"pod-b-1": {Labels: map[string]string{"app.kubernetes.io/part-of": "pcs-b"}},
+			// PodCliques within PCSG replicas
+			PodCliquesByPCSGReplica: map[string][]Resource{
+				"pcsg-a/0": {
+					{Name: "pc-a-in-pcsg-replica", Type: "PodClique"},
+				},
+			},
+
+			// Pods
+			PodsByPodClique: map[string][]Resource{
+				"pc-a-in-pcsg":         {{Name: "pod-a-1", Type: "Pod"}},
+				"pc-a-in-pcsg-replica": {{Name: "pod-a-2", Type: "Pod"}},
+				"pc-b-standalone":      {{Name: "pod-b-1", Type: "Pod"}},
+			},
+
+			// Pod infos with part-of labels
+			PodInfos: map[string]CachedPodInfo{
+				"pod-a-1": {Labels: map[string]string{"app.kubernetes.io/part-of": "pcs-a"}},
+				"pod-a-2": {Labels: map[string]string{"app.kubernetes.io/part-of": "pcs-a"}},
+				"pod-b-1": {Labels: map[string]string{"app.kubernetes.io/part-of": "pcs-b"}},
+			},
 		},
 
 		// Events indexed by object
@@ -176,31 +184,33 @@ func TestGetEventsForReplica(t *testing.T) {
 	now := time.Now()
 
 	snapshot := &CacheSnapshot{
-		ScalingGroupsByReplica: map[string][]Resource{
-			"pcs-a/0": {
-				{Name: "pcsg-a-0", Type: "PodCliqueScalingGroup"},
+		HierarchyData: HierarchyData{
+			ScalingGroupsByReplica: map[string][]Resource{
+				"pcs-a/0": {
+					{Name: "pcsg-a-0", Type: "PodCliqueScalingGroup"},
+				},
+				"pcs-a/1": {
+					{Name: "pcsg-a-1", Type: "PodCliqueScalingGroup"},
+				},
 			},
-			"pcs-a/1": {
-				{Name: "pcsg-a-1", Type: "PodCliqueScalingGroup"},
+			PodCliquesByReplica: map[string][]Resource{
+				"pcs-a/0": {
+					{Name: "pc-standalone-0", Type: "PodClique"},
+				},
 			},
-		},
-		PodCliquesByReplica: map[string][]Resource{
-			"pcs-a/0": {
-				{Name: "pc-standalone-0", Type: "PodClique"},
+			PodCliquesByPCSG: map[string][]Resource{
+				"pcsg-a-0": {
+					{Name: "pc-in-pcsg-0", Type: "PodClique"},
+				},
+				"pcsg-a-1": {
+					{Name: "pc-in-pcsg-1", Type: "PodClique"},
+				},
 			},
-		},
-		PodCliquesByPCSG: map[string][]Resource{
-			"pcsg-a-0": {
-				{Name: "pc-in-pcsg-0", Type: "PodClique"},
+			PodsByPodClique: map[string][]Resource{
+				"pc-in-pcsg-0":    {{Name: "pod-0a", Type: "Pod"}},
+				"pc-standalone-0": {{Name: "pod-0b", Type: "Pod"}},
+				"pc-in-pcsg-1":    {{Name: "pod-1a", Type: "Pod"}},
 			},
-			"pcsg-a-1": {
-				{Name: "pc-in-pcsg-1", Type: "PodClique"},
-			},
-		},
-		PodsByPodClique: map[string][]Resource{
-			"pc-in-pcsg-0":    {{Name: "pod-0a", Type: "Pod"}},
-			"pc-standalone-0": {{Name: "pod-0b", Type: "Pod"}},
-			"pc-in-pcsg-1":    {{Name: "pod-1a", Type: "Pod"}},
 		},
 		EventsByObject: map[string][]Event{
 			"PodCliqueScalingGroup/pcsg-a-0": {{Type: "Normal", Kind: "PodCliqueScalingGroup", Reason: "Scaled", Message: "pcsg-a-0 scaled", Parent: "pcsg-a-0", Timestamp: now}},
@@ -294,28 +304,30 @@ func TestGetEventsForPCSG(t *testing.T) {
 	now := time.Now()
 
 	snapshot := &CacheSnapshot{
-		PodCliquesByPCSG: map[string][]Resource{
-			"pcsg-a": {
-				{Name: "pc-a-1", Type: "PodClique"},
-				{Name: "pc-a-2", Type: "PodClique"},
+		HierarchyData: HierarchyData{
+			PodCliquesByPCSG: map[string][]Resource{
+				"pcsg-a": {
+					{Name: "pc-a-1", Type: "PodClique"},
+					{Name: "pc-a-2", Type: "PodClique"},
+				},
+				"pcsg-b": {
+					{Name: "pc-b-1", Type: "PodClique"},
+				},
 			},
-			"pcsg-b": {
-				{Name: "pc-b-1", Type: "PodClique"},
+			PodCliquesByPCSGReplica: map[string][]Resource{
+				"pcsg-a/0": {
+					{Name: "pc-a-r0", Type: "PodClique"},
+				},
+				"pcsg-b/0": {
+					{Name: "pc-b-r0", Type: "PodClique"},
+				},
 			},
-		},
-		PodCliquesByPCSGReplica: map[string][]Resource{
-			"pcsg-a/0": {
-				{Name: "pc-a-r0", Type: "PodClique"},
+			PodsByPodClique: map[string][]Resource{
+				"pc-a-1":  {{Name: "pod-a-1", Type: "Pod"}},
+				"pc-a-2":  {{Name: "pod-a-2", Type: "Pod"}},
+				"pc-a-r0": {{Name: "pod-a-r0", Type: "Pod"}},
+				"pc-b-1":  {{Name: "pod-b-1", Type: "Pod"}},
 			},
-			"pcsg-b/0": {
-				{Name: "pc-b-r0", Type: "PodClique"},
-			},
-		},
-		PodsByPodClique: map[string][]Resource{
-			"pc-a-1":  {{Name: "pod-a-1", Type: "Pod"}},
-			"pc-a-2":  {{Name: "pod-a-2", Type: "Pod"}},
-			"pc-a-r0": {{Name: "pod-a-r0", Type: "Pod"}},
-			"pc-b-1":  {{Name: "pod-b-1", Type: "Pod"}},
 		},
 		EventsByObject: map[string][]Event{
 			"PodCliqueScalingGroup/pcsg-a": {{Type: "Normal", Reason: "Scaled", Message: "pcsg-a scaled", Parent: "pcsg-a", Timestamp: now}},
@@ -386,19 +398,21 @@ func TestGetEventsForPCSGReplica(t *testing.T) {
 	now := time.Now()
 
 	snapshot := &CacheSnapshot{
-		PodCliquesByPCSGReplica: map[string][]Resource{
-			"pcsg-a/0": {
-				{Name: "pc-r0-a", Type: "PodClique"},
-				{Name: "pc-r0-b", Type: "PodClique"},
+		HierarchyData: HierarchyData{
+			PodCliquesByPCSGReplica: map[string][]Resource{
+				"pcsg-a/0": {
+					{Name: "pc-r0-a", Type: "PodClique"},
+					{Name: "pc-r0-b", Type: "PodClique"},
+				},
+				"pcsg-a/1": {
+					{Name: "pc-r1-a", Type: "PodClique"},
+				},
 			},
-			"pcsg-a/1": {
-				{Name: "pc-r1-a", Type: "PodClique"},
+			PodsByPodClique: map[string][]Resource{
+				"pc-r0-a": {{Name: "pod-r0a", Type: "Pod"}},
+				"pc-r0-b": {{Name: "pod-r0b", Type: "Pod"}},
+				"pc-r1-a": {{Name: "pod-r1a", Type: "Pod"}},
 			},
-		},
-		PodsByPodClique: map[string][]Resource{
-			"pc-r0-a": {{Name: "pod-r0a", Type: "Pod"}},
-			"pc-r0-b": {{Name: "pod-r0b", Type: "Pod"}},
-			"pc-r1-a": {{Name: "pod-r1a", Type: "Pod"}},
 		},
 		EventsByObject: map[string][]Event{
 			"PodClique/pc-r0-a": {{Type: "Normal", Reason: "Created", Message: "pc-r0-a created", Parent: "pc-r0-a", Timestamp: now}},
@@ -462,13 +476,15 @@ func TestGetEventsForPodClique(t *testing.T) {
 	now := time.Now()
 
 	snapshot := &CacheSnapshot{
-		PodsByPodClique: map[string][]Resource{
-			"pc-a": {
-				{Name: "pod-a-1", Type: "Pod"},
-				{Name: "pod-a-2", Type: "Pod"},
-			},
-			"pc-b": {
-				{Name: "pod-b-1", Type: "Pod"},
+		HierarchyData: HierarchyData{
+			PodsByPodClique: map[string][]Resource{
+				"pc-a": {
+					{Name: "pod-a-1", Type: "Pod"},
+					{Name: "pod-a-2", Type: "Pod"},
+				},
+				"pc-b": {
+					{Name: "pod-b-1", Type: "Pod"},
+				},
 			},
 		},
 		EventsByObject: map[string][]Event{
@@ -537,39 +553,6 @@ func TestGetEventsForPodClique(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// FormatAge (data package version)
-// ---------------------------------------------------------------------------
-
-func TestFormatAge(t *testing.T) {
-	now := time.Now()
-
-	tests := []struct {
-		name string
-		t    time.Time
-		want string
-	}{
-		{name: "zero time", t: time.Time{}, want: "unknown"},
-		{name: "5 seconds ago", t: now.Add(-5 * time.Second), want: "5s"},
-		{name: "59 seconds ago", t: now.Add(-59 * time.Second), want: "59s"},
-		{name: "1 minute ago", t: now.Add(-1 * time.Minute), want: "1m"},
-		{name: "59 minutes ago", t: now.Add(-59 * time.Minute), want: "59m"},
-		{name: "1 hour ago", t: now.Add(-1 * time.Hour), want: "1h"},
-		{name: "23 hours ago", t: now.Add(-23 * time.Hour), want: "23h"},
-		{name: "1 day ago", t: now.Add(-24 * time.Hour), want: "1d"},
-		{name: "7 days ago", t: now.Add(-7 * 24 * time.Hour), want: "7d"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := FormatAge(tt.t)
-			if got != tt.want {
-				t.Errorf("FormatAge() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // addUniqueEvents
 // ---------------------------------------------------------------------------
 
@@ -577,7 +560,7 @@ func TestAddUniqueEvents(t *testing.T) {
 	now := time.Now()
 
 	t.Run("deduplicates by key", func(t *testing.T) {
-		seen := make(map[string]bool)
+		seen := make(map[eventKey]bool)
 		var result []Event
 
 		events := []Event{
@@ -592,7 +575,7 @@ func TestAddUniqueEvents(t *testing.T) {
 	})
 
 	t.Run("different messages are not deduplicated", func(t *testing.T) {
-		seen := make(map[string]bool)
+		seen := make(map[eventKey]bool)
 		var result []Event
 
 		events := []Event{
@@ -607,7 +590,7 @@ func TestAddUniqueEvents(t *testing.T) {
 	})
 
 	t.Run("nil events is safe", func(t *testing.T) {
-		seen := make(map[string]bool)
+		seen := make(map[eventKey]bool)
 		var result []Event
 
 		addUniqueEvents(&result, nil, seen)
@@ -617,7 +600,7 @@ func TestAddUniqueEvents(t *testing.T) {
 	})
 
 	t.Run("accumulates across multiple calls", func(t *testing.T) {
-		seen := make(map[string]bool)
+		seen := make(map[eventKey]bool)
 		var result []Event
 
 		batch1 := []Event{

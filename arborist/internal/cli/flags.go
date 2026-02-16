@@ -22,6 +22,12 @@ import (
 	"github.com/ai-dynamo/grove/arborist/internal/k8s"
 )
 
+// NamespaceFlags holds the common namespace-scoping flags shared by all CLI commands.
+type NamespaceFlags struct {
+	Namespace     string `short:"n" help:"Kubernetes namespace (defaults to current kubeconfig context namespace)."`
+	AllNamespaces bool   `short:"A" help:"Show resources across all namespaces."`
+}
+
 // resolveNamespace returns the effective namespace for a CLI command.
 // If allNamespaces is true, returns "" (all namespaces).
 // If ns is non-empty, returns it directly.
@@ -38,4 +44,18 @@ func resolveNamespace(ns string, allNamespaces bool) (string, error) {
 		return "", fmt.Errorf("failed to resolve namespace: %w", err)
 	}
 	return resolved, nil
+}
+
+// defaultToAllNamespaces returns the effective namespace for commands that
+// default to all-namespaces when neither -n nor -A is given (e.g. the TUI).
+// Returns (namespace, allNamespaces).
+func defaultToAllNamespaces(ns string, allNamespaces bool) (string, bool) {
+	if allNamespaces {
+		return "", true
+	}
+	if ns != "" {
+		return ns, false
+	}
+	// Neither flag given — default to all namespaces
+	return "", true
 }

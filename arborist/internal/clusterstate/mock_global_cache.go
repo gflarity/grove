@@ -14,7 +14,7 @@
 // limitations under the License.
 // */
 
-package data
+package clusterstate
 
 import (
 	"context"
@@ -51,19 +51,18 @@ func NewMockGlobalCache() *MockGlobalCache {
 		PodLogs:   make(map[string]string),
 		Errors:    make(map[string]error),
 		snapshot: &CacheSnapshot{
-			PodCliqueSets:          []Resource{},
-			ReplicaIndexesByPCS:    make(map[string][]string),
-			ScalingGroupsByReplica: make(map[string][]Resource),
-			PodCliquesByReplica:    make(map[string][]Resource),
-			ReplicaIndexesByPCSG:   make(map[string][]string),
-			PodCliquesByPCSG:       make(map[string][]Resource),
-			PodCliquesByPCSGReplica: make(map[string][]Resource),
-			PodsByPodClique:        make(map[string][]Resource),
-			EventsByObject:         make(map[string][]Event),
-			NodeLabels:             make(map[string]map[string]string),
-			PodInfos:               make(map[string]CachedPodInfo),
-			NodeGPUProducts:        make(map[string]string),
-			NodeGPUCapacity:        make(map[string]int64),
+			HierarchyData: HierarchyData{
+				PodCliqueSets:           []Resource{},
+				ReplicaIndexesByPCS:     make(map[string][]string),
+				ScalingGroupsByReplica:  make(map[string][]Resource),
+				PodCliquesByReplica:     make(map[string][]Resource),
+				ReplicaIndexesByPCSG:    make(map[string][]string),
+				PodCliquesByPCSG:        make(map[string][]Resource),
+				PodCliquesByPCSGReplica: make(map[string][]Resource),
+				PodsByPodClique:         make(map[string][]Resource),
+				PodInfos:                make(map[string]CachedPodInfo),
+			},
+			EventsByObject: make(map[string][]Event),
 		},
 	}
 }

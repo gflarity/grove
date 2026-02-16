@@ -14,7 +14,7 @@
 // limitations under the License.
 // */
 
-package data
+package clusterstate
 
 import (
 	"fmt"
@@ -56,6 +56,37 @@ type ViewState struct {
 	SelectedPCSGReplicaIndex string // The PCSG replica index (e.g., "0", "1", "2")
 	SelectedPodClique        string
 	SelectedPod              string
+}
+
+// ClearBelow resets all selection fields below the given hierarchy level.
+// Each level maps to the field selected when entering it:
+//
+//	ForestView                      → SelectedPodCliqueSet
+//	PodCliqueSetView                → SelectedReplicaIndex
+//	PodCliqueSetReplicaView         → SelectedScalingGroup
+//	PodCliqueScalingGroupView       → SelectedPCSGReplicaIndex
+//	PodCliqueScalingGroupReplicaView→ SelectedPodClique
+//	PodCliqueView                   → SelectedPod
+func (vs *ViewState) ClearBelow(level ViewType) {
+	switch {
+	case level <= ForestView:
+		vs.SelectedPodCliqueSet = ""
+		fallthrough
+	case level <= PodCliqueSetView:
+		vs.SelectedReplicaIndex = ""
+		fallthrough
+	case level <= PodCliqueSetReplicaView:
+		vs.SelectedScalingGroup = ""
+		fallthrough
+	case level <= PodCliqueScalingGroupView:
+		vs.SelectedPCSGReplicaIndex = ""
+		fallthrough
+	case level <= PodCliqueScalingGroupReplicaView:
+		vs.SelectedPodClique = ""
+		fallthrough
+	case level <= PodCliqueView:
+		vs.SelectedPod = ""
+	}
 }
 
 // Resource represents a generic resource item.

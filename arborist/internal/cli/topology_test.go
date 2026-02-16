@@ -21,13 +21,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-dynamo/grove/arborist/internal/k8s"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 )
 
 func TestGroupPodsByTopology(t *testing.T) {
 	tests := []struct {
 		name           string
-		displayPods    []k8s.TopologyCLIPod
+		displayPods    []clusterstate.TopologyPodInput
 		nodeLabels     map[string]map[string]string
 		labelKey       string
 		nodeGPUProducts map[string]string
@@ -36,7 +36,7 @@ func TestGroupPodsByTopology(t *testing.T) {
 	}{
 		{
 			name: "pods across two racks",
-			displayPods: []k8s.TopologyCLIPod{
+			displayPods: []clusterstate.TopologyPodInput{
 				{Name: "foo-0-worker-0", NodeName: "node-1", Labels: map[string]string{}},
 				{Name: "foo-0-worker-1", NodeName: "node-2", Labels: map[string]string{}},
 				{Name: "foo-0-worker-2", NodeName: "node-3", Labels: map[string]string{}},
@@ -56,7 +56,7 @@ func TestGroupPodsByTopology(t *testing.T) {
 		},
 		{
 			name: "unscheduled pods without GPU are omitted",
-			displayPods: []k8s.TopologyCLIPod{
+			displayPods: []clusterstate.TopologyPodInput{
 				{Name: "foo-0-worker-0", NodeName: "node-1", Labels: map[string]string{}},
 				{Name: "foo-0-worker-1", NodeName: "", Labels: map[string]string{}},
 			},
@@ -72,7 +72,7 @@ func TestGroupPodsByTopology(t *testing.T) {
 		},
 		{
 			name: "all pods unscheduled yields no groups",
-			displayPods: []k8s.TopologyCLIPod{
+			displayPods: []clusterstate.TopologyPodInput{
 				{Name: "foo-0-worker-0", NodeName: "", Labels: map[string]string{}},
 				{Name: "foo-0-worker-1", NodeName: "", Labels: map[string]string{}},
 			},
@@ -84,7 +84,7 @@ func TestGroupPodsByTopology(t *testing.T) {
 		},
 		{
 			name: "node missing topology label omits pod",
-			displayPods: []k8s.TopologyCLIPod{
+			displayPods: []clusterstate.TopologyPodInput{
 				{Name: "foo-0-worker-0", NodeName: "node-1", Labels: map[string]string{}},
 			},
 			nodeLabels: map[string]map[string]string{
@@ -97,7 +97,7 @@ func TestGroupPodsByTopology(t *testing.T) {
 		},
 		{
 			name:            "no pods",
-			displayPods:     []k8s.TopologyCLIPod{},
+			displayPods:     []clusterstate.TopologyPodInput{},
 			nodeLabels:      map[string]map[string]string{},
 			labelKey:        "topology.io/rack",
 			nodeGPUProducts: map[string]string{},
@@ -106,7 +106,7 @@ func TestGroupPodsByTopology(t *testing.T) {
 		},
 		{
 			name: "empty domain values shown from node labels",
-			displayPods: []k8s.TopologyCLIPod{
+			displayPods: []clusterstate.TopologyPodInput{
 				{Name: "foo-0-worker-0", NodeName: "node-1", Labels: map[string]string{}},
 			},
 			nodeLabels: map[string]map[string]string{
@@ -166,7 +166,7 @@ func TestGroupPodsByTopology(t *testing.T) {
 }
 
 func TestGroupPodsByTopology_SortOrder(t *testing.T) {
-	displayPods := []k8s.TopologyCLIPod{
+	displayPods := []clusterstate.TopologyPodInput{
 		{Name: "pod-c", NodeName: "node-2", Labels: map[string]string{}},
 		{Name: "pod-a", NodeName: "node-1", Labels: map[string]string{}},
 		{Name: "pod-b", NodeName: "node-1", Labels: map[string]string{}},
@@ -373,7 +373,7 @@ func TestPrintTopologyTree(t *testing.T) {
 // =====================
 
 func TestGroupPodsByTopology_GPUInfo(t *testing.T) {
-	displayPods := []k8s.TopologyCLIPod{
+	displayPods := []clusterstate.TopologyPodInput{
 		{Name: "gpu-pod-1", NodeName: "node-1", Labels: map[string]string{}, GPURequests: 2},
 		{Name: "gpu-pod-pending", NodeName: "", Labels: map[string]string{}, GPURequests: 4},
 		{Name: "non-gpu-pod", NodeName: "node-1", Labels: map[string]string{}, GPURequests: 0},
@@ -451,7 +451,7 @@ func TestComputeThreeWayGPUUsage(t *testing.T) {
 		"node-3": 4,
 	}
 
-	allPods := []k8s.TopologyCLIPod{
+	allPods := []clusterstate.TopologyPodInput{
 		// "this" pods (PCS=my-pcs)
 		{Name: "my-pcs-0", NodeName: "node-1", Labels: map[string]string{"app.kubernetes.io/part-of": "my-pcs"}, GPURequests: 2},
 		{Name: "my-pcs-1", NodeName: "node-2", Labels: map[string]string{"app.kubernetes.io/part-of": "my-pcs"}, GPURequests: 4},
@@ -465,11 +465,7 @@ func TestComputeThreeWayGPUUsage(t *testing.T) {
 		{Name: "no-gpu", NodeName: "node-1", Labels: map[string]string{"app.kubernetes.io/part-of": "my-pcs"}, GPURequests: 0},
 	}
 
-	isDisplayPod := func(pod *k8s.TopologyCLIPod) bool {
-		return pod.Labels["app.kubernetes.io/part-of"] == "my-pcs"
-	}
-
-	result := computeThreeWayGPUUsage("topology.io/rack", nodeLabels, nodeGPUProducts, nodeGPUCapacity, allPods, isDisplayPod)
+	result := computeThreeWayGPUUsage("topology.io/rack", nodeLabels, nodeGPUProducts, nodeGPUCapacity, allPods, "my-pcs")
 
 	// rack-0: H200 nodes with 16 total
 	rack0 := result["rack-0"]
@@ -528,16 +524,12 @@ func TestComputeThreeWayGPUUsage_MixedTypes(t *testing.T) {
 		"node-2": 4,
 	}
 
-	allPods := []k8s.TopologyCLIPod{
+	allPods := []clusterstate.TopologyPodInput{
 		{Name: "pod-1", NodeName: "node-1", Labels: map[string]string{"app.kubernetes.io/part-of": "pcs"}, GPURequests: 3},
 		{Name: "pod-2", NodeName: "node-2", Labels: map[string]string{"app.kubernetes.io/part-of": "pcs"}, GPURequests: 2},
 	}
 
-	isDisplayPod := func(pod *k8s.TopologyCLIPod) bool {
-		return pod.Labels["app.kubernetes.io/part-of"] == "pcs"
-	}
-
-	result := computeThreeWayGPUUsage("topology.io/block", nodeLabels, nodeGPUProducts, nodeGPUCapacity, allPods, isDisplayPod)
+	result := computeThreeWayGPUUsage("topology.io/block", nodeLabels, nodeGPUProducts, nodeGPUCapacity, allPods, "pcs")
 
 	block0 := result["block-0"]
 	if len(block0) != 2 {
@@ -568,13 +560,11 @@ func TestComputeThreeWayGPUUsage_NoGPUNodes(t *testing.T) {
 	nodeGPUProducts := map[string]string{}
 	nodeGPUCapacity := map[string]int64{}
 
-	allPods := []k8s.TopologyCLIPod{
+	allPods := []clusterstate.TopologyPodInput{
 		{Name: "pod-1", NodeName: "node-1", Labels: map[string]string{"app.kubernetes.io/part-of": "pcs"}, GPURequests: 0},
 	}
 
-	isDisplayPod := func(pod *k8s.TopologyCLIPod) bool { return true }
-
-	result := computeThreeWayGPUUsage("topology.io/rack", nodeLabels, nodeGPUProducts, nodeGPUCapacity, allPods, isDisplayPod)
+	result := computeThreeWayGPUUsage("topology.io/rack", nodeLabels, nodeGPUProducts, nodeGPUCapacity, allPods, "")
 
 	if len(result) != 0 {
 		t.Errorf("expected no GPU entries for non-GPU nodes, got %d", len(result))
@@ -703,7 +693,7 @@ func TestPrintTopologyTree_NoUnscheduledWhenEmpty(t *testing.T) {
 }
 
 func TestFilterDisplayPods(t *testing.T) {
-	allPods := []k8s.TopologyCLIPod{
+	allPods := []clusterstate.TopologyPodInput{
 		{Name: "my-pcs-pod-1", Labels: map[string]string{"app.kubernetes.io/part-of": "my-pcs"}},
 		{Name: "my-pcs-pod-2", Labels: map[string]string{"app.kubernetes.io/part-of": "my-pcs"}},
 		{Name: "other-pcs-pod", Labels: map[string]string{"app.kubernetes.io/part-of": "other-pcs"}},
@@ -711,7 +701,7 @@ func TestFilterDisplayPods(t *testing.T) {
 	}
 
 	t.Run("specific PCS filter", func(t *testing.T) {
-		displayPods, pcsDisplay, isDisplayPod := filterDisplayPods(allPods, "my-pcs")
+		displayPods, pcsDisplay := filterDisplayPods(allPods, "my-pcs")
 
 		if pcsDisplay != "my-pcs" {
 			t.Errorf("expected pcsDisplay=my-pcs, got %q", pcsDisplay)
@@ -719,25 +709,15 @@ func TestFilterDisplayPods(t *testing.T) {
 		if len(displayPods) != 2 {
 			t.Errorf("expected 2 display pods, got %d", len(displayPods))
 		}
-
-		// isDisplayPod should return true for my-pcs pods
-		myPod := &k8s.TopologyCLIPod{Labels: map[string]string{"app.kubernetes.io/part-of": "my-pcs"}}
-		otherPod := &k8s.TopologyCLIPod{Labels: map[string]string{"app.kubernetes.io/part-of": "other-pcs"}}
-		noPod := &k8s.TopologyCLIPod{Labels: map[string]string{}}
-
-		if !isDisplayPod(myPod) {
-			t.Error("isDisplayPod should return true for my-pcs pod")
-		}
-		if isDisplayPod(otherPod) {
-			t.Error("isDisplayPod should return false for other-pcs pod")
-		}
-		if isDisplayPod(noPod) {
-			t.Error("isDisplayPod should return false for non-PCS pod")
+		for _, pod := range displayPods {
+			if pod.Labels["app.kubernetes.io/part-of"] != "my-pcs" {
+				t.Errorf("expected only my-pcs pods, got %q", pod.Name)
+			}
 		}
 	})
 
 	t.Run("no PCS filter (all PCS)", func(t *testing.T) {
-		displayPods, pcsDisplay, isDisplayPod := filterDisplayPods(allPods, "")
+		displayPods, pcsDisplay := filterDisplayPods(allPods, "")
 
 		if pcsDisplay != "all" {
 			t.Errorf("expected pcsDisplay=all, got %q", pcsDisplay)
@@ -745,16 +725,10 @@ func TestFilterDisplayPods(t *testing.T) {
 		if len(displayPods) != 3 { // my-pcs-pod-1, my-pcs-pod-2, other-pcs-pod
 			t.Errorf("expected 3 display pods, got %d", len(displayPods))
 		}
-
-		// isDisplayPod should return true for any PCS-managed pod
-		noPod := &k8s.TopologyCLIPod{Labels: map[string]string{}}
-		if isDisplayPod(noPod) {
-			t.Error("isDisplayPod should return false for non-PCS pod")
-		}
-
-		pcsPod := &k8s.TopologyCLIPod{Labels: map[string]string{"app.kubernetes.io/part-of": "any-pcs"}}
-		if !isDisplayPod(pcsPod) {
-			t.Error("isDisplayPod should return true for any PCS-managed pod")
+		for _, pod := range displayPods {
+			if pod.Labels["app.kubernetes.io/part-of"] == "" {
+				t.Errorf("non-PCS pod %q should not be included", pod.Name)
+			}
 		}
 	})
 }
@@ -876,13 +850,11 @@ func TestComputeThreeWayGPUUsage_FreeClamped(t *testing.T) {
 		"node-1": 2, // only 2 GPUs
 	}
 
-	allPods := []k8s.TopologyCLIPod{
+	allPods := []clusterstate.TopologyPodInput{
 		{Name: "pod-1", NodeName: "node-1", Labels: map[string]string{"app.kubernetes.io/part-of": "pcs"}, GPURequests: 3}, // overcommit
 	}
 
-	isDisplayPod := func(pod *k8s.TopologyCLIPod) bool { return true }
-
-	result := computeThreeWayGPUUsage("topology.io/rack", nodeLabels, nodeGPUProducts, nodeGPUCapacity, allPods, isDisplayPod)
+	result := computeThreeWayGPUUsage("topology.io/rack", nodeLabels, nodeGPUProducts, nodeGPUCapacity, allPods, "")
 
 	rack0 := result["rack-0"]
 	if len(rack0) != 1 {

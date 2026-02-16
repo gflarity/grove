@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -47,26 +47,34 @@ func (m Model) handleCacheUpdate(_ CacheUpdateMsg) (tea.Model, tea.Cmd) {
 
 // applySnapshot reads the latest snapshot from the cache and rebuilds all data structures.
 func (m *Model) applySnapshot() {
+	if !m.loadSnapshotData() {
+		return
+	}
+	m.rebuildUIFromData()
+}
+
+// loadSnapshotData reads the latest snapshot from the cache and extracts
+// topology data into model fields. Returns false when there is no snapshot
+// (i.e. the cache hasn't synced yet).
+func (m *Model) loadSnapshotData() bool {
 	snapshot := m.cache.Snapshot()
 	if snapshot == nil {
-		return
+		return false
 	}
 
 	m.cachedSnapshot = snapshot
 
 	// Extract topology view data
 	m.topologyViewData = snapshot.TopologyViewData
-	m.gpuSummary = snapshot.GPUSummary
-
-	// Rebuild forest data based on the active resource type
-	m.populateForestResources(snapshot)
+	if snapshot.TopologyViewData != nil {
+		m.gpuSummary = snapshot.TopologyViewData.GPUSummary
+	}
 
 	// Rebuild topology info for the currently selected PCS
 	if m.viewState.SelectedPodCliqueSet != "" {
 		pcsName := m.viewState.SelectedPodCliqueSet
 		if pcs, ok := snapshot.PodCliqueSetSpecs[pcsName]; ok {
-			topoInfo := data.BuildTopologyInfo(pcs)
-			// Populate DomainToKey from topology view data
+			topoInfo := clusterstate.BuildTopologyInfo(pcs)
 			if snapshot.TopologyViewData != nil {
 				topoInfo.DomainToKey = snapshot.TopologyViewData.DomainToKey
 			}
@@ -74,337 +82,376 @@ func (m *Model) applySnapshot() {
 		}
 	}
 
-	// Rebuild hierarchy data from snapshot for the current view
-	m.rebuildHierarchyFromSnapshot(snapshot)
+	return true
+}
 
-	// Rebuild events for current view
-	m.rebuildEventsFromSnapshot(snapshot)
-
-	// Validate drill stack against new data
+// rebuildUIFromData rebuilds all UI tables and view state from the cached
+// snapshot clusterstate. Call this after loadSnapshotData when the underlying data
+// has changed. For navigation-only changes (where the snapshot hasn't changed),
+// use rebuildAllFromSnapshot instead.
+func (m *Model) rebuildUIFromData() {
+	m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
+	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
 	m.validateTopologyDrillStack()
-
-	// Rebuild all tables
 	m.rebuildResourcesTable()
 	m.rebuildEventsTable()
-	if m.viewState.ViewType == data.TopologyView {
+	if m.viewState.ViewType == clusterstate.TopologyView {
 		m.rebuildTopologyDomainsTable()
 		m.rebuildTopologyPodsTable()
 	}
 }
 
-// rebuildHierarchyFromSnapshot populates allResources from the cache snapshot
-// for the currently selected view and any parent views needed for navigation.
-func (m *Model) rebuildHierarchyFromSnapshot(snapshot *data.CacheSnapshot) {
-	if snapshot == nil {
-		return
+// aggregateReadyScheduled accumulates Ready and Scheduled counts from a slice
+// of resources by parsing their "ready/total" and "scheduled/total" strings.
+func aggregateReadyScheduled(resources []clusterstate.Resource) (ready, replicas, scheduled int) {
+	for _, r := range resources {
+		var rd, rp int
+		fmt.Sscanf(r.Ready, "%d/%d", &rd, &rp)
+		ready += rd
+		replicas += rp
+		var sc, sm int
+		fmt.Sscanf(r.Scheduled, "%d/%d", &sc, &sm)
+		scheduled += sc
 	}
+	return
+}
 
-	pcsName := m.viewState.SelectedPodCliqueSet
-	replicaIndex := m.viewState.SelectedReplicaIndex
-	pcsgName := m.viewState.SelectedScalingGroup
-	pcsgReplicaIndex := m.viewState.SelectedPCSGReplicaIndex
-	pcName := m.viewState.SelectedPodClique
-
-	// Always rebuild forest based on active resource type
-	m.populateForestResources(snapshot)
-
-	if pcsName == "" {
-		// No PCS context — either at the forest top level, or drilled in from a flat list.
-		// Build only the resources needed for the current flat-list drill-in view.
-		m.rebuildFlatDrillInResources(snapshot)
-		return
+// buildPCSGReplicaResources builds the Resource slice for PCSG replicas by
+// aggregating Ready/Scheduled counts from PodCliques in each replica.
+// defaultTopology is set on each resource (e.g. "N/A" for flat drill-ins, "" for hierarchy).
+func buildPCSGReplicaResources(snapshot *clusterstate.CacheSnapshot, pcsgName, namespace, defaultTopology string) []clusterstate.Resource {
+	pcsgReplicaIndexes := snapshot.ReplicaIndexesByPCSG[pcsgName]
+	if len(pcsgReplicaIndexes) == 0 {
+		return nil
 	}
-
-	// Determine namespace from the PCS
-	namespace := ""
-	if pcs, ok := snapshot.PodCliqueSetSpecs[pcsName]; ok {
-		namespace = pcs.Namespace
+	resources := make([]clusterstate.Resource, 0, len(pcsgReplicaIndexes))
+	for _, ri := range pcsgReplicaIndexes {
+		pcsgReplicaKey := clusterstate.CompositeKey(pcsgName, ri)
+		totalReady, totalReplicas, totalScheduled := aggregateReadyScheduled(snapshot.PodCliquesByPCSGReplica[pcsgReplicaKey])
+		resources = append(resources, clusterstate.Resource{
+			Name:       replicaDisplayName(pcsgName, ri),
+			Type:       clusterstate.ResourceTypePCSGReplica,
+			Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
+			Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
+			Namespace:  namespace,
+			ParentType: clusterstate.ResourceTypePCSG,
+			ParentName: pcsgName,
+			Topology:   defaultTopology,
+		})
 	}
+	return resources
+}
 
-	// Build PCS replicas
+// snapshotNodeLabels safely returns NodeLabels from the snapshot's TopologyViewData.
+// Returns nil if TopologyViewData is not populated.
+func snapshotNodeLabels(snapshot *clusterstate.CacheSnapshot) map[string]map[string]string {
+	if snapshot == nil || snapshot.TopologyViewData == nil {
+		return nil
+	}
+	return snapshotNodeLabels(snapshot)
+}
+
+// resolveResourceTopology resolves topology display for a resource using the
+// standard pattern: resolve base topology -> extract domain -> resolve value -> enhance display.
+// resolveFn should call the appropriate TopologyInfo method to get the base topology string.
+func resolveResourceTopology(
+	topoInfo *clusterstate.TopologyInfo,
+	resolveFn func() string,
+	labelKey string,
+	resourceName string,
+	podInfos map[string]clusterstate.CachedPodInfo,
+	nodeLabels map[string]map[string]string,
+) string {
+	if topoInfo == nil {
+		return "N/A"
+	}
+	topology := resolveFn()
+	domain := clusterstate.ExtractDomain(topology)
+	value := clusterstate.ResolveTopologyValue(domain, labelKey, resourceName, topoInfo, podInfos, nodeLabels)
+	return clusterstate.EnhanceTopologyDisplay(topology, value)
+}
+
+// rebuildAllFromSnapshot rebuilds the full data model from the cached snapshot.
+// This is the standard 4-step sequence used after any view/navigation change.
+func (m *Model) rebuildAllFromSnapshot() {
+	m.rebuildHierarchyFromSnapshot(m.cachedSnapshot)
+	m.rebuildEventsFromSnapshot(m.cachedSnapshot)
+	m.rebuildResourcesTable()
+	m.rebuildEventsTable()
+}
+
+// buildPCSReplicaResources builds the Resource slice for PCS replicas,
+// aggregating Ready/Scheduled from child scaling groups and PodCliques,
+// with PCS-level topology resolution.
+func buildPCSReplicaResources(
+	snapshot *clusterstate.CacheSnapshot,
+	topoInfo *clusterstate.TopologyInfo,
+	pcsName string,
+	namespace string,
+) []clusterstate.Resource {
 	replicaIndexes := snapshot.ReplicaIndexesByPCS[pcsName]
-	pcsKey := "PodCliqueSet/" + pcsName
+	if len(replicaIndexes) == 0 {
+		return nil
+	}
 
-	if len(replicaIndexes) > 0 {
-		replicaResources := make([]data.Resource, 0, len(replicaIndexes))
-		for _, ri := range replicaIndexes {
-			replicaKey := pcsName + "/" + ri
+	replicaResources := make([]clusterstate.Resource, 0, len(replicaIndexes))
+	for _, ri := range replicaIndexes {
+		replicaKey := clusterstate.CompositeKey(pcsName, ri)
 
-			// Calculate aggregate ready/scheduled counts
-			var totalReady, totalScheduled, totalReplicas int
-			for _, sg := range snapshot.ScalingGroupsByReplica[replicaKey] {
-				var ready, replicas int
-				fmt.Sscanf(sg.Ready, "%d/%d", &ready, &replicas)
-				totalReady += ready
-				totalReplicas += replicas
-				var scheduled, scheduledMax int
-				fmt.Sscanf(sg.Scheduled, "%d/%d", &scheduled, &scheduledMax)
-				totalScheduled += scheduled
-			}
-			for _, pc := range snapshot.PodCliquesByReplica[replicaKey] {
-				var ready, replicas int
-				fmt.Sscanf(pc.Ready, "%d/%d", &ready, &replicas)
-				totalReady += ready
-				totalReplicas += replicas
-				var scheduled, scheduledMax int
-				fmt.Sscanf(pc.Scheduled, "%d/%d", &scheduled, &scheduledMax)
-				totalScheduled += scheduled
-			}
+		// Calculate aggregate ready/scheduled counts
+		sgReady, sgReplicas, sgScheduled := aggregateReadyScheduled(snapshot.ScalingGroupsByReplica[replicaKey])
+		pcReady, pcReplicas, pcScheduled := aggregateReadyScheduled(snapshot.PodCliquesByReplica[replicaKey])
+		totalReady := sgReady + pcReady
+		totalReplicas := sgReplicas + pcReplicas
+		totalScheduled := sgScheduled + pcScheduled
 
-			// Resolve topology for replica
-			replicaTopology := "N/A"
-			if m.cachedTopologyInfo != nil && m.cachedTopologyInfo.PCSPackDomain != "" {
-				replicaTopology = data.ResolveTopologyDisplay("", m.cachedTopologyInfo.PCSPackDomain)
-				domain := data.ExtractDomain(replicaTopology)
-				value := data.ResolveTopologyValueByReplicaIndex(domain, pcsName, ri, m.cachedTopologyInfo, snapshot.PodInfos, snapshot.NodeLabels)
-				replicaTopology = data.EnhanceTopologyDisplay(replicaTopology, value)
-			}
-
-			replicaResources = append(replicaResources, data.Resource{
-				Name:       replicaDisplayName(pcsName, ri),
-				Type:       "(PodCliqueSet replica)",
-				Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
-				Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
-				Namespace:  namespace,
-				ParentType: "PodCliqueSet",
-				ParentName: pcsName,
-				Topology:   replicaTopology,
-			})
+		// Resolve topology for replica
+		replicaTopology := "N/A"
+		if topoInfo != nil && topoInfo.PCSPackDomain != "" {
+			replicaTopology = clusterstate.ResolveTopologyDisplay("", topoInfo.PCSPackDomain)
+			domain := clusterstate.ExtractDomain(replicaTopology)
+			value := clusterstate.ResolveTopologyValueByReplicaIndex(domain, pcsName, ri, topoInfo, snapshot.PodInfos, snapshotNodeLabels(snapshot))
+			replicaTopology = clusterstate.EnhanceTopologyDisplay(replicaTopology, value)
 		}
-		m.allResources[pcsKey] = replicaResources
+
+		replicaResources = append(replicaResources, clusterstate.Resource{
+			Name:       replicaDisplayName(pcsName, ri),
+			Type:       clusterstate.ResourceTypePCSReplica,
+			Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
+			Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
+			Namespace:  namespace,
+			ParentType: clusterstate.ResourceTypePodCliqueSet,
+			ParentName: pcsName,
+			Topology:   replicaTopology,
+		})
 	}
+	return replicaResources
+}
 
-	if replicaIndex == "" {
-		return
-	}
-
-	// Build replica children (PCSGs + standalone PodCliques)
-	replicaChildKey := "PodCliqueSetReplica/" + pcsName + "/" + replicaIndex
-	replicaKey := pcsName + "/" + replicaIndex
-
-	var replicaChildren []data.Resource
+// buildReplicaChildResources builds PCSGs and standalone PodCliques under a
+// specific PCS replica, with per-resource topology resolution.
+func buildReplicaChildResources(
+	snapshot *clusterstate.CacheSnapshot,
+	topoInfo *clusterstate.TopologyInfo,
+	pcsName string,
+	replicaIndex string,
+) []clusterstate.Resource {
+	replicaKey := clusterstate.CompositeKey(pcsName, replicaIndex)
+	var replicaChildren []clusterstate.Resource
 
 	// PCSGs with topology
 	for _, sg := range snapshot.ScalingGroupsByReplica[replicaKey] {
 		sg := sg // copy
-		pcsgConfigName := data.ExtractConfigName(sg.Name, pcsName, replicaIndex)
-		if m.cachedTopologyInfo != nil {
-			sg.Topology = m.cachedTopologyInfo.ResolvePCSGTopology(pcsgConfigName)
-			domain := data.ExtractDomain(sg.Topology)
-			value := data.ResolveTopologyValue(domain, "grove.io/podcliquescalinggroup", sg.Name, m.cachedTopologyInfo, snapshot.PodInfos, snapshot.NodeLabels)
-			sg.Topology = data.EnhanceTopologyDisplay(sg.Topology, value)
-		} else {
-			sg.Topology = "N/A"
-		}
+		pcsgConfigName := clusterstate.ExtractConfigName(sg.Name, pcsName, replicaIndex)
+		sg.Topology = resolveResourceTopology(
+			topoInfo,
+			func() string { return topoInfo.ResolvePCSGTopology(pcsgConfigName) },
+			clusterstate.LabelPCSG, sg.Name, snapshot.PodInfos, snapshotNodeLabels(snapshot),
+		)
 		replicaChildren = append(replicaChildren, sg)
 	}
 
 	// Standalone PodCliques with topology
 	for _, pc := range snapshot.PodCliquesByReplica[replicaKey] {
 		pc := pc // copy
-		cliqueTemplateName := data.ExtractConfigName(pc.Name, pcsName, replicaIndex)
-		if m.cachedTopologyInfo != nil {
-			pc.Topology = m.cachedTopologyInfo.ResolveStandaloneCliqueTopology(cliqueTemplateName)
-			domain := data.ExtractDomain(pc.Topology)
-			value := data.ResolveTopologyValue(domain, "grove.io/podclique", pc.Name, m.cachedTopologyInfo, snapshot.PodInfos, snapshot.NodeLabels)
-			pc.Topology = data.EnhanceTopologyDisplay(pc.Topology, value)
-		} else {
-			pc.Topology = "N/A"
-		}
+		cliqueTemplateName := clusterstate.ExtractConfigName(pc.Name, pcsName, replicaIndex)
+		pc.Topology = resolveResourceTopology(
+			topoInfo,
+			func() string { return topoInfo.ResolveStandaloneCliqueTopology(cliqueTemplateName) },
+			clusterstate.LabelPodClique, pc.Name, snapshot.PodInfos, snapshotNodeLabels(snapshot),
+		)
 		replicaChildren = append(replicaChildren, pc)
 	}
-	// Sort for stable table ordering (defense-in-depth; the cache also sorts).
-	data.SortResourcesByName(replicaChildren)
-	m.allResources[replicaChildKey] = replicaChildren
 
-	if pcsgName == "" && pcName == "" {
-		return
+	// Sort for stable table ordering (defense-in-depth; the cache also sorts).
+	clusterstate.SortResourcesByName(replicaChildren)
+	return replicaChildren
+}
+
+// buildPCSGReplicaChildResources builds PodCliques under a specific PCSG replica,
+// with topology resolved using both PCSG and clique template context.
+func buildPCSGReplicaChildResources(
+	snapshot *clusterstate.CacheSnapshot,
+	topoInfo *clusterstate.TopologyInfo,
+	pcsgName string,
+	pcsgReplicaIndex string,
+	pcsName string,
+	replicaIndex string,
+) []clusterstate.Resource {
+	pcsgReplicaKey := clusterstate.CompositeKey(pcsgName, pcsgReplicaIndex)
+	pcsgConfigName := clusterstate.ExtractConfigName(pcsgName, pcsName, replicaIndex)
+
+	var pcsgChildren []clusterstate.Resource
+	for _, pc := range snapshot.PodCliquesByPCSGReplica[pcsgReplicaKey] {
+		pc := pc // copy
+		cliqueTemplateName := clusterstate.ExtractCliqueTemplateNameFromPCSGChild(pc.Name, pcsgName)
+		pc.Topology = resolveResourceTopology(
+			topoInfo,
+			func() string { return topoInfo.ResolveCliqueInPCSGTopology(cliqueTemplateName, pcsgConfigName) },
+			clusterstate.LabelPodClique, pc.Name, snapshot.PodInfos, snapshotNodeLabels(snapshot),
+		)
+		pcsgChildren = append(pcsgChildren, pc)
 	}
 
-	// PCSG replicas
-	if pcsgName != "" {
-		pcsgKey := "PodCliqueScalingGroup/" + pcsgName
-		pcsgReplicaIndexes := snapshot.ReplicaIndexesByPCSG[pcsgName]
-		if len(pcsgReplicaIndexes) > 0 {
-			pcsgReplicaResources := make([]data.Resource, 0, len(pcsgReplicaIndexes))
-			for _, ri := range pcsgReplicaIndexes {
-				var totalReady, totalScheduled, totalReplicas int
-				pcsgReplicaKey := pcsgName + "/" + ri
-				for _, pc := range snapshot.PodCliquesByPCSGReplica[pcsgReplicaKey] {
-					var ready, replicas int
-					fmt.Sscanf(pc.Ready, "%d/%d", &ready, &replicas)
-					totalReady += ready
-					totalReplicas += replicas
-					var scheduled, scheduledMax int
-					fmt.Sscanf(pc.Scheduled, "%d/%d", &scheduled, &scheduledMax)
-					totalScheduled += scheduled
-				}
-				pcsgReplicaResources = append(pcsgReplicaResources, data.Resource{
-					Name:       replicaDisplayName(pcsgName, ri),
-					Type:       "(PodCliqueScalingGroup replica)",
-					Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
-					Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
-					Namespace:  namespace,
-					ParentType: "PodCliqueScalingGroup",
-					ParentName: pcsgName,
-				})
+	// Sort for stable table ordering (defense-in-depth; the cache also sorts).
+	clusterstate.SortResourcesByName(pcsgChildren)
+	return pcsgChildren
+}
+
+// buildPodChildResources builds Pods under a PodClique with inherited topology
+// and per-pod node resolution.
+func buildPodChildResources(
+	snapshot *clusterstate.CacheSnapshot,
+	topoInfo *clusterstate.TopologyInfo,
+	pcName string,
+	pcsgName string,
+	pcsName string,
+	replicaIndex string,
+) []clusterstate.Resource {
+	pods := snapshot.PodsByPodClique[pcName]
+
+	// Set topology on Pods (inherited from parent PodClique)
+	basePodTopology := "N/A"
+	if topoInfo != nil {
+		if pcsgName != "" {
+			pcsgConfigName := clusterstate.ExtractConfigName(pcsgName, pcsName, replicaIndex)
+			cliqueTemplateName := clusterstate.ExtractCliqueTemplateNameFromPCSGChild(pcName, pcsgName)
+			effectiveClique := topoInfo.ResolveCliqueInPCSGTopology(cliqueTemplateName, pcsgConfigName)
+			basePodTopology = clusterstate.WrapInherited(effectiveClique)
+		} else {
+			cliqueTemplateName := clusterstate.ExtractConfigName(pcName, pcsName, replicaIndex)
+			effectiveClique := topoInfo.ResolveStandaloneCliqueTopology(cliqueTemplateName)
+			basePodTopology = clusterstate.WrapInherited(effectiveClique)
+		}
+	}
+
+	domain := clusterstate.ExtractDomain(basePodTopology)
+	podResources := make([]clusterstate.Resource, len(pods))
+	for i, pod := range pods {
+		podResources[i] = pod
+		if domain != "" {
+			nodeName := ""
+			if cached, ok := snapshot.PodInfos[pod.Name]; ok {
+				nodeName = cached.NodeName
 			}
-			m.allResources[pcsgKey] = pcsgReplicaResources
+			value := clusterstate.ResolveTopologyValueForNode(domain, nodeName, topoInfo, snapshotNodeLabels(snapshot))
+			podResources[i].Topology = clusterstate.EnhanceTopologyDisplay(basePodTopology, value)
+		} else {
+			podResources[i].Topology = basePodTopology
+		}
+	}
+
+	// Sort for stable table ordering (defense-in-depth; the cache also sorts).
+	clusterstate.SortResourcesByName(podResources)
+	return podResources
+}
+
+// HierarchyBuildParams contains all inputs needed to build the allResources map.
+// Extracted as a struct so buildAllResources can be a pure function.
+type HierarchyBuildParams struct {
+	Snapshot           *clusterstate.CacheSnapshot
+	ViewState          clusterstate.ViewState
+	TopoInfo           *clusterstate.TopologyInfo
+	ForestResourceType string
+	AllNamespaces      bool
+	Namespace          string
+}
+
+// buildAllResources is a pure function that builds the complete allResources map
+// from a cache snapshot and view state. Data-building logic is extracted here for
+// testability, while the Model method rebuildHierarchyFromSnapshot remains as a
+// thin wrapper that assigns the result.
+func buildAllResources(p HierarchyBuildParams) map[string][]clusterstate.Resource {
+	if p.Snapshot == nil {
+		return nil
+	}
+
+	result := make(map[string][]clusterstate.Resource)
+
+	// Always build forest based on active resource type
+	result["forest"] = buildForestResources(p.Snapshot, p.ForestResourceType, p.AllNamespaces, p.Namespace)
+
+	pcsName := p.ViewState.SelectedPodCliqueSet
+	replicaIndex := p.ViewState.SelectedReplicaIndex
+	pcsgName := p.ViewState.SelectedScalingGroup
+	pcsgReplicaIndex := p.ViewState.SelectedPCSGReplicaIndex
+	pcName := p.ViewState.SelectedPodClique
+
+	if pcsName == "" {
+		// No PCS context — either at the forest top level, or drilled in from a flat list.
+		for k, v := range buildFlatDrillInResources(p.Snapshot, p.ViewState) {
+			result[k] = v
+		}
+		return result
+	}
+
+	// Determine namespace from the PCS
+	namespace := ""
+	if pcs, ok := p.Snapshot.PodCliqueSetSpecs[pcsName]; ok {
+		namespace = pcs.Namespace
+	}
+
+	// Build PCS replicas
+	if replicas := buildPCSReplicaResources(p.Snapshot, p.TopoInfo, pcsName, namespace); len(replicas) > 0 {
+		result["PodCliqueSet/"+pcsName] = replicas
+	}
+
+	if replicaIndex == "" {
+		return result
+	}
+
+	// Build replica children (PCSGs + standalone PodCliques)
+	result["PodCliqueSetReplica/"+pcsName+"/"+replicaIndex] = buildReplicaChildResources(p.Snapshot, p.TopoInfo, pcsName, replicaIndex)
+
+	if pcsgName == "" && pcName == "" {
+		return result
+	}
+
+	// PCSG replicas and their children
+	if pcsgName != "" {
+		if replicas := buildPCSGReplicaResources(p.Snapshot, pcsgName, namespace, ""); len(replicas) > 0 {
+			result["PodCliqueScalingGroup/"+pcsgName] = replicas
 		}
 
-		// PCSG replica children (PodCliques in a specific PCSG replica)
 		if pcsgReplicaIndex != "" {
-			pcsgReplicaChildKey := "PodCliqueScalingGroupReplica/" + pcsgName + "/" + pcsgReplicaIndex
-			pcsgReplicaKey := pcsgName + "/" + pcsgReplicaIndex
-			pcsgConfigName := data.ExtractConfigName(pcsgName, pcsName, replicaIndex)
-
-			var pcsgChildren []data.Resource
-			for _, pc := range snapshot.PodCliquesByPCSGReplica[pcsgReplicaKey] {
-				pc := pc // copy
-				cliqueTemplateName := data.ExtractCliqueTemplateNameFromPCSGChild(pc.Name, pcsgName)
-				if m.cachedTopologyInfo != nil {
-					pc.Topology = m.cachedTopologyInfo.ResolveCliqueInPCSGTopology(cliqueTemplateName, pcsgConfigName)
-					domain := data.ExtractDomain(pc.Topology)
-					value := data.ResolveTopologyValue(domain, "grove.io/podclique", pc.Name, m.cachedTopologyInfo, snapshot.PodInfos, snapshot.NodeLabels)
-					pc.Topology = data.EnhanceTopologyDisplay(pc.Topology, value)
-				} else {
-					pc.Topology = "N/A"
-				}
-				pcsgChildren = append(pcsgChildren, pc)
-			}
-		// Sort for stable table ordering (defense-in-depth; the cache also sorts).
-		data.SortResourcesByName(pcsgChildren)
-		m.allResources[pcsgReplicaChildKey] = pcsgChildren
+			result["PodCliqueScalingGroupReplica/"+pcsgName+"/"+pcsgReplicaIndex] = buildPCSGReplicaChildResources(
+				p.Snapshot, p.TopoInfo, pcsgName, pcsgReplicaIndex, pcsName, replicaIndex,
+			)
 		}
 	}
 
 	// PodClique children (Pods)
 	if pcName != "" {
-		podCliqueKey := "PodClique/" + pcName
-		pods := snapshot.PodsByPodClique[pcName]
+		result["PodClique/"+pcName] = buildPodChildResources(p.Snapshot, p.TopoInfo, pcName, pcsgName, pcsName, replicaIndex)
+	}
 
-		// Set topology on Pods (inherited from parent PodClique)
-		basePodTopology := "N/A"
-		if m.cachedTopologyInfo != nil {
-			if pcsgName != "" {
-				pcsgConfigName := data.ExtractConfigName(pcsgName, pcsName, replicaIndex)
-				cliqueTemplateName := data.ExtractCliqueTemplateNameFromPCSGChild(pcName, pcsgName)
-				effectiveClique := m.cachedTopologyInfo.ResolveCliqueInPCSGTopology(cliqueTemplateName, pcsgConfigName)
-				basePodTopology = data.WrapInherited(effectiveClique)
-			} else {
-				cliqueTemplateName := data.ExtractConfigName(pcName, pcsName, replicaIndex)
-				effectiveClique := m.cachedTopologyInfo.ResolveStandaloneCliqueTopology(cliqueTemplateName)
-				basePodTopology = data.WrapInherited(effectiveClique)
-			}
-		}
+	return result
+}
 
-		domain := data.ExtractDomain(basePodTopology)
-		podResources := make([]data.Resource, len(pods))
-		for i, pod := range pods {
-			podResources[i] = pod
-			if domain != "" {
-				nodeName := ""
-				if cached, ok := snapshot.PodInfos[pod.Name]; ok {
-					nodeName = cached.NodeName
-				}
-				value := data.ResolveTopologyValueForNode(domain, nodeName, m.cachedTopologyInfo, snapshot.NodeLabels)
-				podResources[i].Topology = data.EnhanceTopologyDisplay(basePodTopology, value)
-			} else {
-				podResources[i].Topology = basePodTopology
-			}
-		}
-	// Sort for stable table ordering (defense-in-depth; the cache also sorts).
-	data.SortResourcesByName(podResources)
-	m.allResources[podCliqueKey] = podResources
+// rebuildHierarchyFromSnapshot populates allResources from the cache snapshot
+// for the currently selected view and any parent views needed for navigation.
+func (m *Model) rebuildHierarchyFromSnapshot(snapshot *clusterstate.CacheSnapshot) {
+	result := buildAllResources(HierarchyBuildParams{
+		Snapshot:           snapshot,
+		ViewState:          m.viewState,
+		TopoInfo:           m.cachedTopologyInfo,
+		ForestResourceType: m.forestResourceType,
+		AllNamespaces:      m.allNamespaces,
+		Namespace:          m.namespace,
+	})
+	if result != nil {
+		m.allResources = result
 	}
 }
 
 // rebuildEventsFromSnapshot populates allEvents from the cache snapshot based on current view.
-func (m *Model) rebuildEventsFromSnapshot(snapshot *data.CacheSnapshot) {
+func (m *Model) rebuildEventsFromSnapshot(snapshot *clusterstate.CacheSnapshot) {
 	if snapshot == nil {
 		m.allEvents = nil
 		return
 	}
 
-	switch m.viewState.ViewType {
-	case data.ForestView:
-		// Dispatch events based on the forest resource type
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 3 {
-			switch selectedRow[1] {
-			case "PodCliqueSet":
-				m.allEvents = snapshot.GetEventsForPCS(selectedRow[2])
-			case "PodCliqueScalingGroup":
-				m.allEvents = snapshot.GetEventsForPCSG(selectedRow[2])
-			case "PodClique":
-				m.allEvents = snapshot.GetEventsForPodClique(selectedRow[2])
-			case "Pod":
-				m.allEvents = snapshot.EventsByObject["Pod/"+selectedRow[2]]
-			default:
-				m.allEvents = nil
-			}
-		} else if m.forestResourceType == "pcs" && len(snapshot.PodCliqueSets) > 0 {
-			m.allEvents = snapshot.GetEventsForPCS(snapshot.PodCliqueSets[0].Name)
-		} else {
-			m.allEvents = nil
-		}
-
-	case data.PodCliqueSetView:
-		// Show events for the selected replica
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 3 && selectedRow[1] == "(PodCliqueSet replica)" {
-			replicaIndex := extractReplicaIndex(selectedRow[2])
-			m.allEvents = snapshot.GetEventsForReplica(m.viewState.SelectedPodCliqueSet, replicaIndex)
-		} else {
-			m.allEvents = snapshot.GetEventsForPCS(m.viewState.SelectedPodCliqueSet)
-		}
-
-	case data.PodCliqueSetReplicaView:
-		// Show events for the selected resource in the replica
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 3 {
-			switch selectedRow[1] {
-			case "PodCliqueScalingGroup":
-				m.allEvents = snapshot.GetEventsForPCSG(selectedRow[2])
-			case "PodClique":
-				m.allEvents = snapshot.GetEventsForPodClique(selectedRow[2])
-			default:
-				m.allEvents = snapshot.GetEventsForReplica(m.viewState.SelectedPodCliqueSet, m.viewState.SelectedReplicaIndex)
-			}
-		} else {
-			m.allEvents = snapshot.GetEventsForReplica(m.viewState.SelectedPodCliqueSet, m.viewState.SelectedReplicaIndex)
-		}
-
-	case data.PodCliqueScalingGroupView:
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 3 && selectedRow[1] == "(PodCliqueScalingGroup replica)" {
-			replicaIndex := extractReplicaIndex(selectedRow[2])
-			m.allEvents = snapshot.GetEventsForPCSGReplica(m.viewState.SelectedScalingGroup, replicaIndex)
-		} else {
-			m.allEvents = snapshot.GetEventsForPCSG(m.viewState.SelectedScalingGroup)
-		}
-
-	case data.PodCliqueScalingGroupReplicaView:
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 3 && selectedRow[1] == "PodClique" {
-			m.allEvents = snapshot.GetEventsForPodClique(selectedRow[2])
-		} else {
-			m.allEvents = snapshot.GetEventsForPCSGReplica(m.viewState.SelectedScalingGroup, m.viewState.SelectedPCSGReplicaIndex)
-		}
-
-	case data.PodCliqueView:
-		m.allEvents = snapshot.GetEventsForPodClique(m.viewState.SelectedPodClique)
-
-	case data.ContainersView:
-		// Show events for the selected pod
-		m.allEvents = snapshot.EventsByObject["Pod/"+m.viewState.SelectedPod]
-
-	case data.PodView:
-		m.allEvents = snapshot.GetEventsForPodClique(m.viewState.SelectedPodClique)
-
-	default:
-		m.allEvents = nil
-	}
+	m.behavior().RebuildEvents(m, snapshot)
 }
 
 // handlePodYAML handles PodYAMLMsg.
@@ -421,17 +468,18 @@ func (m Model) handlePodYAML(msg PodYAMLMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// rebuildFlatDrillInResources populates allResources for views reached by drilling
-// from a flat forest list (where SelectedPodCliqueSet is empty). Without PCS context,
+// buildFlatDrillInResources returns resources for views reached by drilling from
+// a flat forest list (where SelectedPodCliqueSet is empty). Without PCS context,
 // the normal hierarchy builder returns early — this fills the gap.
-func (m *Model) rebuildFlatDrillInResources(snapshot *data.CacheSnapshot) {
+func buildFlatDrillInResources(snapshot *clusterstate.CacheSnapshot, vs clusterstate.ViewState) map[string][]clusterstate.Resource {
 	if snapshot == nil {
-		return
+		return nil
 	}
 
-	pcsgName := m.viewState.SelectedScalingGroup
-	pcsgReplicaIndex := m.viewState.SelectedPCSGReplicaIndex
-	pcName := m.viewState.SelectedPodClique
+	result := make(map[string][]clusterstate.Resource)
+	pcsgName := vs.SelectedScalingGroup
+	pcsgReplicaIndex := vs.SelectedPCSGReplicaIndex
+	pcName := vs.SelectedPodClique
 
 	// --- PCSG drill-in: build replica list and replica children ---
 	if pcsgName != "" {
@@ -451,47 +499,22 @@ func (m *Model) rebuildFlatDrillInResources(snapshot *data.CacheSnapshot) {
 
 		// PCSG replicas (for PodCliqueScalingGroupView)
 		pcsgKey := "PodCliqueScalingGroup/" + pcsgName
-		pcsgReplicaIndexes := snapshot.ReplicaIndexesByPCSG[pcsgName]
-		if len(pcsgReplicaIndexes) > 0 {
-			pcsgReplicaResources := make([]data.Resource, 0, len(pcsgReplicaIndexes))
-			for _, ri := range pcsgReplicaIndexes {
-				var totalReady, totalScheduled, totalReplicas int
-				pcsgReplicaKey := pcsgName + "/" + ri
-				for _, pc := range snapshot.PodCliquesByPCSGReplica[pcsgReplicaKey] {
-					var ready, replicas int
-					fmt.Sscanf(pc.Ready, "%d/%d", &ready, &replicas)
-					totalReady += ready
-					totalReplicas += replicas
-					var scheduled, scheduledMax int
-					fmt.Sscanf(pc.Scheduled, "%d/%d", &scheduled, &scheduledMax)
-					totalScheduled += scheduled
-				}
-				pcsgReplicaResources = append(pcsgReplicaResources, data.Resource{
-					Name:       replicaDisplayName(pcsgName, ri),
-					Type:       "(PodCliqueScalingGroup replica)",
-					Ready:      fmt.Sprintf("%d/%d", totalReady, totalReplicas),
-					Scheduled:  fmt.Sprintf("%d/%d", totalScheduled, totalReplicas),
-					Namespace:  namespace,
-					ParentType: "PodCliqueScalingGroup",
-					ParentName: pcsgName,
-					Topology:   "N/A",
-				})
-			}
-			m.allResources[pcsgKey] = pcsgReplicaResources
+		if replicas := buildPCSGReplicaResources(snapshot, pcsgName, namespace, "N/A"); len(replicas) > 0 {
+			result[pcsgKey] = replicas
 		}
 
 		// PCSG replica children — PodCliques within a specific replica
 		if pcsgReplicaIndex != "" {
 			pcsgReplicaChildKey := "PodCliqueScalingGroupReplica/" + pcsgName + "/" + pcsgReplicaIndex
-			pcsgReplicaKey := pcsgName + "/" + pcsgReplicaIndex
-			var pcsgChildren []data.Resource
+			pcsgReplicaKey := clusterstate.CompositeKey(pcsgName, pcsgReplicaIndex)
+			var pcsgChildren []clusterstate.Resource
 			for _, pc := range snapshot.PodCliquesByPCSGReplica[pcsgReplicaKey] {
 				pc := pc // copy
 				pc.Topology = "N/A"
 				pcsgChildren = append(pcsgChildren, pc)
 			}
-			data.SortResourcesByName(pcsgChildren)
-			m.allResources[pcsgReplicaChildKey] = pcsgChildren
+			clusterstate.SortResourcesByName(pcsgChildren)
+			result[pcsgReplicaChildKey] = pcsgChildren
 		}
 	}
 
@@ -499,25 +522,33 @@ func (m *Model) rebuildFlatDrillInResources(snapshot *data.CacheSnapshot) {
 	if pcName != "" {
 		podCliqueKey := "PodClique/" + pcName
 		pods := snapshot.PodsByPodClique[pcName]
-		podResources := make([]data.Resource, len(pods))
+		podResources := make([]clusterstate.Resource, len(pods))
 		for i, pod := range pods {
 			podResources[i] = pod
 			podResources[i].Topology = "N/A"
 		}
-		data.SortResourcesByName(podResources)
-		m.allResources[podCliqueKey] = podResources
+		clusterstate.SortResourcesByName(podResources)
+		result[podCliqueKey] = podResources
+	}
+
+	return result
+}
+
+// rebuildFlatDrillInResources populates allResources from flat drill-in clusterstate.
+func (m *Model) rebuildFlatDrillInResources(snapshot *clusterstate.CacheSnapshot) {
+	for k, v := range buildFlatDrillInResources(snapshot, m.viewState) {
+		m.allResources[k] = v
 	}
 }
 
-// populateForestResources sets m.allResources["forest"] based on m.forestResourceType.
-// If namespace scoping is active (m.allNamespaces == false), resources are filtered
-// in-memory to only include those in m.namespace.
-func (m *Model) populateForestResources(snapshot *data.CacheSnapshot) {
+// buildForestResources returns the forest resource list based on the given resource type,
+// filtered by namespace if scoping is active.
+func buildForestResources(snapshot *clusterstate.CacheSnapshot, forestResourceType string, allNamespaces bool, namespace string) []clusterstate.Resource {
 	if snapshot == nil {
-		return
+		return nil
 	}
-	var resources []data.Resource
-	switch m.forestResourceType {
+	var resources []clusterstate.Resource
+	switch forestResourceType {
 	case "pc":
 		resources = flatPodCliques(snapshot)
 	case "pcsg":
@@ -527,18 +558,23 @@ func (m *Model) populateForestResources(snapshot *data.CacheSnapshot) {
 	default: // "pcs" or empty
 		resources = snapshot.PodCliqueSets
 	}
-	m.allResources["forest"] = m.filterByNamespace(resources)
+	return filterByNamespace(resources, allNamespaces, namespace)
 }
 
-// filterByNamespace returns the subset of resources in m.namespace.
+// populateForestResources sets m.allResources["forest"] from the snapshot.
+func (m *Model) populateForestResources(snapshot *clusterstate.CacheSnapshot) {
+	m.allResources["forest"] = buildForestResources(snapshot, m.forestResourceType, m.allNamespaces, m.namespace)
+}
+
+// filterByNamespace returns the subset of resources matching the given namespace.
 // If allNamespaces is true (or namespace is empty), the input is returned unchanged.
-func (m *Model) filterByNamespace(resources []data.Resource) []data.Resource {
-	if m.allNamespaces || m.namespace == "" {
+func filterByNamespace(resources []clusterstate.Resource, allNamespaces bool, namespace string) []clusterstate.Resource {
+	if allNamespaces || namespace == "" {
 		return resources
 	}
-	var filtered []data.Resource
+	var filtered []clusterstate.Resource
 	for _, r := range resources {
-		if r.Namespace == m.namespace {
+		if r.Namespace == namespace {
 			filtered = append(filtered, r)
 		}
 	}
@@ -546,14 +582,14 @@ func (m *Model) filterByNamespace(resources []data.Resource) []data.Resource {
 }
 
 // flatPodCliques returns a deduplicated flat list of all PodCliques from the snapshot.
-func flatPodCliques(snapshot *data.CacheSnapshot) []data.Resource {
+func flatPodCliques(snapshot *clusterstate.CacheSnapshot) []clusterstate.Resource {
 	if snapshot == nil {
 		return nil
 	}
 	seen := make(map[string]bool)
-	var result []data.Resource
+	var result []clusterstate.Resource
 
-	addPC := func(pc data.Resource) {
+	addPC := func(pc clusterstate.Resource) {
 		if !seen[pc.Name] {
 			seen[pc.Name] = true
 			result = append(result, pc)
@@ -574,17 +610,17 @@ func flatPodCliques(snapshot *data.CacheSnapshot) []data.Resource {
 		}
 	}
 
-	data.SortResourcesByName(result)
+	clusterstate.SortResourcesByName(result)
 	return result
 }
 
 // flatScalingGroups returns a deduplicated flat list of all PodCliqueScalingGroups from the snapshot.
-func flatScalingGroups(snapshot *data.CacheSnapshot) []data.Resource {
+func flatScalingGroups(snapshot *clusterstate.CacheSnapshot) []clusterstate.Resource {
 	if snapshot == nil {
 		return nil
 	}
 	seen := make(map[string]bool)
-	var result []data.Resource
+	var result []clusterstate.Resource
 
 	for _, sgs := range snapshot.ScalingGroupsByReplica {
 		for _, sg := range sgs {
@@ -595,17 +631,17 @@ func flatScalingGroups(snapshot *data.CacheSnapshot) []data.Resource {
 		}
 	}
 
-	data.SortResourcesByName(result)
+	clusterstate.SortResourcesByName(result)
 	return result
 }
 
 // flatPods returns a deduplicated flat list of all Pods from the snapshot.
-func flatPods(snapshot *data.CacheSnapshot) []data.Resource {
+func flatPods(snapshot *clusterstate.CacheSnapshot) []clusterstate.Resource {
 	if snapshot == nil {
 		return nil
 	}
 	seen := make(map[string]bool)
-	var result []data.Resource
+	var result []clusterstate.Resource
 
 	for _, pods := range snapshot.PodsByPodClique {
 		for _, pod := range pods {
@@ -616,53 +652,7 @@ func flatPods(snapshot *data.CacheSnapshot) []data.Resource {
 		}
 	}
 
-	data.SortResourcesByName(result)
+	clusterstate.SortResourcesByName(result)
 	return result
 }
 
-// validateTopologyDrillStack checks that the current drill stack is still valid.
-// It verifies both that each domain still exists and that each selected value
-// still exists within that domain. If any entry is stale, the stack is truncated
-// up to (but not including) the invalid entry.
-func (m *Model) validateTopologyDrillStack() {
-	if m.topologyViewData == nil || len(m.topologyDrillStack) == 0 {
-		return
-	}
-
-	domainSet := make(map[string]bool)
-	for _, d := range m.topologyViewData.Domains {
-		domainSet[d.Domain] = true
-	}
-
-	for i, entry := range m.topologyDrillStack {
-		if !domainSet[entry.Domain] {
-			debugLogWithContext("drill stack domain %q no longer exists, truncating at depth %d", entry.Domain, i)
-			m.topologyDrillStack = m.topologyDrillStack[:i]
-			if len(m.topologyDrillStack) == 0 {
-				m.topologyDrillStack = nil
-			}
-			return
-		}
-		// Also check that the selected value still exists in this domain.
-		// Only validate when NodeLabels are available (they may be nil in tests).
-		if entry.Value != "" && entry.Key != "" && len(m.topologyViewData.NodeLabels) > 0 {
-			matchingNodes := data.FilterNodesByBreadcrumb(m.topologyViewData.NodeLabels, m.topologyDrillStack[:i])
-			values := data.DistinctValuesForDomain(m.topologyViewData.NodeLabels, entry.Key, matchingNodes)
-			found := false
-			for _, v := range values {
-				if v == entry.Value {
-					found = true
-					break
-				}
-			}
-			if !found {
-				debugLogWithContext("drill stack value %q for domain %q no longer exists, truncating at depth %d", entry.Value, entry.Domain, i)
-				m.topologyDrillStack = m.topologyDrillStack[:i]
-				if len(m.topologyDrillStack) == 0 {
-					m.topologyDrillStack = nil
-				}
-				return
-			}
-		}
-	}
-}

@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -77,8 +77,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if updated, ok := model.(Model); ok {
 		hasCmd := cmd != nil
 		debugLogWithContext("Update result: view=%s pane=%s hasCmd=%v",
-			data.ViewTypeName(updated.viewState.ViewType),
-			data.PaneName(updated.activePane),
+			clusterstate.ViewTypeName(updated.viewState.ViewType),
+			clusterstate.PaneName(updated.activePane),
 			hasCmd)
 	}
 
@@ -90,21 +90,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // size changes OR any element that affects layout height changes (e.g. error
 // log appearing/disappearing, filter bar toggling).
 func (m *Model) resizeLayout() {
-	// Calculate table heights.
-	// 7(header: context+cluster+user+arborist+k8s+namespace+lens) + 2*(2 border + 1 table header) = 13
-	fixedLines := 13
-	if m.filterActive {
-		fixedLines += 3
-	}
-	if m.commandActive {
-		fixedLines += 3
-	}
-	fixedLines += m.errorLogFrameHeight()
-	// Account for footnote line in topology view with GPU columns
-	if m.viewState.ViewType == data.TopologyView && m.topologyHasGPUColumns() {
-		fixedLines++
-	}
-	availableHeight := m.height - fixedLines
+	availableHeight := m.height - m.fixedLayoutLines()
 	paneHeight := availableHeight / 2
 	if paneHeight < 3 {
 		paneHeight = 3
@@ -144,7 +130,7 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// Rebuild tables
 	m.rebuildResourcesTable()
 	m.rebuildEventsTable()
-	if m.viewState.ViewType == data.TopologyView {
+	if m.viewState.ViewType == clusterstate.TopologyView {
 		m.rebuildTopologyDomainsTable()
 		m.rebuildTopologyPodsTable()
 	}
@@ -237,72 +223,36 @@ func (m Model) handleFilterModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleNormalModeKey handles keys in normal (non-filter) mode.
+//
+// 3-phase dispatch:
+//  1. Tab — global pane switch (always handled here)
+//  2. behavior().HandleKey — view-specific Esc/Enter/Up/Down
+//  3. Global rune keys — q, t, /, :, !, y, s, l, v (unchanged across views)
+//
+// The cascading mode checks in handleKeyMsg (overlay → lens → command →
+// filter → normal) look like they should be refactored into a state machine,
+// but the linear priority chain is actually simpler and more readable — each
+// mode completely owns input when active.
 func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	debugLogWithContext("handleNormalModeKey: keyType=%d(%s) str=%q view=%s pane=%s drillDepth=%d",
 		msg.Type, msg.Type.String(), msg.String(),
-		data.ViewTypeName(m.viewState.ViewType), data.PaneName(m.activePane),
-		len(m.topologyDrillStack))
+		clusterstate.ViewTypeName(m.viewState.ViewType), clusterstate.PaneName(m.activePane),
+		m.topologyDrill.Depth())
 
-	switch msg.Type {
-	case tea.KeyTab:
+	// Phase 1: Tab — global pane switch
+	if msg.Type == tea.KeyTab {
 		m.switchPane()
 		return m, nil
+	}
 
-	case tea.KeyEsc:
-		if m.viewState.ViewType == data.TopologyView && len(m.topologyDrillStack) == 0 {
-			m.viewState.ViewType = data.ForestView
-			m.activePane = data.ResourcesPane
-			m.updateTableFocus()
-			debugLogWithContext("switched from TopologyView to ForestView via Esc")
-			return m, nil
-		}
-		if m.viewState.ViewType == data.TopologyView {
-			m.topologyDrillBack()
-			return m, nil
-		}
-		return m.navigateBack()
+	// Phase 2: View-specific key handling (Esc, Enter, Up/Down)
+	model, cmd, handled := m.behavior().HandleKey(&m, msg)
+	if handled {
+		return model, cmd
+	}
 
-	case tea.KeyEnter:
-		if m.viewState.ViewType == data.TopologyView && m.activePane == data.TopologyDomainsPane {
-			m.topologyDrillInto()
-			return m, nil
-		}
-		if m.activePane == data.ResourcesPane {
-			return m.navigateInto()
-		}
-		return m, nil
-
-	case tea.KeyUp, tea.KeyDown:
-		if m.viewState.ViewType == data.TopologyView {
-			if m.activePane == data.TopologyDomainsPane {
-				var cmd tea.Cmd
-				m.topologyDomainsTable, cmd = m.topologyDomainsTable.Update(msg)
-				m.rebuildTopologyPodsTable()
-				return m, cmd
-			}
-			var cmd tea.Cmd
-			m.topologyPodsTable, cmd = m.topologyPodsTable.Update(msg)
-			return m, cmd
-		}
-
-		if m.activePane == data.ResourcesPane {
-			if m.viewState.ViewType == data.PodView {
-				var cmd tea.Cmd
-				m.podViewport, cmd = m.podViewport.Update(msg)
-				return m, cmd
-			}
-			var cmd tea.Cmd
-			m.resourcesTable, cmd = m.resourcesTable.Update(msg)
-			// Update events based on new selection (from cache, synchronous)
-			m.updateEventsForSelection()
-			m.rebuildEventsTable()
-			return m, cmd
-		}
-		var cmd tea.Cmd
-		m.eventsTable, cmd = m.eventsTable.Update(msg)
-		return m, cmd
-
-	case tea.KeyRunes:
+	// Phase 3: Global rune keys
+	if msg.Type == tea.KeyRunes {
 		switch msg.String() {
 		case "q", "Q":
 			debugLogWithContext("quitting (q)")
@@ -345,70 +295,49 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleCommandModeKey handles keys when command mode is active.
-// Tab is no longer intercepted — it flows through to textinput.Update which
-// handles AcceptSuggestion natively (fills ghost text, moves cursor to end).
-// Only Enter (execute) and Esc (cancel) are intercepted.
 func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	debugLogWithContext("handleCommandModeKey: keyType=%d(%s) str=%q inputValue=%q",
-		msg.Type, msg.Type.String(), msg.String(), m.commandInput.Value())
-
-	switch msg.Type {
-	case tea.KeyEsc:
-		m.commandActive = false
-		m.commandInput.SetValue("")
-		debugLogWithContext("command mode deactivated (cancelled)")
-		return m, nil
-
-	case tea.KeyEnter:
-		input := m.commandInput.Value()
-		m.commandActive = false
-		m.commandInput.SetValue("")
-		debugLogWithContext("command mode executing: %q (commandActive now=%v)", input, m.commandActive)
-		return m.executeCommand(input)
-
-	default:
-		var cmd tea.Cmd
-		m.commandInput, cmd = m.commandInput.Update(msg)
-		return m, cmd
-	}
+	return handleTextInputKey(&m, msg, &m.commandInput, &m.commandActive, "command mode")
 }
 
 // handleLensEditKey handles keys when lens edit mode is active (inline in header).
-// Tab is no longer intercepted — it flows through to textinput.Update which
-// handles AcceptSuggestion natively (fills ghost text, moves cursor to end).
-// Only Enter (execute) and Esc (cancel) are intercepted.
 func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	debugLogWithContext("handleLensEditKey: keyType=%d(%s) str=%q inputValue=%q",
-		msg.Type, msg.Type.String(), msg.String(), m.lensInput.Value())
+	return handleTextInputKey(&m, msg, &m.lensInput, &m.lensEditActive, "lens edit mode")
+}
+
+// handleTextInputKey is the shared handler for text input modes (command, lens edit).
+// Esc cancels, Enter executes the typed command, other keys update the input.
+func handleTextInputKey(m *Model, msg tea.KeyMsg, input *textinput.Model, active *bool, modeName string) (tea.Model, tea.Cmd) {
+	debugLogWithContext("handle %s key: keyType=%d(%s) str=%q inputValue=%q",
+		modeName, msg.Type, msg.Type.String(), msg.String(), input.Value())
 
 	switch msg.Type {
 	case tea.KeyEsc:
-		m.lensEditActive = false
-		m.lensInput.SetValue("")
-		debugLogWithContext("lens edit mode deactivated (cancelled)")
-		return m, nil
+		*active = false
+		input.SetValue("")
+		debugLogWithContext("%s deactivated (cancelled)", modeName)
+		return *m, nil
 
 	case tea.KeyEnter:
-		input := m.lensInput.Value()
-		m.lensEditActive = false
-		m.lensInput.SetValue("")
-		debugLogWithContext("lens edit mode executing: %q (lensEditActive now=%v)", input, m.lensEditActive)
-		return m.executeCommand(input)
+		value := input.Value()
+		*active = false
+		input.SetValue("")
+		debugLogWithContext("%s executing: %q", modeName, value)
+		return m.executeCommand(value)
 
 	default:
 		var cmd tea.Cmd
-		m.lensInput, cmd = m.lensInput.Update(msg)
-		return m, cmd
+		*input, cmd = input.Update(msg)
+		return *m, cmd
 	}
 }
 
 // toggleTopologyView switches between Forest and Topology views.
 func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
-	debugLogWithContext("toggleTopologyView: current view=%s", data.ViewTypeName(m.viewState.ViewType))
-	if m.viewState.ViewType == data.TopologyView {
+	debugLogWithContext("toggleTopologyView: current view=%s", clusterstate.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType == clusterstate.TopologyView {
 		// Switching FROM topology back to forest — always allowed
-		m.viewState.ViewType = data.ForestView
-		m.activePane = data.ResourcesPane
+		m.viewState.ViewType = clusterstate.ForestView
+		m.activePane = clusterstate.ResourcesPane
 		m.updateTableFocus()
 		debugLogWithContext("toggled from TopologyView to ForestView")
 		return m, nil
@@ -421,16 +350,18 @@ func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.viewState.ViewType = data.TopologyView
-	m.activePane = data.TopologyDomainsPane
-	m.topologyDrillStack = nil
+	m.viewState.ViewType = clusterstate.TopologyView
+	m.activePane = clusterstate.TopologyDomainsPane
+	m.topologyDrill.Reset()
 	m.updateTableFocus()
 	debugLogWithContext("toggled to TopologyView")
 
 	// Rebuild from existing snapshot
 	if m.cachedSnapshot != nil {
 		m.topologyViewData = m.cachedSnapshot.TopologyViewData
-		m.gpuSummary = m.cachedSnapshot.GPUSummary
+		if m.cachedSnapshot.TopologyViewData != nil {
+			m.gpuSummary = m.cachedSnapshot.TopologyViewData.GPUSummary
+		}
 		m.rebuildTopologyDomainsTable()
 		m.rebuildTopologyPodsTable()
 	}
@@ -439,48 +370,11 @@ func (m Model) toggleTopologyView() (tea.Model, tea.Cmd) {
 
 // handleShellExec handles the 's' key press to shell into a container.
 func (m Model) handleShellExec() (tea.Model, tea.Cmd) {
-	switch m.viewState.ViewType {
-	case data.ContainersView:
-		// Get selected container row
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) < 3 {
-			return m, nil
-		}
-		containerName := selectedRow[0]
-		containerState := selectedRow[2]
-		if containerState != "Running" {
-			m.addError(fmt.Sprintf("Cannot shell into container %q — state is %s", containerName, containerState))
-			return m, nil
-		}
-		namespace := m.resolveNamespace()
-		c := exec.Command("kubectl", "exec", "-it", m.viewState.SelectedPod, "-n", namespace, "-c", containerName, "--", "/bin/sh") //nolint:gosec // user-initiated shell exec
-		return m, tea.ExecProcess(c, func(err error) tea.Msg {
-			return ShellExitMsg{Err: err}
-		})
-
-	case data.PodCliqueView:
-		// Check if a Pod is selected
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) < 3 || selectedRow[1] != "Pod" {
-			return m, nil
-		}
-		podName := selectedRow[2]
-		namespace := selectedRow[0]
-		return m, fetchFirstRunningContainerCmd(m.cache, m.ctx, podName, namespace)
-
-	case data.ForestView:
-		// Check if a Pod is selected in a pod lens
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) < 3 || selectedRow[1] != "Pod" {
-			return m, nil
-		}
-		podName := selectedRow[2]
-		namespace := selectedRow[0]
-		return m, fetchFirstRunningContainerCmd(m.cache, m.ctx, podName, namespace)
-
-	default:
+	exec, ok := m.behavior().(ShellExecutor)
+	if !ok {
 		return m, nil
 	}
+	return exec.ShellExec(&m)
 }
 
 // handlePodContainers handles PodContainersMsg — stores containers and rebuilds table.

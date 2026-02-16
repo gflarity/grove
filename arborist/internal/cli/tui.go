@@ -22,39 +22,27 @@ import (
 	"os"
 	rtdebug "runtime/debug"
 	"strings"
+	"time"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
+	"github.com/ai-dynamo/grove/arborist/internal/debug"
 	"github.com/ai-dynamo/grove/arborist/internal/k8s"
 	"github.com/ai-dynamo/grove/arborist/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// TUICmd launches the interactive Bubble Tea TUI.
-// Kong routes to ForestCmd automatically via default:"withargs".
-type TUICmd struct {
-	Forest ForestCmd `cmd:"" default:"withargs" help:"Show the forest view (default)."`
-}
-
-// ForestCmd is the default subcommand of TUICmd. It renders the forest view
-// with optional resource type, namespace scoping, and name filter.
+// ForestCmd implements the "tui" subcommand (the default). It renders the
+// forest view with optional resource type, namespace scoping, and name filter.
 type ForestCmd struct {
-	Resource      string `arg:"" optional:"" default:"pcs" help:"Resource type to display: pcs, pc, pcsg, pod."`
-	Namespace     string `short:"n" help:"Scope to a specific namespace." default:""`
-	AllNamespaces bool   `short:"A" help:"Show resources from all namespaces (default)." default:"true"`
-	Filter        string `short:"f" help:"Filter resources by name." default:""`
+	Resource string `arg:"" optional:"" default:"pcs" help:"Resource type to display: pcs, pc, pcsg, pod."`
+	NamespaceFlags
+	Filter string `short:"f" help:"Filter resources by name." default:""`
 }
 
 // Run executes the ForestCmd (TUI forest view).
 func (c *ForestCmd) Run(globals *CLI) error {
-	defer recoverPanic()
-
-	// Resolve namespace: if -n is set, use it (override -A); otherwise all namespaces.
-	namespace := ""
-	allNamespaces := true
-	if c.Namespace != "" {
-		namespace = c.Namespace
-		allNamespaces = false
-	}
+	// Resolve namespace: defaults to all-namespaces when neither -n nor -A is given.
+	namespace, allNamespaces := defaultToAllNamespaces(c.Namespace, c.AllNamespaces)
 
 	// Resolve kubeconfig context/cluster/user for the header display (single load)
 	kubeInfo := k8s.ResolveKubeConfigInfo()
@@ -62,19 +50,24 @@ func (c *ForestCmd) Run(globals *CLI) error {
 	userName := kubeInfo.UserName
 
 	// Initialize Kubernetes client
-	tui.DebugLog("initializing Kubernetes client")
-	var globalCache data.GlobalCache
+	debug.Log("initializing Kubernetes client")
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer startupCancel()
+
+	var globalCache clusterstate.GlobalCache
+	var connErr error
 	k8sClient, err := k8s.NewK8sClient()
 	if err != nil {
-		tui.DebugLog("WARNING: failed to initialize Kubernetes client: %v", err)
-		// globalCache stays nil — the TUI will show empty data
+		debug.Log("WARNING: failed to initialize Kubernetes client: %v", err)
+		connErr = err
+		// globalCache stays nil — the TUI will show the error in its error log
 	} else {
-		tui.DebugLog("Kubernetes client initialized successfully")
+		debug.Log("Kubernetes client initialized successfully")
 
 		// Pre-flight: verify Grove CRDs are installed before starting the TUI.
 		// Without this, missing CRDs cause client-go reflector errors that
 		// interleave with alt-screen rendering, producing unreadable output.
-		if missing := k8sClient.CheckGroveCRDs(); len(missing) > 0 {
+		if missing := k8sClient.CheckGroveCRDs(startupCtx); len(missing) > 0 {
 			fmt.Fprintf(os.Stderr, "Error: Grove CRDs not found on cluster %q:\n", clusterName)
 			for _, name := range missing {
 				fmt.Fprintf(os.Stderr, "  - %s.grove.io not found\n", name)
@@ -88,22 +81,22 @@ func (c *ForestCmd) Run(globals *CLI) error {
 			cacheOpts = append(cacheOpts, k8s.WithCacheNamespace(namespace))
 		}
 		globalCache = k8sClient.NewGlobalCache(cacheOpts...)
-		tui.DebugLog("global cache created (namespace=%q)", namespace)
+		debug.Log("global cache created (namespace=%q)", namespace)
 	}
-	tui.DebugLog("resolved kubeconfig context=%s cluster=%s user=%s", contextName, clusterName, userName)
+	debug.Log("resolved kubeconfig context=%s cluster=%s user=%s", contextName, clusterName, userName)
 
 	// Resolve K8s server version
 	k8sVersion := "(unknown)"
 	if k8sClient != nil {
-		k8sVersion = k8sClient.GetServerVersion()
+		k8sVersion = k8sClient.GetServerVersion(startupCtx)
 	}
-	tui.DebugLog("resolved k8s version=%s", k8sVersion)
+	debug.Log("resolved k8s version=%s", k8sVersion)
 
 	// Resolve arborist version from build info
 	arboristVersion := resolveArboristVersion()
-	tui.DebugLog("arborist version=%s", arboristVersion)
+	debug.Log("arborist version=%s", arboristVersion)
 
-	tui.DebugLog("forest args: resource=%s namespace=%q allNamespaces=%v filter=%q",
+	debug.Log("forest args: resource=%s namespace=%q allNamespaces=%v filter=%q",
 		c.Resource, namespace, allNamespaces, c.Filter)
 
 	// Build TUI model options
@@ -121,6 +114,9 @@ func (c *ForestCmd) Run(globals *CLI) error {
 	if c.Filter != "" {
 		opts = append(opts, tui.WithFilter(c.Filter))
 	}
+	if connErr != nil {
+		opts = append(opts, tui.WithConnectionError(connErr))
+	}
 
 	// Create the Bubble Tea model
 	m := tui.NewModel(globalCache, opts...)
@@ -136,12 +132,12 @@ func (c *ForestCmd) Run(globals *CLI) error {
 		tea.WithAltScreen(),
 	)
 
-	tui.DebugLog("starting bubbletea program")
+	debug.Log("starting bubbletea program")
 	if _, err := p.Run(); err != nil {
-		tui.DebugLog("program exited with error: %v", err)
+		debug.Log("program exited with error: %v", err)
 		return fmt.Errorf("TUI error: %w", err)
 	}
-	tui.DebugLog("arborist TUI exiting cleanly")
+	debug.Log("arborist TUI exiting cleanly")
 	return nil
 }
 

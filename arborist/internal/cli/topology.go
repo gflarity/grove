@@ -25,16 +25,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	"github.com/ai-dynamo/grove/arborist/internal/k8s"
 )
 
 // TopologyCmd shows pods grouped by topology domain for all (or a specific) PodCliqueSet(s).
 type TopologyCmd struct {
-	Domain        string `arg:"" help:"Topology domain (e.g. rack, zone, block, host)."`
-	PCS           string `arg:"" optional:"" help:"PodCliqueSet name (default: all PCS)."`
-	Namespace     string `short:"n" help:"Kubernetes namespace (defaults to current kubeconfig context namespace)."`
-	AllNamespaces bool   `short:"A" help:"Show pods across all namespaces."`
+	Domain string `arg:"" help:"Topology domain (e.g. rack, zone, block, host)."`
+	PCS    string `arg:"" optional:"" help:"PodCliqueSet name (default: all PCS)."`
+	NamespaceFlags
 }
 
 // Run executes the topology command.
@@ -67,8 +66,7 @@ type topologyGroup struct {
 
 // runTopology implements the "arborist topology <domain> [pcs]" CLI command.
 // Uses 3 targeted API calls instead of the full GlobalCache informer machinery.
-func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string) (retErr error) {
-	defer recoverPanic()
+func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string) error {
 	ns, err := resolveNamespace(namespace, allNamespaces)
 	if err != nil {
 		return err
@@ -79,7 +77,7 @@ func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string)
 
 	k8sClient, err := k8s.NewK8sClient()
 	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes client: %w", err)
+		return err
 	}
 
 	// 3 targeted API calls instead of 7 informers + full snapshot
@@ -100,8 +98,8 @@ func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string)
 			domain, strings.Join(availDomains, ", "))
 	}
 
-	// Build display filter predicate and extract display pods
-	displayPods, pcsDisplay, isDisplayPod := filterDisplayPods(cliData.AllPods, pcsFilter)
+	// Filter pods to those matching the PCS filter
+	displayPods, pcsDisplay := filterDisplayPods(cliData.AllPods, pcsFilter)
 
 	if len(displayPods) == 0 {
 		if pcsFilter != "" {
@@ -123,7 +121,7 @@ func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string)
 	gpuByDomain := computeThreeWayGPUUsage(
 		labelKey, cliData.NodeLabels,
 		cliData.NodeGPUProducts, cliData.NodeGPUCapacity,
-		cliData.AllPods, isDisplayPod,
+		cliData.AllPods, pcsFilter,
 	)
 	for i := range groups {
 		groups[i].GPUUsage = gpuByDomain[groups[i].Value]
@@ -137,41 +135,44 @@ func runTopology(domain, namespace string, allNamespaces bool, pcsFilter string)
 	return nil
 }
 
-// filterDisplayPods partitions allPods into display pods and builds the isDisplayPod predicate.
-// Returns: displayPods, pcsDisplayName, isDisplayPod predicate.
-func filterDisplayPods(
-	allPods []k8s.TopologyCLIPod,
-	pcsFilter string,
-) ([]k8s.TopologyCLIPod, string, func(*k8s.TopologyCLIPod) bool) {
-	var isDisplayPod func(*k8s.TopologyCLIPod) bool
-	pcsDisplay := "all"
+// isPCSMatch returns true if the pod's "app.kubernetes.io/part-of" label
+// matches the given filter. When pcsFilter is empty, any pod with a non-empty
+// "part-of" label is considered a match (i.e. any PCS-managed pod).
+func isPCSMatch(labels map[string]string, pcsFilter string) bool {
+	partOf := labels["app.kubernetes.io/part-of"]
+	if pcsFilter != "" {
+		return partOf == pcsFilter
+	}
+	return partOf != ""
+}
 
+// filterDisplayPods partitions allPods into pods matching the PCS filter.
+// If pcsFilter is empty, all PCS-managed pods (those with a "part-of" label) are included.
+// Returns: displayPods and the PCS display name for rendering.
+func filterDisplayPods(
+	allPods []clusterstate.TopologyPodInput,
+	pcsFilter string,
+) ([]clusterstate.TopologyPodInput, string) {
+	pcsDisplay := "all"
 	if pcsFilter != "" {
 		pcsDisplay = pcsFilter
-		isDisplayPod = func(pod *k8s.TopologyCLIPod) bool {
-			return pod.Labels["app.kubernetes.io/part-of"] == pcsFilter
-		}
-	} else {
-		isDisplayPod = func(pod *k8s.TopologyCLIPod) bool {
-			return pod.Labels["app.kubernetes.io/part-of"] != ""
-		}
 	}
 
-	var displayPods []k8s.TopologyCLIPod
+	var displayPods []clusterstate.TopologyPodInput
 	for i := range allPods {
-		if isDisplayPod(&allPods[i]) {
+		if isPCSMatch(allPods[i].Labels, pcsFilter) {
 			displayPods = append(displayPods, allPods[i])
 		}
 	}
 
-	return displayPods, pcsDisplay, isDisplayPod
+	return displayPods, pcsDisplay
 }
 
 // groupPodsByTopology groups display pods by their node's topology label value.
 // Returns scheduled groups and unscheduled GPU pods separately.
 // Pods that are unscheduled or on nodes missing the topology label are separated out.
 func groupPodsByTopology(
-	displayPods []k8s.TopologyCLIPod,
+	displayPods []clusterstate.TopologyPodInput,
 	nodeLabels map[string]map[string]string,
 	labelKey string,
 	nodeGPUProducts map[string]string,
@@ -251,99 +252,62 @@ func groupPodsByTopology(
 }
 
 // computeThreeWayGPUUsage computes the this/other/free GPU split per domain value.
+// pcsFilter selects which pods count as "grove" (this PCS); empty means all PCS-managed pods.
+// It delegates to clusterstate.ComputeDomainGPUSummary and converts the result to gpuUsageEntry slices.
 func computeThreeWayGPUUsage(
 	labelKey string,
 	nodeLabels map[string]map[string]string,
 	nodeGPUProducts map[string]string,
 	nodeGPUCapacity map[string]int64,
-	allPods []k8s.TopologyCLIPod,
-	isDisplayPod func(*k8s.TopologyCLIPod) bool,
+	allPods []clusterstate.TopologyPodInput,
+	pcsFilter string,
 ) map[string][]gpuUsageEntry {
-	// key: (domainValue, gpuType)
-	type dvgt struct{ domainValue, gpuType string }
-
-	capacity := make(map[dvgt]int64)
-	thisPCS := make(map[dvgt]int64)
-	other := make(map[dvgt]int64)
-
-	// 1. Capacity — from nodes
-	for nodeName, labels := range nodeLabels {
-		domainValue := labels[labelKey]
-		if domainValue == "" {
-			continue
-		}
-		gpuType := nodeGPUProducts[nodeName]
-		if gpuType == "" {
-			continue
-		}
-		cap := nodeGPUCapacity[nodeName]
-		if cap <= 0 {
-			continue
-		}
-		capacity[dvgt{domainValue, gpuType}] += cap
-	}
-
-	// 2. This + Other — from pods
+	// Build a set of display pod names directly from the PCS filter
+	displayPodNames := make(map[string]bool, len(allPods))
 	for i := range allPods {
-		pod := &allPods[i]
-		if pod.GPURequests <= 0 || pod.NodeName == "" {
-			continue
-		}
-		labels, ok := nodeLabels[pod.NodeName]
-		if !ok {
-			continue
-		}
-		domainValue := labels[labelKey]
-		if domainValue == "" {
-			continue
-		}
-		gpuType := nodeGPUProducts[pod.NodeName]
-		if gpuType == "" {
-			continue
-		}
-
-		key := dvgt{domainValue, gpuType}
-		if isDisplayPod(pod) {
-			thisPCS[key] += pod.GPURequests
-		} else {
-			other[key] += pod.GPURequests
+		if isPCSMatch(allPods[i].Labels, pcsFilter) {
+			displayPodNames[allPods[i].Name] = true
 		}
 	}
-
-	// 3. Combine into gpuUsageEntry per domain value
-	// Collect all (domainValue, gpuType) pairs from capacity
-	dvKeys := make(map[string]map[string]bool)
-	for key := range capacity {
-		if dvKeys[key.domainValue] == nil {
-			dvKeys[key.domainValue] = make(map[string]bool)
-		}
-		dvKeys[key.domainValue][key.gpuType] = true
+	classifier := func(pod clusterstate.TopologyPodInput) bool {
+		return displayPodNames[pod.Name]
 	}
 
+	// Get all node names as matching nodes (all nodes are in scope)
+	matchingNodes := make([]string, 0, len(nodeLabels))
+	for nodeName := range nodeLabels {
+		matchingNodes = append(matchingNodes, nodeName)
+	}
+
+	summary := clusterstate.ComputeDomainGPUSummary(clusterstate.DomainGPUInput{
+		DomainKey:       labelKey,
+		MatchingNodes:   matchingNodes,
+		NodeLabels:      nodeLabels,
+		NodeGPUProducts: nodeGPUProducts,
+		NodeGPUCapacity: nodeGPUCapacity,
+		Pods:            allPods,
+		Classifier:      classifier,
+	})
+
+	// Convert DomainGPUSummary to map[string][]gpuUsageEntry
 	result := make(map[string][]gpuUsageEntry)
-	for domainValue, gpuTypes := range dvKeys {
-		// Sort GPU types
-		sortedTypes := make([]string, 0, len(gpuTypes))
-		for t := range gpuTypes {
-			sortedTypes = append(sortedTypes, t)
-		}
-		sort.Strings(sortedTypes)
-
+	for domainValue, gpuCounts := range summary.ByValue {
 		var entries []gpuUsageEntry
-		for _, gpuType := range sortedTypes {
-			key := dvgt{domainValue, gpuType}
-			total := capacity[key]
-			used := thisPCS[key]
-			otherUsed := other[key]
-			free := total - used - otherUsed
+		for _, gpuType := range summary.GPUTypes {
+			counts := gpuCounts[gpuType]
+			// Skip GPU types with no presence in this domain value
+			if counts.Total == 0 && counts.Grove == 0 && counts.Other == 0 {
+				continue
+			}
+			free := counts.Total - counts.Grove - counts.Other
 			if free < 0 {
 				free = 0
 			}
 			entries = append(entries, gpuUsageEntry{
 				Type:    gpuType,
-				ThisPCS: used,
-				Total:   total,
-				Other:   otherUsed,
+				ThisPCS: counts.Grove,
+				Total:   counts.Total,
+				Other:   counts.Other,
 				Free:    free,
 			})
 		}
@@ -370,11 +334,8 @@ func printGPUMiniTable(w io.Writer, entries []gpuUsageEntry) {
 	prefix := "│  "
 
 	for _, e := range entries {
-		bar := data.FormatGPUBar(e.ThisPCS, e.Other, e.Total, 20)
-		// Add superscript annotations: ¹ after bar graph, ² after numbers
-		bar = strings.Replace(bar, "] (", "]¹ (", 1)
-		bar += "²"
-		fmt.Fprintf(w, "%s%s %s\n", prefix, e.Type, bar)
+		bar := clusterstate.FormatGPUBarOnly(e.ThisPCS, e.Other, e.Total, 20)
+		fmt.Fprintf(w, "%s%s %s¹ (%d/%d/%d)²\n", prefix, e.Type, bar, e.ThisPCS, e.Other, e.Total)
 	}
 }
 

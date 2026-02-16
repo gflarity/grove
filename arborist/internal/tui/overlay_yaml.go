@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -20,19 +20,19 @@ func (m Model) openYAMLOverlay() (tea.Model, tea.Cmd) {
 	actualType := resourceType
 	actualName := resourceName
 	switch resourceType {
-	case "(PodCliqueSet replica)":
-		actualType = "PodCliqueSet"
+	case clusterstate.ResourceTypePCSReplica:
+		actualType = clusterstate.ResourceTypePodCliqueSet
 		actualName = m.viewState.SelectedPodCliqueSet
-	case "(PodCliqueScalingGroup replica)":
-		actualType = "PodCliqueScalingGroup"
+	case clusterstate.ResourceTypePCSGReplica:
+		actualType = clusterstate.ResourceTypePCSG
 		actualName = m.viewState.SelectedScalingGroup
 	}
 
 	// Set overlay state — show "Loading..." while fetching
 	loadingMsg := "# Loading YAML for " + actualType + "/" + actualName + "..."
 	m.yamlOverlay.Open(loadingMsg, m.width, m.height)
-	m.yamlResourceType = resourceType
-	m.yamlResourceName = resourceName
+	m.yamlOverlay.ResourceType = resourceType
+	m.yamlOverlay.ResourceName = resourceName
 	m.yamlOverlay.Viewport.GotoTop()
 
 	debugLogWithContext("openYAMLOverlay: loading %s/%s (actual: %s/%s)", resourceType, resourceName, actualType, actualName)
@@ -42,9 +42,9 @@ func (m Model) openYAMLOverlay() (tea.Model, tea.Cmd) {
 
 // selectedResourceInfo returns the type, name, and namespace of the currently selected resource.
 func (m Model) selectedResourceInfo() (string, string, string) {
-	if m.viewState.ViewType == data.TopologyView {
+	if m.viewState.ViewType == clusterstate.TopologyView {
 		// In topology view, use the pods table if focused on pods pane
-		if m.activePane == data.TopologyPodsPane {
+		if m.activePane == clusterstate.TopologyPodsPane {
 			row := m.topologyPodsTable.SelectedRow()
 			if len(row) >= 3 {
 				return "Pod", row[2], row[0] // NAME at index 2, NAMESPACE at index 0
@@ -54,7 +54,7 @@ func (m Model) selectedResourceInfo() (string, string, string) {
 	}
 
 	// For PodView or ContainersView, the selected resource is the pod itself
-	if m.viewState.ViewType == data.PodView || m.viewState.ViewType == data.ContainersView {
+	if m.viewState.ViewType == clusterstate.PodView || m.viewState.ViewType == clusterstate.ContainersView {
 		return "Pod", m.viewState.SelectedPod, m.resolveNamespace()
 	}
 
@@ -86,29 +86,12 @@ func (m Model) handleResourceYAML(msg ResourceYAMLMsg) (tea.Model, tea.Cmd) {
 
 // handleYAMLOverlayKey handles keys when the YAML overlay is active.
 func (m Model) handleYAMLOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// If search is active, delegate to the overlay's search handler
-	if m.yamlOverlay.SearchActive {
-		needsUpdate, cmd := m.yamlOverlay.HandleSearchKey(msg)
-		if needsUpdate {
-			m.yamlOverlay.UpdateViewportContent()
-			if m.yamlOverlay.SearchText != "" {
-				m.yamlOverlay.ApplySearch()
-			}
-			debugLogWithContext("YAML search %s: %q",
-				map[bool]string{true: "applied", false: "cancelled"}[m.yamlOverlay.SearchText != ""],
-				m.yamlOverlay.SearchText)
-		}
-		return m, cmd
-	}
-
-	// Delegate common keys to the overlay model
-	handled, cmd := m.yamlOverlay.HandleKey(msg)
+	handled, cmd := m.yamlOverlay.HandleKeyMsg(msg)
 	if handled {
 		if !m.yamlOverlay.Active {
 			debugLogWithContext("YAML overlay closed")
 		}
 		return m, cmd
 	}
-
 	return m, nil
 }

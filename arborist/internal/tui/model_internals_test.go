@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 )
 
 // ---------------------------------------------------------------------------
@@ -175,77 +175,77 @@ func TestExtractReplicaIndex(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGpuCountsForResource(t *testing.T) {
-	summary := &data.GPUSummary{
+	summary := &clusterstate.GPUSummary{
 		GPUTypes: []string{"H100", "A100"},
-		ByPCS: map[string]data.GPUCounts{
+		ByPCS: map[string]clusterstate.GPUCounts{
 			"pcs-a": {"H100": 16, "A100": 8},
 		},
-		ByReplica: map[string]data.GPUCounts{
+		ByReplica: map[string]clusterstate.GPUCounts{
 			"pcs-a/0": {"H100": 8},
 		},
-		ByPCSG: map[string]data.GPUCounts{
+		ByPCSG: map[string]clusterstate.GPUCounts{
 			"pcsg-x": {"A100": 4},
 		},
-		ByPodClique: map[string]data.GPUCounts{
+		ByPodClique: map[string]clusterstate.GPUCounts{
 			"pc-1": {"H100": 2},
 		},
-		ByPod: map[string]data.GPUCounts{
+		ByPod: map[string]clusterstate.GPUCounts{
 			"pod-1": {"H100": 1},
 		},
 	}
 
 	m := Model{
-		gpuSummary: summary,
-		viewState: data.ViewState{
+		DataState: DataState{gpuSummary: summary},
+		viewState: clusterstate.ViewState{
 			SelectedPodCliqueSet: "pcs-a",
 		},
 	}
 
 	t.Run("PodCliqueSet", func(t *testing.T) {
-		counts := m.gpuCountsForResource(data.Resource{Name: "pcs-a", Type: "PodCliqueSet"})
+		counts := m.gpuCountsForResource(clusterstate.Resource{Name: "pcs-a", Type: "PodCliqueSet"})
 		if counts["H100"] != 16 || counts["A100"] != 8 {
 			t.Errorf("PCS counts = %v, want H100:16 A100:8", counts)
 		}
 	})
 
 	t.Run("(PodCliqueSet replica)", func(t *testing.T) {
-		counts := m.gpuCountsForResource(data.Resource{Name: "pcs-a-replica-0", Type: "(PodCliqueSet replica)"})
+		counts := m.gpuCountsForResource(clusterstate.Resource{Name: "pcs-a-replica-0", Type: "(PodCliqueSet replica)"})
 		if counts["H100"] != 8 {
 			t.Errorf("replica counts = %v, want H100:8", counts)
 		}
 	})
 
 	t.Run("PodCliqueScalingGroup", func(t *testing.T) {
-		counts := m.gpuCountsForResource(data.Resource{Name: "pcsg-x", Type: "PodCliqueScalingGroup"})
+		counts := m.gpuCountsForResource(clusterstate.Resource{Name: "pcsg-x", Type: "PodCliqueScalingGroup"})
 		if counts["A100"] != 4 {
 			t.Errorf("PCSG counts = %v, want A100:4", counts)
 		}
 	})
 
 	t.Run("PodClique", func(t *testing.T) {
-		counts := m.gpuCountsForResource(data.Resource{Name: "pc-1", Type: "PodClique"})
+		counts := m.gpuCountsForResource(clusterstate.Resource{Name: "pc-1", Type: "PodClique"})
 		if counts["H100"] != 2 {
 			t.Errorf("PodClique counts = %v, want H100:2", counts)
 		}
 	})
 
 	t.Run("Pod", func(t *testing.T) {
-		counts := m.gpuCountsForResource(data.Resource{Name: "pod-1", Type: "Pod"})
+		counts := m.gpuCountsForResource(clusterstate.Resource{Name: "pod-1", Type: "Pod"})
 		if counts["H100"] != 1 {
 			t.Errorf("Pod counts = %v, want H100:1", counts)
 		}
 	})
 
 	t.Run("unknown resource", func(t *testing.T) {
-		counts := m.gpuCountsForResource(data.Resource{Name: "unknown", Type: "Unknown"})
+		counts := m.gpuCountsForResource(clusterstate.Resource{Name: "unknown", Type: "Unknown"})
 		if counts != nil {
 			t.Errorf("unknown resource counts = %v, want nil", counts)
 		}
 	})
 
 	t.Run("nil gpuSummary", func(t *testing.T) {
-		m2 := Model{gpuSummary: nil}
-		counts := m2.gpuCountsForResource(data.Resource{Name: "pcs-a", Type: "PodCliqueSet"})
+		m2 := Model{DataState: DataState{gpuSummary: nil}}
+		counts := m2.gpuCountsForResource(clusterstate.Resource{Name: "pcs-a", Type: "PodCliqueSet"})
 		if counts != nil {
 			t.Errorf("nil summary counts = %v, want nil", counts)
 		}
@@ -257,42 +257,42 @@ func TestGpuCountsForResource(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsResourcePending(t *testing.T) {
-	summary := &data.GPUSummary{
+	summary := &clusterstate.GPUSummary{
 		PendingGPUPods: map[string]int64{
 			"pending-pod": 8,
 		},
 	}
 
-	m := Model{gpuSummary: summary}
+	m := Model{DataState: DataState{gpuSummary: summary}}
 
 	t.Run("pending Pod", func(t *testing.T) {
-		if !m.isResourcePending(data.Resource{Name: "pending-pod", Type: "Pod"}) {
+		if !m.isResourcePending(clusterstate.Resource{Name: "pending-pod", Type: "Pod"}) {
 			t.Error("expected pending Pod to return true")
 		}
 	})
 
 	t.Run("non-pending Pod", func(t *testing.T) {
-		if m.isResourcePending(data.Resource{Name: "running-pod", Type: "Pod"}) {
+		if m.isResourcePending(clusterstate.Resource{Name: "running-pod", Type: "Pod"}) {
 			t.Error("expected non-pending Pod to return false")
 		}
 	})
 
 	t.Run("non-Pod resource is never pending", func(t *testing.T) {
-		if m.isResourcePending(data.Resource{Name: "pcs-a", Type: "PodCliqueSet"}) {
+		if m.isResourcePending(clusterstate.Resource{Name: "pcs-a", Type: "PodCliqueSet"}) {
 			t.Error("expected non-Pod to return false")
 		}
 	})
 
 	t.Run("nil gpuSummary", func(t *testing.T) {
-		m2 := Model{gpuSummary: nil}
-		if m2.isResourcePending(data.Resource{Name: "pending-pod", Type: "Pod"}) {
+		m2 := Model{DataState: DataState{gpuSummary: nil}}
+		if m2.isResourcePending(clusterstate.Resource{Name: "pending-pod", Type: "Pod"}) {
 			t.Error("nil summary should return false")
 		}
 	})
 
 	t.Run("empty PendingGPUPods", func(t *testing.T) {
-		m2 := Model{gpuSummary: &data.GPUSummary{PendingGPUPods: map[string]int64{}}}
-		if m2.isResourcePending(data.Resource{Name: "pending-pod", Type: "Pod"}) {
+		m2 := Model{DataState: DataState{gpuSummary: &clusterstate.GPUSummary{PendingGPUPods: map[string]int64{}}}}
+		if m2.isResourcePending(clusterstate.Resource{Name: "pending-pod", Type: "Pod"}) {
 			t.Error("empty pending map should return false")
 		}
 	})
@@ -305,7 +305,7 @@ func TestIsResourcePending(t *testing.T) {
 func TestGetFilteredEvents(t *testing.T) {
 	now := time.Now()
 
-	allEvents := []data.Event{
+	allEvents := []clusterstate.Event{
 		{Type: "Normal", Parent: "pod-a", Reason: "Scheduled", Message: "pod-a scheduled", Timestamp: now},
 		{Type: "Warning", Parent: "pod-b", Reason: "Failed", Message: "pod-b failed", Timestamp: now},
 		{Type: "Normal", Parent: "pc-a", Reason: "Created", Message: "pc-a created", Timestamp: now},
@@ -313,11 +313,11 @@ func TestGetFilteredEvents(t *testing.T) {
 
 	t.Run("PodView filters to selected pod", func(t *testing.T) {
 		m := Model{
-			viewState: data.ViewState{
-				ViewType:    data.PodView,
+			viewState: clusterstate.ViewState{
+				ViewType:    clusterstate.PodView,
 				SelectedPod: "pod-a",
 			},
-			allEvents: allEvents,
+			DataState: DataState{allEvents: allEvents},
 		}
 
 		events := m.getFilteredEvents()
@@ -331,11 +331,11 @@ func TestGetFilteredEvents(t *testing.T) {
 
 	t.Run("PodView with no matching events", func(t *testing.T) {
 		m := Model{
-			viewState: data.ViewState{
-				ViewType:    data.PodView,
+			viewState: clusterstate.ViewState{
+				ViewType:    clusterstate.PodView,
 				SelectedPod: "pod-nonexistent",
 			},
-			allEvents: allEvents,
+			DataState: DataState{allEvents: allEvents},
 		}
 
 		events := m.getFilteredEvents()
@@ -346,10 +346,10 @@ func TestGetFilteredEvents(t *testing.T) {
 
 	t.Run("ForestView returns all events", func(t *testing.T) {
 		m := Model{
-			viewState: data.ViewState{
-				ViewType: data.ForestView,
+			viewState: clusterstate.ViewState{
+				ViewType: clusterstate.ForestView,
 			},
-			allEvents: allEvents,
+			DataState: DataState{allEvents: allEvents},
 		}
 
 		events := m.getFilteredEvents()
@@ -360,10 +360,10 @@ func TestGetFilteredEvents(t *testing.T) {
 
 	t.Run("empty allEvents returns empty", func(t *testing.T) {
 		m := Model{
-			viewState: data.ViewState{
-				ViewType: data.ForestView,
+			viewState: clusterstate.ViewState{
+				ViewType: clusterstate.ForestView,
 			},
-			allEvents: nil,
+			DataState: DataState{allEvents: nil},
 		}
 
 		events := m.getFilteredEvents()

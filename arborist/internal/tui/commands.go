@@ -3,16 +3,123 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// =============================================================================
+// Command Mode (vim-style ":" lens switching with autocomplete)
+// =============================================================================
+
+type lensCommand struct {
+	Name string
+}
+
+var lensCommands = []lensCommand{
+	{Name: "forest"},
+	{Name: "topology"},
+	{Name: "pcs"},
+	{Name: "podcliqueset"},
+	{Name: "pc"},
+	{Name: "podclique"},
+	{Name: "pcsg"},
+	{Name: "podcliquescalinggroup"},
+	{Name: "pod"},
+}
+
+// LensCommandNames returns the list of available command names.
+func LensCommandNames() []string {
+	names := make([]string, len(lensCommands))
+	for i, c := range lensCommands {
+		names[i] = c.Name
+	}
+	return names
+}
+
+func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
+	debugLogWithContext("executeCommand: input=%q currentView=%s commandActive=%v lensEditActive=%v",
+		input, clusterstate.ViewTypeName(m.viewState.ViewType), m.commandActive, m.lensEditActive)
+
+	input = strings.TrimSpace(strings.ToLower(input))
+	if input == "" {
+		return m, nil
+	}
+
+	matched := ""
+	for _, c := range lensCommands {
+		if c.Name == input {
+			matched = c.Name
+			break
+		}
+	}
+	if matched == "" {
+		if m.lensAutocomplete != nil {
+			if name, ok := m.lensAutocomplete.UniqueMatch(input); ok {
+				matched = name
+			}
+		}
+	}
+	if matched == "" {
+		debugLogWithContext("executeCommand: no match for %q", input)
+		return m, nil
+	}
+
+	debugLogWithContext("executeCommand: executing %q (matched %q)", input, matched)
+
+	// Normalize long forms to short forms for resource type commands
+	normalized := normalizeResourceType(matched)
+
+	switch matched {
+	case "forest":
+		// "forest" is equivalent to ":pcs"
+		normalized = "pcs"
+		m.switchToForestResourceType(normalized)
+		return m, nil
+
+	case "topology":
+		// Guard: if not currently in topology view and topology is unavailable, log error
+		if m.viewState.ViewType != clusterstate.TopologyView && !m.topologyAvailable() {
+			m.addError("Topology unavailable — no ClusterTopology resource found")
+			debugLogWithContext("executeCommand: topology unavailable, staying in current view")
+			return m, nil
+		}
+		return m.toggleTopologyView()
+
+	case "pcs", "podcliqueset", "pc", "podclique", "pcsg", "podcliquescalinggroup", "pod":
+		m.switchToForestResourceType(normalized)
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// switchToForestResourceType switches to ForestView with the given resource type,
+// clearing drill state but preserving the filter.
+func (m *Model) switchToForestResourceType(rt string) {
+	m.forestResourceType = rt
+	m.viewState.ViewType = clusterstate.ForestView
+	m.viewState.SelectedPodCliqueSet = ""
+	m.viewState.SelectedReplicaIndex = ""
+	m.viewState.SelectedScalingGroup = ""
+	m.viewState.SelectedPodClique = ""
+	m.viewState.SelectedPod = ""
+	m.cachedTopologyInfo = nil
+	m.activePane = clusterstate.ResourcesPane
+	m.updateTableFocus()
+	m.rebuildAllFromSnapshot()
+}
+
+// =============================================================================
+// Bubble Tea Commands (tea.Cmd factories)
+// =============================================================================
 
 // startGlobalCacheCmd starts the global cache and waits for initial sync.
 // Any non-fatal warnings from startup (e.g. missing CRDs) are collected
 // and delivered via CacheSyncedMsg.Warnings.
-func startGlobalCacheCmd(cache data.GlobalCache, ctx context.Context) tea.Cmd {
+func startGlobalCacheCmd(cache clusterstate.GlobalCache, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("startGlobalCache")
 
@@ -20,7 +127,7 @@ func startGlobalCacheCmd(cache data.GlobalCache, ctx context.Context) tea.Cmd {
 		// The callback fires synchronously during cache.Start(), so a simple
 		// slice is safe (no concurrent access).
 		var warnings []string
-		if wc, ok := cache.(data.WarningConfigurable); ok {
+		if wc, ok := cache.(clusterstate.WarningConfigurable); ok {
 			wc.SetOnWarning(func(msg string) {
 				warnings = append(warnings, msg)
 			})
@@ -37,7 +144,7 @@ func startGlobalCacheCmd(cache data.GlobalCache, ctx context.Context) tea.Cmd {
 }
 
 // waitForCacheUpdateCmd blocks until the cache has a new snapshot.
-func waitForCacheUpdateCmd(cache data.GlobalCache) tea.Cmd {
+func waitForCacheUpdateCmd(cache clusterstate.GlobalCache) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("waitForCacheUpdate")
 		_, ok := <-cache.Updates()
@@ -49,7 +156,7 @@ func waitForCacheUpdateCmd(cache data.GlobalCache) tea.Cmd {
 }
 
 // loadResourceYAMLCmd creates a command to load any resource's YAML for the YAML overlay.
-func loadResourceYAMLCmd(cache data.GlobalCache, ctx context.Context, resourceType, name, namespace string) tea.Cmd {
+func loadResourceYAMLCmd(cache clusterstate.GlobalCache, ctx context.Context, resourceType, name, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("loadResourceYAML", "type", resourceType, "name", name, "ns", namespace)
 		if cache == nil {
@@ -63,7 +170,7 @@ func loadResourceYAMLCmd(cache data.GlobalCache, ctx context.Context, resourceTy
 
 // loadPodYAMLCmd creates a command to load a Pod's YAML via direct API GET.
 // This is the one exception — Pod YAML is large and rarely accessed.
-func loadPodYAMLCmd(cache data.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+func loadPodYAMLCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("loadPodYAML", "pod", podName, "ns", namespace)
 		if cache == nil {
@@ -76,7 +183,7 @@ func loadPodYAMLCmd(cache data.GlobalCache, ctx context.Context, podName, namesp
 }
 
 // loadPodContainersCmd creates a command to load a Pod's container info.
-func loadPodContainersCmd(cache data.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+func loadPodContainersCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("loadPodContainers", "pod", podName, "ns", namespace)
 		if cache == nil {
@@ -89,7 +196,7 @@ func loadPodContainersCmd(cache data.GlobalCache, ctx context.Context, podName, 
 }
 
 // loadPodLogsCmd creates a command to load a pod container's logs.
-func loadPodLogsCmd(cache data.GlobalCache, ctx context.Context, podName, namespace, container string, tailLines int64) tea.Cmd {
+func loadPodLogsCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace, container string, tailLines int64) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("loadPodLogs", "pod", podName, "ns", namespace, "container", container)
 		if cache == nil {
@@ -113,7 +220,7 @@ func logsAutoScrollTickCmd() tea.Cmd {
 
 // fetchFirstContainerForLogsCmd fetches containers for a pod and returns a LogsRequestMsg
 // for the first running container (or first container if none running), or an ErrorMsg.
-func fetchFirstContainerForLogsCmd(cache data.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+func fetchFirstContainerForLogsCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("fetchFirstContainerForLogs", "pod", podName, "ns", namespace)
 		if cache == nil {
@@ -140,7 +247,7 @@ func fetchFirstContainerForLogsCmd(cache data.GlobalCache, ctx context.Context, 
 
 // fetchFirstRunningContainerCmd fetches containers for a pod and returns a ShellRequestMsg
 // for the first running container, or an ErrorMsg if none are found.
-func fetchFirstRunningContainerCmd(cache data.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+func fetchFirstRunningContainerCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("fetchFirstRunningContainer", "pod", podName, "ns", namespace)
 		if cache == nil {

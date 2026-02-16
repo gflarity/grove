@@ -4,60 +4,32 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-dynamo/grove/arborist/internal/data"
+	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // handleLogsExec handles the 'l' key press to open logs for a pod/container.
 func (m Model) handleLogsExec() (tea.Model, tea.Cmd) {
-	switch m.viewState.ViewType {
-	case data.ContainersView:
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) < 3 {
-			return m, nil
-		}
-		containerName := selectedRow[0]
-		namespace := m.resolveNamespace()
-
-		m.openLogsOverlay(m.viewState.SelectedPod, containerName, namespace)
-
-		debugLogWithContext("opening logs overlay: pod=%s container=%s", m.viewState.SelectedPod, containerName)
-		return m, loadPodLogsCmd(m.cache, m.ctx, m.viewState.SelectedPod, namespace, containerName, 1000)
-
-	case data.PodCliqueView:
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) < 3 || selectedRow[1] != "Pod" {
-			return m, nil
-		}
-		podName := selectedRow[2]
-		namespace := selectedRow[0]
-		return m, fetchFirstContainerForLogsCmd(m.cache, m.ctx, podName, namespace)
-
-	case data.ForestView:
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) < 3 || selectedRow[1] != "Pod" {
-			return m, nil
-		}
-		podName := selectedRow[2]
-		namespace := selectedRow[0]
-		return m, fetchFirstContainerForLogsCmd(m.cache, m.ctx, podName, namespace)
-
-	default:
+	exec, ok := m.behavior().(LogsExecutor)
+	if !ok {
 		return m, nil
 	}
+	return exec.LogsExec(&m)
 }
 
 // openLogsOverlay initializes the logs overlay state.
 func (m *Model) openLogsOverlay(podName, containerName, namespace string) {
 	loadingMsg := "# Loading logs for " + podName + "/" + containerName + "..."
 	m.logsOverlay.Open(loadingMsg, m.width, m.height)
-	m.logsPodName = podName
-	m.logsContainerName = containerName
-	m.logsWrapEnabled = false
-	m.logsNamespace = namespace
-	m.logsAutoScroll = false
-	m.logsHorizontalOffset = 0
+	m.logsOverlay.ContentTransform = m.logsContentTransform
+	m.logsOverlay.SearchTransform = m.logsSearchTransform
+	m.logsOverlay.PodName = podName
+	m.logsOverlay.ContainerName = containerName
+	m.logsOverlay.WrapEnabled = false
+	m.logsOverlay.Namespace = namespace
+	m.logsOverlay.AutoScroll = false
+	m.logsOverlay.HorizontalOffset = 0
 	m.logsOverlay.Viewport.GotoBottom()
 }
 
@@ -86,11 +58,11 @@ func (m Model) handleLogsContent(msg LogsContentMsg) (tea.Model, tea.Cmd) {
 // handleLogsAutoScrollTick handles logsAutoScrollTickMsg — re-fetches logs and schedules the next tick.
 // If autoscroll is off or the overlay is closed, returns nil to break the tick chain.
 func (m Model) handleLogsAutoScrollTick() (tea.Model, tea.Cmd) {
-	if !m.logsOverlay.Active || !m.logsAutoScroll {
+	if !m.logsOverlay.Active || !m.logsOverlay.AutoScroll {
 		return m, nil
 	}
 	return m, tea.Batch(
-		loadPodLogsCmd(m.cache, m.ctx, m.logsPodName, m.logsNamespace, m.logsContainerName, 1000),
+		loadPodLogsCmd(m.cache, m.ctx, m.logsOverlay.PodName, m.logsOverlay.Namespace, m.logsOverlay.ContainerName, 1000),
 		logsAutoScrollTickCmd(),
 	)
 }
@@ -105,66 +77,55 @@ func (m Model) handleLogsRequest(msg LogsRequestMsg) (tea.Model, tea.Cmd) {
 
 // handleLogsOverlayKey handles keys when the logs overlay is active.
 func (m Model) handleLogsOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// If search is active, delegate to the overlay's search handler
-	if m.logsOverlay.SearchActive {
-		needsUpdate, cmd := m.logsOverlay.HandleSearchKey(msg)
-		if needsUpdate {
-			m.updateLogsViewportContent()
-			if m.logsOverlay.SearchText != "" {
-				m.applyLogsSearch()
-			}
-			debugLogWithContext("logs search %s: %q",
-				map[bool]string{true: "applied", false: "cancelled"}[m.logsOverlay.SearchText != ""],
-				m.logsOverlay.SearchText)
-		}
-		return m, cmd
-	}
-
-	// Handle logs-specific keys before delegating to common overlay handler
-	switch msg.Type {
-	case tea.KeyLeft:
-		if !m.logsWrapEnabled && m.logsHorizontalOffset > 0 {
-			m.logsHorizontalOffset -= logsHorizontalScrollStep
-			if m.logsHorizontalOffset < 0 {
-				m.logsHorizontalOffset = 0
-			}
-			m.updateLogsViewportContent()
-		}
-		return m, nil
-
-	case tea.KeyRight:
-		if !m.logsWrapEnabled {
-			m.logsHorizontalOffset += logsHorizontalScrollStep
-			m.updateLogsViewportContent()
-		}
-		return m, nil
-
-	case tea.KeyRunes:
-		switch msg.String() {
-		case "w", "W":
-			m.logsWrapEnabled = !m.logsWrapEnabled
-			m.logsHorizontalOffset = 0
-			m.updateLogsViewportContent()
-			debugLogWithContext("logs wrap toggled: %v", m.logsWrapEnabled)
-			return m, nil
-		case "s", "S":
-			m.logsAutoScroll = !m.logsAutoScroll
-			debugLogWithContext("logs autoscroll toggled: %v", m.logsAutoScroll)
-			if m.logsAutoScroll {
-				return m, tea.Batch(
-					logsAutoScrollTickCmd(),
-					loadPodLogsCmd(m.cache, m.ctx, m.logsPodName, m.logsNamespace, m.logsContainerName, 1000),
-				)
+	// Handle logs-specific keys before delegating to common overlay handler.
+	// Search-active state is handled by HandleKeyMsg below, so only intercept
+	// logs-specific keys when search is NOT active.
+	if !m.logsOverlay.SearchActive {
+		switch msg.Type {
+		case tea.KeyLeft:
+			if !m.logsOverlay.WrapEnabled && m.logsOverlay.HorizontalOffset > 0 {
+				m.logsOverlay.HorizontalOffset -= logsHorizontalScrollStep
+				if m.logsOverlay.HorizontalOffset < 0 {
+					m.logsOverlay.HorizontalOffset = 0
+				}
+				m.updateLogsViewportContent()
 			}
 			return m, nil
+
+		case tea.KeyRight:
+			if !m.logsOverlay.WrapEnabled {
+				m.logsOverlay.HorizontalOffset += logsHorizontalScrollStep
+				m.updateLogsViewportContent()
+			}
+			return m, nil
+
+		case tea.KeyRunes:
+			switch msg.String() {
+			case "w", "W":
+				m.logsOverlay.WrapEnabled = !m.logsOverlay.WrapEnabled
+				m.logsOverlay.HorizontalOffset = 0
+				m.updateLogsViewportContent()
+				debugLogWithContext("logs wrap toggled: %v", m.logsOverlay.WrapEnabled)
+				return m, nil
+			case "s", "S":
+				m.logsOverlay.AutoScroll = !m.logsOverlay.AutoScroll
+				debugLogWithContext("logs autoscroll toggled: %v", m.logsOverlay.AutoScroll)
+				if m.logsOverlay.AutoScroll {
+					return m, tea.Batch(
+						logsAutoScrollTickCmd(),
+						loadPodLogsCmd(m.cache, m.ctx, m.logsOverlay.PodName, m.logsOverlay.Namespace, m.logsOverlay.ContainerName, 1000),
+					)
+				}
+				return m, nil
+			}
 		}
 	}
 
-	// Delegate common keys (Esc/q, viewport nav, search, n/N) to the overlay model
-	handled, cmd := m.logsOverlay.HandleKey(msg)
+	// Delegate search-active handling + common keys to the unified handler
+	handled, cmd := m.logsOverlay.HandleKeyMsg(msg)
 	if handled {
 		if !m.logsOverlay.Active {
-			m.logsAutoScroll = false
+			m.logsOverlay.AutoScroll = false
 			debugLogWithContext("logs overlay closed")
 		}
 		return m, cmd
@@ -176,7 +137,7 @@ func (m Model) handleLogsOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // updateLogsViewportContent sets the viewport content from logsContent,
 // applying carriage-return resolution, wrap/truncation, and search highlighting.
 func (m *Model) updateLogsViewportContent() {
-	m.logsOverlay.UpdateViewportContentWithTransform(m.logsContentTransform)
+	m.logsOverlay.UpdateViewportContent()
 }
 
 // logsContentTransform applies CR resolution + wrap/horizontal-slice to log content.
@@ -186,13 +147,13 @@ func (m *Model) logsContentTransform(content string) string {
 	// literally, moving the cursor to column 0 and corrupting the frame border.
 	content = resolveCarriageReturns(content)
 
-	if m.logsWrapEnabled && m.logsOverlay.Viewport.Width > 0 {
+	if m.logsOverlay.WrapEnabled && m.logsOverlay.Viewport.Width > 0 {
 		content = wrapText(content, m.logsOverlay.Viewport.Width)
 	} else if m.logsOverlay.Viewport.Width > 0 {
 		// Apply horizontal sliding window so the user can pan left/right
 		// through long lines (like k9s). Falls back to simple truncation
 		// when offset is 0.
-		content = horizontalSlice(content, m.logsHorizontalOffset, m.logsOverlay.Viewport.Width)
+		content = horizontalSlice(content, m.logsOverlay.HorizontalOffset, m.logsOverlay.Viewport.Width)
 	}
 	return content
 }
@@ -200,7 +161,7 @@ func (m *Model) logsContentTransform(content string) string {
 // logsSearchTransform applies CR + wrap (not horizontal slice) for search matching.
 func (m *Model) logsSearchTransform(content string) string {
 	content = resolveCarriageReturns(content)
-	if m.logsWrapEnabled && m.logsOverlay.Viewport.Width > 0 {
+	if m.logsOverlay.WrapEnabled && m.logsOverlay.Viewport.Width > 0 {
 		content = wrapText(content, m.logsOverlay.Viewport.Width)
 	}
 	return content
@@ -272,12 +233,12 @@ func truncateLines(text string, maxWidth int) string {
 
 // applyLogsSearch scrolls to the first search match.
 func (m *Model) applyLogsSearch() {
-	m.logsOverlay.ApplySearchWithTransform(m.logsSearchTransform)
+	m.logsOverlay.ApplySearch()
 }
 
 // logsSearchNext jumps to the next (or previous) search match.
 func (m *Model) logsSearchNext(reverse bool) {
-	m.logsOverlay.SearchNextWithTransform(reverse, m.logsSearchTransform)
+	m.logsOverlay.SearchNext(reverse)
 }
 
 // wrapText hard-wraps lines that exceed maxWidth.
@@ -297,16 +258,16 @@ func wrapText(text string, maxWidth int) string {
 	return strings.Join(result, "\n")
 }
 
-// logsAvailable returns true when the 'l' key should be shown in the menu.
-func (m Model) logsAvailable() bool {
-	if m.viewState.ViewType == data.ContainersView {
+// podActionAvailable returns true when pod actions (logs, shell) should be shown.
+// This is true in ContainersView, or when a Pod is selected in the resources table
+// for views that support pod actions.
+func (m Model) podActionAvailable() bool {
+	if _, ok := m.behavior().(LogsExecutor); !ok {
+		return false
+	}
+	if m.viewState.ViewType == clusterstate.ContainersView {
 		return true
 	}
-	if m.viewState.ViewType == data.PodCliqueView || m.viewState.ViewType == data.ForestView {
-		selectedRow := m.resourcesTable.SelectedRow()
-		if len(selectedRow) >= 2 && selectedRow[1] == "Pod" {
-			return true
-		}
-	}
-	return false
+	selectedRow := m.resourcesTable.SelectedRow()
+	return len(selectedRow) >= 2 && selectedRow[1] == clusterstate.ResourceTypePod
 }
