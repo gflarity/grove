@@ -17,6 +17,7 @@
 package diagnostics
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"time"
@@ -26,7 +27,7 @@ import (
 )
 
 // CollectEvents dumps Kubernetes events from the last EventLookbackDuration.
-func CollectEvents(dc *DiagnosticContext, output DiagnosticOutput) error {
+func CollectEvents(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 	if dc.Clientset == nil {
 		return fmt.Errorf("clientset is nil, cannot list events")
 	}
@@ -36,7 +37,7 @@ func CollectEvents(dc *DiagnosticContext, output DiagnosticOutput) error {
 	}
 
 	_ = output.WriteLinef("[INFO] Listing events in namespace %s...", dc.Namespace)
-	events, err := dc.Clientset.CoreV1().Events(dc.Namespace).List(dc.Ctx, metav1.ListOptions{})
+	events, err := dc.Clientset.CoreV1().Events(dc.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list events: %w", err)
 	}

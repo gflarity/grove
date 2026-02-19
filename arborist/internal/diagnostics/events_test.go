@@ -227,13 +227,12 @@ func TestCollectEvents_RecentEvents(t *testing.T) {
 	)
 
 	dc := &DiagnosticContext{
-		Ctx:       context.Background(),
 		Clientset: cs,
 		Namespace: "test-ns",
 	}
 	out := &mockOutput{}
 
-	err := CollectEvents(dc, out)
+	err := CollectEvents(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -250,13 +249,12 @@ func TestCollectEvents_NoEvents(t *testing.T) {
 	cs := kubefake.NewSimpleClientset()
 
 	dc := &DiagnosticContext{
-		Ctx:       context.Background(),
 		Clientset: cs,
 		Namespace: "empty-ns",
 	}
 	out := &mockOutput{}
 
-	err := CollectEvents(dc, out)
+	err := CollectEvents(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -278,13 +276,12 @@ func TestCollectEvents_NoEvents(t *testing.T) {
 
 func TestCollectEvents_NilClientset(t *testing.T) {
 	dc := &DiagnosticContext{
-		Ctx:       context.Background(),
 		Clientset: nil,
 		Namespace: "test-ns",
 	}
 	out := &mockOutput{}
 
-	err := CollectEvents(dc, out)
+	err := CollectEvents(context.Background(), dc, out)
 	if err == nil {
 		t.Fatal("expected error for nil clientset")
 	}

@@ -58,7 +58,7 @@ func Close() {
 	defer mu.Unlock()
 	if file != nil {
 		logger.Println("=== Arborist debug log closed ===")
-		file.Close()
+		_ = file.Close() // error intentionally suppressed: best-effort cleanup
 		file = nil
 		enabled = false
 	}

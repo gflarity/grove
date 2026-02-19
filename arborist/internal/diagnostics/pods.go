@@ -17,6 +17,7 @@
 package diagnostics
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -26,7 +27,7 @@ import (
 
 // CollectPodDetails lists all pods in the namespace and dumps a tabular summary,
 // plus detailed information for any unhealthy pods.
-func CollectPodDetails(dc *DiagnosticContext, output DiagnosticOutput) error {
+func CollectPodDetails(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 	if dc.Clientset == nil {
 		return fmt.Errorf("clientset is nil, cannot list pods")
 	}
@@ -36,7 +37,7 @@ func CollectPodDetails(dc *DiagnosticContext, output DiagnosticOutput) error {
 	}
 
 	_ = output.WriteLinef("[INFO] Listing all pods in namespace %s...", dc.Namespace)
-	pods, err := dc.Clientset.CoreV1().Pods(dc.Namespace).List(dc.Ctx, metav1.ListOptions{})
+	pods, err := dc.Clientset.CoreV1().Pods(dc.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list pods: %w", err)
 	}

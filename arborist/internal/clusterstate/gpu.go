@@ -395,6 +395,141 @@ func FormatGPUBarOnly(grove, other, total int64, barWidth int) string {
 	return renderBarOnly(seg)
 }
 
+// ClusterGPUTypeSummary holds per-GPU-type cluster-wide totals.
+type ClusterGPUTypeSummary struct {
+	GPUType string
+	Grove   int64
+	Other   int64
+	Total   int64
+}
+
+// ComputeScopedGPUSummary computes GPU totals per type, optionally scoped to a set of nodes.
+// If nodeFilter is nil, all nodes are included (cluster-wide).
+// It aggregates capacity from nodeGPUCapacity and usage from pods, classifying
+// pods as Grove (has app.kubernetes.io/part-of label) or Other using DefaultPodClassifier.
+// Pods without a node assignment (pending) are excluded.
+// Returns a sorted slice (by GPU type name) for deterministic display.
+func ComputeScopedGPUSummary(
+	nodeGPUProducts map[string]string,
+	nodeGPUCapacity map[string]int64,
+	pods []TopologyPodInput,
+	nodeFilter map[string]bool,
+) []ClusterGPUTypeSummary {
+	// Aggregate total capacity per GPU type from nodes.
+	totalByType := make(map[string]int64)
+	for nodeName, capacity := range nodeGPUCapacity {
+		if nodeFilter != nil && !nodeFilter[nodeName] {
+			continue
+		}
+		gpuType := nodeGPUProducts[nodeName]
+		if gpuType == "" {
+			continue
+		}
+		totalByType[gpuType] += capacity
+	}
+
+	if len(totalByType) == 0 {
+		return nil
+	}
+
+	// Aggregate grove/other usage per GPU type from pods.
+	groveByType := make(map[string]int64)
+	otherByType := make(map[string]int64)
+	for _, pod := range pods {
+		if pod.GPURequests <= 0 || pod.NodeName == "" {
+			continue
+		}
+		if nodeFilter != nil && !nodeFilter[pod.NodeName] {
+			continue
+		}
+		gpuType := nodeGPUProducts[pod.NodeName]
+		if gpuType == "" {
+			continue
+		}
+		if DefaultPodClassifier(pod) {
+			groveByType[gpuType] += pod.GPURequests
+		} else {
+			otherByType[gpuType] += pod.GPURequests
+		}
+	}
+
+	// Collect and sort GPU types.
+	gpuTypes := make([]string, 0, len(totalByType))
+	for t := range totalByType {
+		gpuTypes = append(gpuTypes, t)
+	}
+	sort.Strings(gpuTypes)
+
+	result := make([]ClusterGPUTypeSummary, len(gpuTypes))
+	for i, t := range gpuTypes {
+		result[i] = ClusterGPUTypeSummary{
+			GPUType: t,
+			Grove:   groveByType[t],
+			Other:   otherByType[t],
+			Total:   totalByType[t],
+		}
+	}
+	return result
+}
+
+// ComputeClusterGPUSummary computes cluster-wide GPU totals per GPU type.
+// It delegates to ComputeScopedGPUSummary with a nil filter (all nodes).
+func ComputeClusterGPUSummary(
+	nodeGPUProducts map[string]string,
+	nodeGPUCapacity map[string]int64,
+	pods []TopologyPodInput,
+) []ClusterGPUTypeSummary {
+	return ComputeScopedGPUSummary(nodeGPUProducts, nodeGPUCapacity, pods, nil)
+}
+
+// formatGPUHeaderSuffix formats a slice of ClusterGPUTypeSummary into a compact
+// header suffix string like "·  H200: 29/112 (26%)  ·  B200: 29/112 (26%)".
+// Returns "" if summaries is empty.
+func formatGPUHeaderSuffix(summaries []ClusterGPUTypeSummary) string {
+	if len(summaries) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, s := range summaries {
+		used := s.Grove + s.Other
+		pct := int64(0)
+		if s.Total > 0 {
+			pct = used * 100 / s.Total
+		}
+		parts = append(parts, fmt.Sprintf("%s: %d/%d (%d%%)", s.GPUType, used, s.Total, pct))
+	}
+	return "·  " + strings.Join(parts, "  ·  ")
+}
+
+// FormatClusterGPUHeaderSuffix returns a compact string like
+// "·  H200: 29/112 (26%)  ·  B200: 29/112 (26%)" for embedding in a section header.
+// The "used" count is grove + other. Returns "" if there are no GPU types.
+func FormatClusterGPUHeaderSuffix(
+	nodeGPUProducts map[string]string,
+	nodeGPUCapacity map[string]int64,
+	pods []TopologyPodInput,
+) string {
+	return formatGPUHeaderSuffix(ComputeClusterGPUSummary(nodeGPUProducts, nodeGPUCapacity, pods))
+}
+
+// FormatScopedGPUHeaderSuffix returns a GPU summary string scoped to a set of matching nodes.
+// Pass nil matchingNodes for cluster-wide (delegates to FormatClusterGPUHeaderSuffix).
+func FormatScopedGPUHeaderSuffix(
+	nodeGPUProducts map[string]string,
+	nodeGPUCapacity map[string]int64,
+	pods []TopologyPodInput,
+	matchingNodes []string,
+) string {
+	if matchingNodes == nil {
+		return FormatClusterGPUHeaderSuffix(nodeGPUProducts, nodeGPUCapacity, pods)
+	}
+	nodeFilter := make(map[string]bool, len(matchingNodes))
+	for _, n := range matchingNodes {
+		nodeFilter[n] = true
+	}
+	return formatGPUHeaderSuffix(ComputeScopedGPUSummary(nodeGPUProducts, nodeGPUCapacity, pods, nodeFilter))
+}
+
 // FormatGPUBar renders a unicode bar graph showing grove/other/free proportions
 // within barWidth characters, wrapped in brackets, with a numeric suffix.
 //

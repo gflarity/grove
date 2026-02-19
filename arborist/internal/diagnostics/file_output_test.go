@@ -424,12 +424,11 @@ func TestCollectAndBundle_CreatesTGZ(t *testing.T) {
 	baseDir := t.TempDir()
 
 	dc := &DiagnosticContext{
-		Ctx:               context.Background(),
 		Namespace:         "test-ns",
 		OperatorNamespace: "grove-system",
 	}
 
-	tgzPath, err := CollectAndBundle(dc, baseDir)
+	tgzPath, err := CollectAndBundle(context.Background(), dc, baseDir)
 	if err != nil {
 		t.Fatalf("CollectAndBundle failed: %v", err)
 	}
@@ -489,12 +488,11 @@ func TestCollectToDirectory_CreatesSummary(t *testing.T) {
 	outputDir := filepath.Join(dir, "diag-output")
 
 	dc := &DiagnosticContext{
-		Ctx:               context.Background(),
 		Namespace:         "test-ns",
 		OperatorNamespace: "grove-system",
 	}
 
-	err := CollectToDirectory(dc, outputDir)
+	err := CollectToDirectory(context.Background(), dc, outputDir)
 	if err != nil {
 		t.Fatalf("CollectToDirectory failed: %v", err)
 	}

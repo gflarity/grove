@@ -745,3 +745,296 @@ func TestBuildGPUSummary_PCSGAggregation(t *testing.T) {
 		t.Errorf("ByPCSG[my-pcs-0-workers][H200] = %d, want 4", summary.ByPCSG["my-pcs-0-workers"]["H200"])
 	}
 }
+
+func TestComputeClusterGPUSummary_EmptyCluster(t *testing.T) {
+	result := ComputeClusterGPUSummary(
+		map[string]string{},
+		map[string]int64{},
+		nil,
+	)
+	if len(result) != 0 {
+		t.Errorf("expected empty slice, got %v", result)
+	}
+}
+
+func TestComputeClusterGPUSummary_SingleTypeNoPods(t *testing.T) {
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "H200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+	}
+
+	result := ComputeClusterGPUSummary(nodeGPUProducts, nodeGPUCapacity, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 GPU type, got %d", len(result))
+	}
+	if result[0].GPUType != "H200" {
+		t.Errorf("GPUType = %q, want H200", result[0].GPUType)
+	}
+	if result[0].Total != 16 {
+		t.Errorf("Total = %d, want 16", result[0].Total)
+	}
+	if result[0].Grove != 0 {
+		t.Errorf("Grove = %d, want 0", result[0].Grove)
+	}
+	if result[0].Other != 0 {
+		t.Errorf("Other = %d, want 0", result[0].Other)
+	}
+}
+
+func TestComputeClusterGPUSummary_MixedTypesWithGroveAndOther(t *testing.T) {
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "H200",
+		"node-3": "B200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+		"node-3": 8,
+	}
+	pods := []TopologyPodInput{
+		// Grove pod on H200 node
+		{Name: "grove-pod", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+		// Other pod on H200 node
+		{Name: "other-pod", NodeName: "node-2", GPURequests: 2, Labels: map[string]string{}},
+		// Grove pod on B200 node
+		{Name: "grove-b200", NodeName: "node-3", GPURequests: 6, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "other-pcs",
+		}},
+	}
+
+	result := ComputeClusterGPUSummary(nodeGPUProducts, nodeGPUCapacity, pods)
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 GPU types, got %d", len(result))
+	}
+	// Sorted: B200 first, then H200
+	if result[0].GPUType != "B200" {
+		t.Errorf("result[0].GPUType = %q, want B200", result[0].GPUType)
+	}
+	if result[0].Grove != 6 || result[0].Other != 0 || result[0].Total != 8 {
+		t.Errorf("B200: Grove=%d Other=%d Total=%d, want 6/0/8", result[0].Grove, result[0].Other, result[0].Total)
+	}
+	if result[1].GPUType != "H200" {
+		t.Errorf("result[1].GPUType = %q, want H200", result[1].GPUType)
+	}
+	if result[1].Grove != 4 || result[1].Other != 2 || result[1].Total != 16 {
+		t.Errorf("H200: Grove=%d Other=%d Total=%d, want 4/2/16", result[1].Grove, result[1].Other, result[1].Total)
+	}
+}
+
+func TestComputeClusterGPUSummary_PendingPodsExcluded(t *testing.T) {
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+	}
+	pods := []TopologyPodInput{
+		// Pending pod (no node) should be excluded
+		{Name: "pending-pod", NodeName: "", GPURequests: 4, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+		// Running pod should be counted
+		{Name: "running-pod", NodeName: "node-1", GPURequests: 2, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+	}
+
+	result := ComputeClusterGPUSummary(nodeGPUProducts, nodeGPUCapacity, pods)
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 GPU type, got %d", len(result))
+	}
+	if result[0].Grove != 2 {
+		t.Errorf("Grove = %d, want 2 (pending pod excluded)", result[0].Grove)
+	}
+	if result[0].Total != 8 {
+		t.Errorf("Total = %d, want 8", result[0].Total)
+	}
+}
+
+func TestComputeScopedGPUSummary_WithFilter(t *testing.T) {
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "H200",
+		"node-3": "B200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+		"node-3": 8,
+	}
+	pods := []TopologyPodInput{
+		{Name: "pod-a", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+		{Name: "pod-b", NodeName: "node-2", GPURequests: 2, Labels: map[string]string{}},
+		{Name: "pod-c", NodeName: "node-3", GPURequests: 6, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "other-pcs",
+		}},
+	}
+
+	// Filter to only node-1 and node-2 (H200 nodes)
+	nodeFilter := map[string]bool{
+		"node-1": true,
+		"node-2": true,
+	}
+
+	result := ComputeScopedGPUSummary(nodeGPUProducts, nodeGPUCapacity, pods, nodeFilter)
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 GPU type, got %d: %v", len(result), result)
+	}
+	if result[0].GPUType != "H200" {
+		t.Errorf("GPUType = %q, want H200", result[0].GPUType)
+	}
+	if result[0].Total != 16 {
+		t.Errorf("Total = %d, want 16 (8+8 from node-1 and node-2)", result[0].Total)
+	}
+	if result[0].Grove != 4 {
+		t.Errorf("Grove = %d, want 4 (pod-a only)", result[0].Grove)
+	}
+	if result[0].Other != 2 {
+		t.Errorf("Other = %d, want 2 (pod-b only)", result[0].Other)
+	}
+}
+
+func TestComputeScopedGPUSummary_NilFilter(t *testing.T) {
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "B200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+	}
+	pods := []TopologyPodInput{
+		{Name: "pod-a", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+	}
+
+	// nil filter = cluster-wide, same as ComputeClusterGPUSummary
+	scoped := ComputeScopedGPUSummary(nodeGPUProducts, nodeGPUCapacity, pods, nil)
+	cluster := ComputeClusterGPUSummary(nodeGPUProducts, nodeGPUCapacity, pods)
+
+	if len(scoped) != len(cluster) {
+		t.Fatalf("scoped len=%d, cluster len=%d", len(scoped), len(cluster))
+	}
+	for i := range scoped {
+		if scoped[i] != cluster[i] {
+			t.Errorf("index %d: scoped=%+v, cluster=%+v", i, scoped[i], cluster[i])
+		}
+	}
+}
+
+func TestFormatScopedGPUHeaderSuffix(t *testing.T) {
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "H200",
+		"node-3": "H200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+		"node-3": 8,
+	}
+	pods := []TopologyPodInput{
+		{Name: "pod-a", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+		{Name: "pod-b", NodeName: "node-2", GPURequests: 2, Labels: map[string]string{}},
+		{Name: "pod-c", NodeName: "node-3", GPURequests: 8, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "other-pcs",
+		}},
+	}
+
+	// Scoped to node-1 and node-2 only: used = 4+2 = 6, total = 16, pct = 37%
+	result := FormatScopedGPUHeaderSuffix(nodeGPUProducts, nodeGPUCapacity, pods, []string{"node-1", "node-2"})
+	want := "·  H200: 6/16 (37%)"
+	if result != want {
+		t.Errorf("got %q, want %q", result, want)
+	}
+
+	// nil matchingNodes = cluster-wide: used = 4+2+8 = 14, total = 24, pct = 58%
+	resultAll := FormatScopedGPUHeaderSuffix(nodeGPUProducts, nodeGPUCapacity, pods, nil)
+	wantAll := "·  H200: 14/24 (58%)"
+	if resultAll != wantAll {
+		t.Errorf("nil matchingNodes: got %q, want %q", resultAll, wantAll)
+	}
+
+	// Empty matchingNodes slice = no nodes match, empty result
+	resultEmpty := FormatScopedGPUHeaderSuffix(nodeGPUProducts, nodeGPUCapacity, pods, []string{})
+	if resultEmpty != "" {
+		t.Errorf("empty matchingNodes: got %q, want empty", resultEmpty)
+	}
+}
+
+func TestFormatClusterGPUHeaderSuffix_Empty(t *testing.T) {
+	result := FormatClusterGPUHeaderSuffix(
+		map[string]string{},
+		map[string]int64{},
+		nil,
+	)
+	if result != "" {
+		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+func TestFormatClusterGPUHeaderSuffix_SingleType(t *testing.T) {
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "H200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 56,
+		"node-2": 56,
+	}
+	pods := []TopologyPodInput{
+		{Name: "pod-a", NodeName: "node-1", GPURequests: 14, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+		{Name: "pod-b", NodeName: "node-2", GPURequests: 15, Labels: map[string]string{}},
+	}
+
+	result := FormatClusterGPUHeaderSuffix(nodeGPUProducts, nodeGPUCapacity, pods)
+
+	// used = 14 + 15 = 29, total = 112, pct = 29*100/112 = 25 (integer division)
+	want := "·  H200: 29/112 (25%)"
+	if result != want {
+		t.Errorf("got %q, want %q", result, want)
+	}
+}
+
+func TestFormatClusterGPUHeaderSuffix_MultipleTypes(t *testing.T) {
+	nodeGPUProducts := map[string]string{
+		"node-1": "H200",
+		"node-2": "B200",
+	}
+	nodeGPUCapacity := map[string]int64{
+		"node-1": 8,
+		"node-2": 8,
+	}
+	pods := []TopologyPodInput{
+		{Name: "pod-a", NodeName: "node-1", GPURequests: 4, Labels: map[string]string{
+			"app.kubernetes.io/part-of": "my-pcs",
+		}},
+		{Name: "pod-b", NodeName: "node-2", GPURequests: 2, Labels: map[string]string{}},
+	}
+
+	result := FormatClusterGPUHeaderSuffix(nodeGPUProducts, nodeGPUCapacity, pods)
+
+	// B200: 2/8 (25%), H200: 4/8 (50%) — sorted alphabetically
+	want := "·  B200: 2/8 (25%)  ·  H200: 4/8 (50%)"
+	if result != want {
+		t.Errorf("got %q, want %q", result, want)
+	}
+}

@@ -50,7 +50,6 @@ func (c *DiagnosticsCmd) Run(globals *CLI) error {
 
 	// Build diagnostic context
 	dc := diagnostics.NewDiagnosticContext(
-		ctx,
 		k8sClient.Clientset(),
 		k8sClient.DynamicClient(),
 		ns,
@@ -63,7 +62,7 @@ func (c *DiagnosticsCmd) Run(globals *CLI) error {
 	}
 
 	// Collect and bundle diagnostics into a tgz
-	tgzPath, err := diagnostics.CollectAndBundle(dc, c.Output)
+	tgzPath, err := diagnostics.CollectAndBundle(ctx, dc, c.Output)
 	if err != nil {
 		return fmt.Errorf("failed to collect diagnostics: %w", err)
 	}

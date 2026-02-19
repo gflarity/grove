@@ -107,14 +107,13 @@ func TestCollectOperatorLogs_FindsOperatorPods(t *testing.T) {
 	)
 
 	dc := &DiagnosticContext{
-		Ctx:                      context.Background(),
 		Clientset:                cs,
 		OperatorNamespace:        "grove-system",
 		OperatorDeploymentPrefix: "grove-operator",
 	}
 	out := &mockOutput{}
 
-	err := CollectOperatorLogs(dc, out)
+	err := CollectOperatorLogs(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,14 +149,13 @@ func TestCollectOperatorLogs_NoOperatorPods(t *testing.T) {
 	)
 
 	dc := &DiagnosticContext{
-		Ctx:                      context.Background(),
 		Clientset:                cs,
 		OperatorNamespace:        "grove-system",
 		OperatorDeploymentPrefix: "grove-operator",
 	}
 	out := &mockOutput{}
 
-	err := CollectOperatorLogs(dc, out)
+	err := CollectOperatorLogs(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -214,14 +212,13 @@ func TestCollectOperatorLogs_WithRestarts(t *testing.T) {
 	)
 
 	dc := &DiagnosticContext{
-		Ctx:                      context.Background(),
 		Clientset:                cs,
 		OperatorNamespace:        "grove-system",
 		OperatorDeploymentPrefix: "grove-operator",
 	}
 	out := &mockOutput{}
 
-	err := CollectOperatorLogs(dc, out)
+	err := CollectOperatorLogs(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -253,12 +250,11 @@ func TestCollectOperatorLogs_WithRestarts(t *testing.T) {
 
 func TestCollectOperatorLogs_NilClientset(t *testing.T) {
 	dc := &DiagnosticContext{
-		Ctx:       context.Background(),
 		Clientset: nil,
 	}
 	out := &mockOutput{}
 
-	err := CollectOperatorLogs(dc, out)
+	err := CollectOperatorLogs(context.Background(), dc, out)
 	if err == nil {
 		t.Fatal("expected error for nil clientset")
 	}

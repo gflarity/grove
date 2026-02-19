@@ -486,7 +486,18 @@ func (m Model) renderTopologyDomainsSectionHeader() string {
 	count := len(m.topologyDomainsTable.Rows())
 
 	if m.topologyDrill.IsEmpty() {
-		return renderSectionHeader("Topology Domains", count, m.activePane == clusterstate.TopologyDomainsPane, "")
+		header := renderSectionHeader("Topology Domains", count, m.activePane == clusterstate.TopologyDomainsPane, "")
+		if m.topologyViewData != nil {
+			gpuSuffix := clusterstate.FormatClusterGPUHeaderSuffix(
+				m.topologyViewData.NodeGPUProducts,
+				m.topologyViewData.NodeGPUCapacity,
+				m.topologyViewData.RawPods,
+			)
+			if gpuSuffix != "" {
+				header += "  " + gpuSuffix
+			}
+		}
+		return header
 	}
 
 	// Drilled in — show the current domain name and breadcrumb
@@ -497,7 +508,20 @@ func (m Model) renderTopologyDomainsSectionHeader() string {
 		label = "Topology Domains"
 	}
 
-	return renderSectionHeader(label, count, m.activePane == clusterstate.TopologyDomainsPane, breadcrumb)
+	header := renderSectionHeader(label, count, m.activePane == clusterstate.TopologyDomainsPane, breadcrumb)
+	if m.topologyViewData != nil {
+		matchingNodes := m.topologyDrill.MatchingNodes(m.topologyViewData.NodeLabels)
+		gpuSuffix := clusterstate.FormatScopedGPUHeaderSuffix(
+			m.topologyViewData.NodeGPUProducts,
+			m.topologyViewData.NodeGPUCapacity,
+			m.topologyViewData.RawPods,
+			matchingNodes,
+		)
+		if gpuSuffix != "" {
+			header += "  " + gpuSuffix
+		}
+	}
+	return header
 }
 
 // renderTopologyPodsSectionHeader renders the section header for the topology pods pane.

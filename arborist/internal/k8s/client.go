@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -63,7 +62,7 @@ func (k *K8sClient) DynamicClient() dynamic.Interface {
 // NewGlobalCache creates a new InformerGlobalCache using this client's
 // clientset and dynamic client. The caller is responsible for calling Start()
 // and Stop() on the returned cache.
-func (k *K8sClient) NewGlobalCache(opts ...GlobalCacheOption) clusterstate.GlobalCache {
+func (k *K8sClient) NewGlobalCache(opts ...GlobalCacheOption) *InformerGlobalCache {
 	return NewInformerGlobalCache(k.clientset, k.dynamicClient, opts...)
 }
 

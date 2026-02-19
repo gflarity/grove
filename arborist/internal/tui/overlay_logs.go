@@ -62,7 +62,7 @@ func (m Model) handleLogsAutoScrollTick() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, tea.Batch(
-		loadPodLogsCmd(m.cache, m.ctx, m.logsOverlay.PodName, m.logsOverlay.Namespace, m.logsOverlay.ContainerName, 1000),
+		loadPodLogsCmd(m.ctx, m.cache, m.logsOverlay.PodName, m.logsOverlay.Namespace, m.logsOverlay.ContainerName, 1000),
 		logsAutoScrollTickCmd(),
 	)
 }
@@ -72,7 +72,7 @@ func (m Model) handleLogsRequest(msg LogsRequestMsg) (tea.Model, tea.Cmd) {
 	m.openLogsOverlay(msg.PodName, msg.Container, msg.Namespace)
 
 	debugLogWithContext("opening logs overlay via request: pod=%s container=%s", msg.PodName, msg.Container)
-	return m, loadPodLogsCmd(m.cache, m.ctx, msg.PodName, msg.Namespace, msg.Container, 1000)
+	return m, loadPodLogsCmd(m.ctx, m.cache, msg.PodName, msg.Namespace, msg.Container, 1000)
 }
 
 // handleLogsOverlayKey handles keys when the logs overlay is active.
@@ -113,7 +113,7 @@ func (m Model) handleLogsOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.logsOverlay.AutoScroll {
 					return m, tea.Batch(
 						logsAutoScrollTickCmd(),
-						loadPodLogsCmd(m.cache, m.ctx, m.logsOverlay.PodName, m.logsOverlay.Namespace, m.logsOverlay.ContainerName, 1000),
+						loadPodLogsCmd(m.ctx, m.cache, m.logsOverlay.PodName, m.logsOverlay.Namespace, m.logsOverlay.ContainerName, 1000),
 					)
 				}
 				return m, nil

@@ -413,7 +413,7 @@ func podRowLogsExec(m *Model) (tea.Model, tea.Cmd) {
 	}
 	podName := selectedRow[2]
 	namespace := selectedRow[0]
-	return *m, fetchFirstContainerForLogsCmd(m.cache, m.ctx, podName, namespace)
+	return *m, fetchFirstContainerForLogsCmd(m.ctx, m.cache, podName, namespace)
 }
 
 // containersLogsExec handles 'l' in ContainersView (open logs for selected container).
@@ -428,7 +428,7 @@ func containersLogsExec(m *Model) (tea.Model, tea.Cmd) {
 	m.openLogsOverlay(m.viewState.SelectedPod, containerName, namespace)
 
 	debugLogWithContext("opening logs overlay: pod=%s container=%s", m.viewState.SelectedPod, containerName)
-	return *m, loadPodLogsCmd(m.cache, m.ctx, m.viewState.SelectedPod, namespace, containerName, 1000)
+	return *m, loadPodLogsCmd(m.ctx, m.cache, m.viewState.SelectedPod, namespace, containerName, 1000)
 }
 
 // =============================================================================
@@ -444,7 +444,7 @@ func podRowShellExec(m *Model) (tea.Model, tea.Cmd) {
 	}
 	podName := selectedRow[2]
 	namespace := selectedRow[0]
-	return *m, fetchFirstRunningContainerCmd(m.cache, m.ctx, podName, namespace)
+	return *m, fetchFirstRunningContainerCmd(m.ctx, m.cache, podName, namespace)
 }
 
 // containersShellExec handles 's' in ContainersView (shell into selected container).

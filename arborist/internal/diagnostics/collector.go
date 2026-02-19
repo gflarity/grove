@@ -17,11 +17,12 @@
 package diagnostics
 
 import (
+	"context"
 	"fmt"
 )
 
 // CollectorFunc is a function that collects a specific type of diagnostic
-type CollectorFunc func(dc *DiagnosticContext, output DiagnosticOutput) error
+type CollectorFunc func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error
 
 // Collector orchestrates the collection of all diagnostics
 type Collector struct {
@@ -48,7 +49,7 @@ func NewCollector() *Collector {
 // CollectAll runs all registered collectors and outputs diagnostics.
 // It continues even if individual collectors fail, logging errors along the way.
 // Returns an error only if there's a critical failure (e.g., output flush fails).
-func (c *Collector) CollectAll(dc *DiagnosticContext, output DiagnosticOutput) error {
+func (c *Collector) CollectAll(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 	if err := output.WriteSection("COLLECTING GROVE DIAGNOSTICS"); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
@@ -63,7 +64,7 @@ func (c *Collector) CollectAll(dc *DiagnosticContext, output DiagnosticOutput) e
 	var collectionErrors []error
 
 	for _, collector := range c.collectors {
-		if err := c.safeRunCollector(collector, dc, output); err != nil {
+		if err := c.safeRunCollector(ctx, collector, dc, output); err != nil {
 			collectionErrors = append(collectionErrors, fmt.Errorf("%s: %w", collector.name, err))
 			// Continue to next collector even if this one failed
 		}
@@ -90,18 +91,18 @@ func (c *Collector) CollectAll(dc *DiagnosticContext, output DiagnosticOutput) e
 }
 
 // safeRunCollector runs a collector with panic recovery
-func (c *Collector) safeRunCollector(collector namedCollector, dc *DiagnosticContext, output DiagnosticOutput) (err error) {
+func (c *Collector) safeRunCollector(ctx context.Context, collector namedCollector, dc *DiagnosticContext, output DiagnosticOutput) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
 
-	return collector.fn(dc, output)
+	return collector.fn(ctx, dc, output)
 }
 
 // CollectAllDiagnostics is a convenience function that creates a collector and runs all diagnostics
-func CollectAllDiagnostics(dc *DiagnosticContext, output DiagnosticOutput) error {
+func CollectAllDiagnostics(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 	collector := NewCollector()
-	return collector.CollectAll(dc, output)
+	return collector.CollectAll(ctx, dc, output)
 }

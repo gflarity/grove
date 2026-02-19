@@ -37,7 +37,7 @@ func (m Model) openYAMLOverlay() (tea.Model, tea.Cmd) {
 
 	debugLogWithContext("openYAMLOverlay: loading %s/%s (actual: %s/%s)", resourceType, resourceName, actualType, actualName)
 
-	return m, loadResourceYAMLCmd(m.cache, m.ctx, actualType, actualName, namespace)
+	return m, loadResourceYAMLCmd(m.ctx, m.cache, actualType, actualName, namespace)
 }
 
 // selectedResourceInfo returns the type, name, and namespace of the currently selected resource.
