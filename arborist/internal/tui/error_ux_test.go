@@ -507,16 +507,14 @@ func TestTKey_WithTopologyData_SwitchesToTopologyView(t *testing.T) {
 	}
 }
 
-// --- :topology command with no topology data ---
+// --- 't' key with no topology data logs error ---
 
 func TestTopologyCommand_NoTopologyData_LogsError(t *testing.T) {
 	m := newTestModel(nil)
 	m.topologyViewData = nil
 
-	// Simulate ":topology" command
-	m.commandActive = true
-	m.commandInput.SetValue("topology")
-	m = mustApply(m, tea.KeyMsg{Type: tea.KeyEnter})
+	// Press 't' to toggle topology — should log error since no data
+	m = sendRune(m, 't')
 
 	if m.viewState.ViewType != clusterstate.ForestView {
 		t.Errorf("expected to stay in ForestView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
@@ -529,7 +527,7 @@ func TestTopologyCommand_NoTopologyData_LogsError(t *testing.T) {
 	}
 }
 
-// --- :topology command with topology data ---
+// --- 't' key with topology data switches view ---
 
 func TestTopologyCommand_WithTopologyData_Switches(t *testing.T) {
 	m := newTestModel(nil)
@@ -539,9 +537,8 @@ func TestTopologyCommand_WithTopologyData_Switches(t *testing.T) {
 		},
 	}
 
-	m.commandActive = true
-	m.commandInput.SetValue("topology")
-	m = mustApply(m, tea.KeyMsg{Type: tea.KeyEnter})
+	// Press 't' to toggle topology
+	m = sendRune(m, 't')
 
 	if m.viewState.ViewType != clusterstate.TopologyView {
 		t.Errorf("expected TopologyView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))

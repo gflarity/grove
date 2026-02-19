@@ -11,14 +11,16 @@ import (
 )
 
 // =============================================================================
-// Command Mode (vim-style ":" lens switching with autocomplete)
+// Command Mode (vim-style ":" view switching with autocomplete)
 // =============================================================================
 
-type lensCommand struct {
+type viewCommand struct {
 	Name string
 }
 
-var lensCommands = []lensCommand{
+// viewCommands is the full list for 'v' (View) mode — includes forest, topology,
+// and all resource type shortcuts.
+var viewCommands = []viewCommand{
 	{Name: "forest"},
 	{Name: "topology"},
 	{Name: "pcs"},
@@ -30,18 +32,39 @@ var lensCommands = []lensCommand{
 	{Name: "pod"},
 }
 
-// LensCommandNames returns the list of available command names.
-func LensCommandNames() []string {
-	names := make([]string, len(lensCommands))
-	for i, c := range lensCommands {
+// commandModeCommands is the restricted list for ':' (Command) mode — resource
+// types only, no "forest" or "topology" (those have dedicated keys: esc/v and t).
+var commandModeCommands = []viewCommand{
+	{Name: "pcs"},
+	{Name: "podcliqueset"},
+	{Name: "pc"},
+	{Name: "podclique"},
+	{Name: "pcsg"},
+	{Name: "podcliquescalinggroup"},
+	{Name: "pod"},
+}
+
+// ViewCommandNames returns the list of available view command names (full set).
+func ViewCommandNames() []string {
+	names := make([]string, len(viewCommands))
+	for i, c := range viewCommands {
 		names[i] = c.Name
 	}
 	return names
 }
 
-func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
-	debugLogWithContext("executeCommand: input=%q currentView=%s commandActive=%v lensEditActive=%v",
-		input, clusterstate.ViewTypeName(m.viewState.ViewType), m.commandActive, m.lensEditActive)
+// CommandModeNames returns the list of command names for ':' command mode (resource types only).
+func CommandModeNames() []string {
+	names := make([]string, len(commandModeCommands))
+	for i, c := range commandModeCommands {
+		names[i] = c.Name
+	}
+	return names
+}
+
+func (m Model) executeCommand(input string, commands []viewCommand, ac *Autocompleter) (tea.Model, tea.Cmd) {
+	debugLogWithContext("executeCommand: input=%q currentView=%s commandActive=%v viewEditActive=%v",
+		input, clusterstate.ViewTypeName(m.viewState.ViewType), m.commandActive, m.viewEditActive)
 
 	input = strings.TrimSpace(strings.ToLower(input))
 	if input == "" {
@@ -49,15 +72,15 @@ func (m Model) executeCommand(input string) (tea.Model, tea.Cmd) {
 	}
 
 	matched := ""
-	for _, c := range lensCommands {
+	for _, c := range commands {
 		if c.Name == input {
 			matched = c.Name
 			break
 		}
 	}
 	if matched == "" {
-		if m.lensAutocomplete != nil {
-			if name, ok := m.lensAutocomplete.UniqueMatch(input); ok {
+		if ac != nil {
+			if name, ok := ac.UniqueMatch(input); ok {
 				matched = name
 			}
 		}
