@@ -107,7 +107,7 @@ func (m *Model) resizeLayout() {
 
 	m.filterInput.Width = m.width - 6
 	m.commandInput.Width = m.width - 6
-	m.lensInput.Width = m.width / 3 // lens input sits inline in the header, so keep it compact
+	m.viewInput.Width = m.width / 3 // view input sits inline in the header, so keep it compact
 	m.yamlOverlay.SearchInput.Width = m.width - 6
 
 	// Resize YAML overlay viewport
@@ -152,9 +152,9 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 // handleKeyMsg handles keyboard input.
 func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	debugLogWithContext("handleKeyMsg: type=%d(%s) runes=%q alt=%v modes=[yaml=%v lens=%v cmd=%v filter=%v]",
+	debugLogWithContext("handleKeyMsg: type=%d(%s) runes=%q alt=%v modes=[yaml=%v view=%v cmd=%v filter=%v]",
 		msg.Type, msg.Type.String(), string(msg.Runes), msg.Alt,
-		m.yamlOverlay.Active, m.lensEditActive, m.commandActive, m.filterActive)
+		m.yamlOverlay.Active, m.viewEditActive, m.commandActive, m.filterActive)
 
 	// Ctrl+C always quits
 	if msg.Type == tea.KeyCtrlC {
@@ -172,9 +172,9 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleYAMLOverlayKey(msg)
 	}
 
-	// Lens edit mode has its own key handling (inline in header)
-	if m.lensEditActive {
-		return m.handleLensEditKey(msg)
+	// View edit mode has its own key handling (inline in header)
+	if m.viewEditActive {
+		return m.handleViewEditKey(msg)
 	}
 
 	// Command mode has different key handling
@@ -283,10 +283,10 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "l", "L":
 			return m.handleLogsExec()
 		case "v", "V":
-			m.lensEditActive = true
-			m.lensInput.SetValue("")
-			m.lensInput.Focus()
-			debugLogWithContext("lens edit mode activated")
+			m.viewEditActive = true
+			m.viewInput.SetValue("")
+			m.viewInput.Focus()
+			debugLogWithContext("view edit mode activated")
 			return m, textinput.Blink
 		}
 	}
@@ -296,17 +296,17 @@ func (m Model) handleNormalModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleCommandModeKey handles keys when command mode is active.
 func (m Model) handleCommandModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	return handleTextInputKey(&m, msg, &m.commandInput, &m.commandActive, "command mode")
+	return handleTextInputKey(&m, msg, &m.commandInput, &m.commandActive, "command mode", commandModeCommands, m.commandAutocomplete)
 }
 
-// handleLensEditKey handles keys when lens edit mode is active (inline in header).
-func (m Model) handleLensEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	return handleTextInputKey(&m, msg, &m.lensInput, &m.lensEditActive, "lens edit mode")
+// handleViewEditKey handles keys when view edit mode is active (inline in header).
+func (m Model) handleViewEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return handleTextInputKey(&m, msg, &m.viewInput, &m.viewEditActive, "view edit mode", viewCommands, m.viewAutocomplete)
 }
 
-// handleTextInputKey is the shared handler for text input modes (command, lens edit).
+// handleTextInputKey is the shared handler for text input modes (command, view edit).
 // Esc cancels, Enter executes the typed command, other keys update the input.
-func handleTextInputKey(m *Model, msg tea.KeyMsg, input *textinput.Model, active *bool, modeName string) (tea.Model, tea.Cmd) {
+func handleTextInputKey(m *Model, msg tea.KeyMsg, input *textinput.Model, active *bool, modeName string, commands []viewCommand, ac *Autocompleter) (tea.Model, tea.Cmd) {
 	debugLogWithContext("handle %s key: keyType=%d(%s) str=%q inputValue=%q",
 		modeName, msg.Type, msg.Type.String(), msg.String(), input.Value())
 
@@ -322,7 +322,7 @@ func handleTextInputKey(m *Model, msg tea.KeyMsg, input *textinput.Model, active
 		*active = false
 		input.SetValue("")
 		debugLogWithContext("%s executing: %q", modeName, value)
-		return m.executeCommand(value)
+		return m.executeCommand(value, commands, ac)
 
 	default:
 		var cmd tea.Cmd

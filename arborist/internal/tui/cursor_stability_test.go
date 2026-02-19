@@ -1425,3 +1425,127 @@ func TestC14_RapidSuccessiveCacheUpdates(t *testing.T) {
 		}
 	})
 }
+
+// ===========================================================================
+// CT. Hierarchy drill-in with TopologyViewData present
+//
+// These tests cover the gap where snapshotNodeLabels() was never exercised
+// during hierarchy navigation. In real clusters, TopologyViewData is always
+// present when drilling into PCS/PCSG/PodClique views.
+// ===========================================================================
+
+func TestCT_HierarchyDrillWithTopology(t *testing.T) {
+	t.Run("PCS single-replica auto-skip to PodCliqueSetReplicaView", func(t *testing.T) {
+		mc := buildFullMockCacheWithTopology()
+		m := newTestModelWithCache(mc)
+
+		// alpha-pcs has 1 replica → auto-skip to PodCliqueSetReplicaView
+		m = sendKey(m, tea.KeyEnter)
+		if m.viewState.ViewType != clusterstate.PodCliqueSetReplicaView {
+			t.Fatalf("expected PodCliqueSetReplicaView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		}
+
+		// Verify resources table has rows (PCSGs + standalone PodCliques)
+		rows := m.resourcesTable.Rows()
+		if len(rows) == 0 {
+			t.Fatal("expected non-empty resources table in PodCliqueSetReplicaView with topology")
+		}
+		assertCursorValid(t, m)
+	})
+
+	t.Run("PCSG drill-in to PodCliqueScalingGroupView", func(t *testing.T) {
+		mc := buildFullMockCacheWithTopology()
+		m := newTestModelWithCache(mc)
+
+		// alpha-pcs → PodCliqueSetReplicaView (single replica skip)
+		m = sendKey(m, tea.KeyEnter)
+		// PCSG is first row → drill into it
+		m = sendKey(m, tea.KeyEnter)
+
+		if m.viewState.ViewType != clusterstate.PodCliqueScalingGroupView {
+			t.Fatalf("expected PodCliqueScalingGroupView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		}
+
+		rows := m.resourcesTable.Rows()
+		if len(rows) == 0 {
+			t.Fatal("expected non-empty resources table in PodCliqueScalingGroupView with topology")
+		}
+		assertCursorValid(t, m)
+	})
+
+	t.Run("PodClique drill-in to PodCliqueView with pods", func(t *testing.T) {
+		mc := buildFullMockCacheWithTopology()
+		m := newTestModelWithCache(mc)
+
+		// alpha-pcs → PodCliqueSetReplicaView (single replica skip)
+		m = sendKey(m, tea.KeyEnter)
+		// Move to standalone PodClique (row 1)
+		m = sendKey(m, tea.KeyDown)
+		// Drill into PodClique → PodCliqueView
+		m = sendKey(m, tea.KeyEnter)
+
+		if m.viewState.ViewType != clusterstate.PodCliqueView {
+			t.Fatalf("expected PodCliqueView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		}
+
+		rows := m.resourcesTable.Rows()
+		if len(rows) == 0 {
+			t.Fatal("expected non-empty resources table in PodCliqueView with topology")
+		}
+		assertCursorValid(t, m)
+	})
+
+	t.Run("cache update during PodCliqueSetReplicaView with topology — no crash, cursor stable", func(t *testing.T) {
+		mc := buildFullMockCacheWithTopology()
+		m := newTestModelWithCache(mc)
+
+		// alpha-pcs → PodCliqueSetReplicaView (single replica skip)
+		m = sendKey(m, tea.KeyEnter)
+		if m.viewState.ViewType != clusterstate.PodCliqueSetReplicaView {
+			t.Fatalf("expected PodCliqueSetReplicaView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		}
+
+		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill")
+
+		// Cache update: change PCSG ready counts
+		m = cacheUpdate(m, mc, func(snap *clusterstate.CacheSnapshot) {
+			snap.ScalingGroupsByReplica["alpha-pcs/0"] = []clusterstate.Resource{
+				{Name: "alpha-pcs-0-sg-prefill", Type: "PodCliqueScalingGroup", Namespace: "default", Ready: "0/2", Scheduled: "2/2", Topology: "block"},
+			}
+		})
+
+		assertCursorOnName(t, m, "alpha-pcs-0-sg-prefill")
+		assertCursorValid(t, m)
+	})
+
+	t.Run("back navigation through all levels — no crash", func(t *testing.T) {
+		mc := buildFullMockCacheWithTopology()
+		m := newTestModelWithCache(mc)
+
+		// Drill all the way down: Forest → PCSReplicaView → PodCliqueView
+		m = sendKey(m, tea.KeyEnter) // alpha-pcs → PodCliqueSetReplicaView
+		if m.viewState.ViewType != clusterstate.PodCliqueSetReplicaView {
+			t.Fatalf("expected PodCliqueSetReplicaView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		}
+
+		m = sendKey(m, tea.KeyDown)  // standalone PodClique
+		m = sendKey(m, tea.KeyEnter) // → PodCliqueView
+		if m.viewState.ViewType != clusterstate.PodCliqueView {
+			t.Fatalf("expected PodCliqueView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		}
+
+		// Navigate back: PodCliqueView → PodCliqueSetReplicaView
+		m = sendKey(m, tea.KeyEsc)
+		if m.viewState.ViewType != clusterstate.PodCliqueSetReplicaView {
+			t.Fatalf("expected PodCliqueSetReplicaView after Esc, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		}
+		assertCursorValid(t, m)
+
+		// Navigate back: PodCliqueSetReplicaView → ForestView (single-replica skip back)
+		m = sendKey(m, tea.KeyEsc)
+		if m.viewState.ViewType != clusterstate.ForestView {
+			t.Fatalf("expected ForestView after Esc, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		}
+		assertCursorValid(t, m)
+	})
+}

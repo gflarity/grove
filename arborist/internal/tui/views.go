@@ -26,7 +26,7 @@ func (m Model) errorLogFrameHeight() int {
 // log, topology footnote). Both View() and resizeLayout() use this to calculate
 // how much vertical space remains for the two main panes.
 func (m Model) fixedLayoutLines() int {
-	// 7(header: context+cluster+user+arborist+k8s+namespace+lens) + 2*(2 border + 1 table header) = 13
+	// 7(header: context+cluster+user+arborist+k8s+namespace+view) + 2*(2 border + 1 table header) = 13
 	fixed := 13
 	if m.filterActive {
 		fixed += 3 // filter frame: top border + content + bottom border
@@ -98,7 +98,7 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 
-// viewDisplayName returns the lens name. There are only two lenses:
+// viewDisplayName returns the view name. There are only two views:
 // "forest" (all hierarchy views) and "topology".
 func (m Model) viewDisplayName() string {
 	if m.viewState.ViewType == clusterstate.TopologyView {
@@ -174,10 +174,10 @@ func (m Model) renderHeaderFrame() string {
 	}
 	namespaceLine := HeaderLabelStyle.Render("Namespace:   ") + " " + HeaderValueStyle.Render(nsDisplay)
 	var viewLine string
-	if m.lensEditActive {
-		viewLine = HeaderLabelStyle.Render("Lens:        ") + " " + m.lensInput.View()
+	if m.viewEditActive {
+		viewLine = HeaderLabelStyle.Render("View:        ") + " " + m.viewInput.View()
 	} else {
-		viewLine = HeaderLabelStyle.Render("Lens:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
+		viewLine = HeaderLabelStyle.Render("View:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
 	}
 
 	leftCol := lipgloss.JoinVertical(lipgloss.Left, contextLine, clusterLine, userLine, arboristLine, k8sLine, namespaceLine, viewLine)

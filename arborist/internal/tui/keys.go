@@ -14,7 +14,7 @@ type KeyMap struct {
 	Down     key.Binding
 	Topology key.Binding
 	Command  key.Binding
-	Lens     key.Binding
+	View     key.Binding
 	Shell    key.Binding
 	Logs     key.Binding
 	Errors   key.Binding
@@ -63,9 +63,9 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys(":"),
 			key.WithHelp(":", "command"),
 		),
-		Lens: key.NewBinding(
+		View: key.NewBinding(
 			key.WithKeys("v", "V"),
-			key.WithHelp("v", "view/lens"),
+			key.WithHelp("v", "view"),
 		),
 		Shell: key.NewBinding(
 			key.WithKeys("s", "S"),
@@ -85,14 +85,14 @@ func DefaultKeyMap() KeyMap {
 // ShortHelp returns the key bindings shown in the short help view (status bar).
 func (k KeyMap) ShortHelp() []key.Binding {
 	return []key.Binding{
-		k.Command, k.Lens, k.Logs, k.Filter, k.Tab, k.Up, k.Down, k.Enter, k.Topology, k.Errors, k.Back, k.Quit,
+		k.Command, k.View, k.Logs, k.Filter, k.Tab, k.Up, k.Down, k.Enter, k.Topology, k.Errors, k.Back, k.Quit,
 	}
 }
 
 // FullHelp returns the full set of key bindings for the help view.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Command, k.Lens, k.Logs, k.Filter, k.Tab, k.Up, k.Down},
+		{k.Command, k.View, k.Logs, k.Filter, k.Tab, k.Up, k.Down},
 		{k.Enter, k.Topology, k.Errors, k.Back, k.Quit, k.CtrlC},
 	}
 }

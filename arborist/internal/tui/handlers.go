@@ -148,7 +148,7 @@ func snapshotNodeLabels(snapshot *clusterstate.CacheSnapshot) map[string]map[str
 	if snapshot == nil || snapshot.TopologyViewData == nil {
 		return nil
 	}
-	return snapshotNodeLabels(snapshot)
+	return snapshot.TopologyViewData.NodeLabels
 }
 
 // resolveResourceTopology resolves topology display for a resource using the

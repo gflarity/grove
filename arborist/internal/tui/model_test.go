@@ -240,6 +240,60 @@ func buildFullMockCache() *clusterstate.MockGlobalCache {
 	return mc
 }
 
+// buildFullMockCacheWithTopology creates a MockGlobalCache with the complete
+// hierarchy from buildFullMockCache PLUS TopologyViewData and PodInfos pointing
+// pods at real nodes. This exercises the code paths where snapshotNodeLabels()
+// returns non-nil, which is the common case in real clusters.
+func buildFullMockCacheWithTopology() *clusterstate.MockGlobalCache {
+	mc := buildFullMockCache()
+	snap := mc.Snapshot()
+
+	// Enrich the alpha-pcs spec with topology constraints so BuildTopologyInfo
+	// produces meaningful PCSPackDomain, PCSGPackDomains, and CliquePackDomains.
+	rack := corev1alpha1.TopologyDomain("rack")
+	snap.PodCliqueSetSpecs["alpha-pcs"] = &corev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "alpha-pcs", Namespace: "default"},
+		Spec: corev1alpha1.PodCliqueSetSpec{
+			Replicas: 3,
+			Template: corev1alpha1.PodCliqueSetTemplateSpec{
+				TopologyConstraint: &corev1alpha1.TopologyConstraint{PackDomain: rack},
+				Cliques: []*corev1alpha1.PodCliqueTemplateSpec{
+					{Name: "standalone-pc", TopologyConstraint: &corev1alpha1.TopologyConstraint{PackDomain: rack}},
+					{Name: "worker", TopologyConstraint: &corev1alpha1.TopologyConstraint{PackDomain: rack}},
+				},
+				PodCliqueScalingGroupConfigs: []corev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "sg-prefill", CliqueNames: []string{"worker"}, TopologyConstraint: &corev1alpha1.TopologyConstraint{PackDomain: rack}},
+				},
+			},
+		},
+	}
+
+	// Add TopologyViewData with node labels and DomainToKey.
+	snap.TopologyViewData = &clusterstate.TopologyViewData{
+		Domains: []clusterstate.TopologyDomainRow{
+			{Domain: "rack", Key: "topology.kubernetes.io/rack", ValuesCount: 3},
+		},
+		NodeLabels: map[string]map[string]string{
+			"node-01": {"topology.kubernetes.io/rack": "rack-01"},
+			"node-02": {"topology.kubernetes.io/rack": "rack-02"},
+			"node-03": {"topology.kubernetes.io/rack": "rack-03"},
+		},
+		DomainToKey: map[string]string{
+			"rack": "topology.kubernetes.io/rack",
+		},
+	}
+
+	// Map pods to nodes so ResolveTopologyValueForNode finds data.
+	snap.PodInfos = map[string]clusterstate.CachedPodInfo{
+		"alpha-pcs-0-pc-worker-0": {NodeName: "node-01"},
+		"alpha-pcs-0-pc-worker-1": {NodeName: "node-02"},
+		"alpha-pcs-0-pc-worker-2": {NodeName: "node-03"},
+	}
+
+	mc.SetSnapshot(snap)
+	return mc
+}
+
 // buildMockCacheWithEvents creates a MockGlobalCache identical to buildFullMockCache
 // but with the provided events map merged into EventsByObject. This makes it easy to
 // test event-related behavior without duplicating all the hierarchy setup.
@@ -1245,7 +1299,7 @@ func TestHeaderShowsClusterInfo(t *testing.T) {
 	if !strings.Contains(header, "forest") {
 		t.Errorf("expected header to contain view name 'forest', got:\n%s", header)
 	}
-	for _, label := range []string{"Context:", "Cluster:", "User:", "Arborist Rev:", "K8s Rev:", "Namespace:", "Lens:"} {
+	for _, label := range []string{"Context:", "Cluster:", "User:", "Arborist Rev:", "K8s Rev:", "Namespace:", "View:"} {
 		if !strings.Contains(header, label) {
 			t.Errorf("expected header to contain '%s' label, got:\n%s", label, header)
 		}
@@ -1946,8 +2000,8 @@ func TestTopologyView_QuitWithCtrlC(t *testing.T) {
 	}
 }
 
-func TestTopologyView_QuitAfterCommandMode(t *testing.T) {
-	// Reproduce the exact user scenario: :topology then q
+func TestTopologyView_QuitAfterViewEdit(t *testing.T) {
+	// Reproduce the exact user scenario: v→topology then q
 	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.TopologyViewData = sampleTopologyViewData()
@@ -1956,10 +2010,10 @@ func TestTopologyView_QuitAfterCommandMode(t *testing.T) {
 
 	m := newTestModelWithCache(mc)
 
-	// Enter command mode with ':'
-	m = sendRune(m, ':')
-	if !m.commandActive {
-		t.Fatal("expected command mode active")
+	// Enter view edit mode with 'v'
+	m = sendRune(m, 'v')
+	if !m.viewEditActive {
+		t.Fatal("expected view edit mode active")
 	}
 
 	// Type "topology"
@@ -1971,25 +2025,25 @@ func TestTopologyView_QuitAfterCommandMode(t *testing.T) {
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.viewState.ViewType != clusterstate.TopologyView {
-		t.Fatalf("expected TopologyView after :topology, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		t.Fatalf("expected TopologyView after v→topology, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
-	if m.commandActive {
-		t.Fatal("expected command mode deactivated")
+	if m.viewEditActive {
+		t.Fatal("expected view edit mode deactivated")
 	}
 
 	// Now press 'q' — should quit immediately
 	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd == nil {
-		t.Fatal("expected quit command after :topology + q")
+		t.Fatal("expected quit command after v→topology + q")
 	}
 	msg := cmd()
 	if _, ok := msg.(tea.QuitMsg); !ok {
-		t.Fatalf("expected tea.QuitMsg after :topology + q, got %T", msg)
+		t.Fatalf("expected tea.QuitMsg after v→topology + q, got %T", msg)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Command Mode Tests (vim-style ":" lens switching)
+// Command Mode Tests (vim-style ":" resource switching)
 // ---------------------------------------------------------------------------
 
 func TestCommandMode_ActivateWithColon(t *testing.T) {
@@ -2024,7 +2078,7 @@ func TestCommandMode_EscCancels(t *testing.T) {
 	}
 }
 
-func TestCommandMode_EnterExecutesTopology(t *testing.T) {
+func TestCommandMode_TopologyRejected(t *testing.T) {
 	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.TopologyViewData = sampleTopologyViewData()
@@ -2037,79 +2091,73 @@ func TestCommandMode_EnterExecutesTopology(t *testing.T) {
 		t.Fatalf("expected ForestView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 
+	// :topology should do nothing — topology is only available via 't' or 'v'
 	m = sendRune(m, ':')
 	for _, r := range "topology" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.commandActive {
 		t.Fatal("expected command mode deactivated after Enter")
 	}
-	if m.viewState.ViewType != clusterstate.TopologyView {
-		t.Fatalf("expected TopologyView after :topology, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.ForestView {
+		t.Fatalf("expected ForestView unchanged after :topology, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 }
 
-func TestCommandMode_PrefixMatchTopology(t *testing.T) {
-	mc := clusterstate.NewMockGlobalCache()
-	snap := mc.Snapshot()
-	snap.TopologyViewData = sampleTopologyViewData()
-	snap.PodCliqueSets = samplePCSResources()
-	mc.SetSnapshot(snap)
-
-	m := newTestModelWithCache(mc)
-
-	m = sendRune(m, ':')
-	for _, r := range "top" {
-		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
-
-	m = sendKey(m, tea.KeyEnter)
-
-	if m.viewState.ViewType != clusterstate.TopologyView {
-		t.Fatalf("expected TopologyView after :top (prefix match), got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
-	}
-}
-
-func TestCommandMode_PrefixMatchForest(t *testing.T) {
+func TestCommandMode_ForestRejected(t *testing.T) {
 	m := newTopologyTestModel()
 
 	if m.viewState.ViewType != clusterstate.TopologyView {
 		t.Fatalf("expected TopologyView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 
+	// :forest should do nothing — forest is only available via 'v' or esc
 	m = sendRune(m, ':')
-	for _, r := range "for" {
+	for _, r := range "forest" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-
 	m = sendKey(m, tea.KeyEnter)
 
-	if m.viewState.ViewType != clusterstate.ForestView {
-		t.Fatalf("expected ForestView after :for (prefix match), got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+	if m.viewState.ViewType != clusterstate.TopologyView {
+		t.Fatalf("expected TopologyView unchanged after :forest, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 }
 
-func TestCommandMode_TabCompletion(t *testing.T) {
+func TestCommandMode_TabCompletionPcs(t *testing.T) {
+	m := newTestModel(samplePCSResources())
+
+	m = sendRune(m, ':')
+	for _, r := range "pcs" {
+		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m.commandInput.Value() != "pcs" {
+		t.Fatalf("expected command input 'pcs', got %q", m.commandInput.Value())
+	}
+
+	// Tab should not change "pcs" since "pcs" is an exact match but "pcsg" also starts with "pcs"
+	// This tests that autocomplete works with the restricted command mode list
+	m = sendKey(m, tea.KeyTab)
+	// "pcs" is ambiguous (pcs, pcsg) so tab should not complete
+}
+
+func TestCommandMode_TabCompletionNoTopology(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	m = sendRune(m, ':')
 	for _, r := range "top" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	if m.commandInput.Value() != "top" {
-		t.Fatalf("expected command input 'top', got %q", m.commandInput.Value())
-	}
 
 	m = sendKey(m, tea.KeyTab)
-	if m.commandInput.Value() != "topology" {
-		t.Fatalf("expected command input 'topology' after Tab, got %q", m.commandInput.Value())
+	// "top" should NOT complete to "topology" in command mode
+	if m.commandInput.Value() == "topology" {
+		t.Fatal("expected command mode NOT to complete 'top' to 'topology'")
 	}
 }
 
-func TestCommandMode_TabCompletionForest(t *testing.T) {
+func TestCommandMode_TabCompletionNoForest(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	m = sendRune(m, ':')
@@ -2118,8 +2166,9 @@ func TestCommandMode_TabCompletionForest(t *testing.T) {
 	}
 
 	m = sendKey(m, tea.KeyTab)
-	if m.commandInput.Value() != "forest" {
-		t.Fatalf("expected command input 'forest' after Tab, got %q", m.commandInput.Value())
+	// "for" should NOT complete to "forest" in command mode
+	if m.commandInput.Value() == "forest" {
+		t.Fatal("expected command mode NOT to complete 'for' to 'forest'")
 	}
 }
 
@@ -2194,43 +2243,43 @@ func TestCommandMode_HeaderShowsCmdShortcut(t *testing.T) {
 }
 
 // ===========================================================================
-// Lens Edit Mode Tests (inline header editing via 'v' key)
+// View Edit Mode Tests (inline header editing via 'v' key)
 // ===========================================================================
 
-func TestLensEdit_ActivateWithV(t *testing.T) {
+func TestViewEdit_ActivateWithV(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
-	if m.lensEditActive {
-		t.Fatal("expected lens edit mode inactive initially")
+	if m.viewEditActive {
+		t.Fatal("expected view edit mode inactive initially")
 	}
 
 	m = sendRune(m, 'v')
-	if !m.lensEditActive {
-		t.Fatal("expected lens edit mode active after pressing v")
+	if !m.viewEditActive {
+		t.Fatal("expected view edit mode active after pressing v")
 	}
 }
 
-func TestLensEdit_EscCancels(t *testing.T) {
+func TestViewEdit_EscCancels(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	m = sendRune(m, 'v')
-	if !m.lensEditActive {
-		t.Fatal("expected lens edit mode active")
+	if !m.viewEditActive {
+		t.Fatal("expected view edit mode active")
 	}
 
 	// Type something first
 	m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 
 	m = sendKey(m, tea.KeyEsc)
-	if m.lensEditActive {
-		t.Fatal("expected lens edit mode deactivated after Esc")
+	if m.viewEditActive {
+		t.Fatal("expected view edit mode deactivated after Esc")
 	}
-	if m.lensInput.Value() != "" {
-		t.Fatalf("expected lens input cleared after Esc, got %q", m.lensInput.Value())
+	if m.viewInput.Value() != "" {
+		t.Fatalf("expected view input cleared after Esc, got %q", m.viewInput.Value())
 	}
 }
 
-func TestLensEdit_EnterExecutesTopology(t *testing.T) {
+func TestViewEdit_EnterExecutesTopology(t *testing.T) {
 	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.TopologyViewData = sampleTopologyViewData()
@@ -2250,15 +2299,15 @@ func TestLensEdit_EnterExecutesTopology(t *testing.T) {
 
 	m = sendKey(m, tea.KeyEnter)
 
-	if m.lensEditActive {
-		t.Fatal("expected lens edit mode deactivated after Enter")
+	if m.viewEditActive {
+		t.Fatal("expected view edit mode deactivated after Enter")
 	}
 	if m.viewState.ViewType != clusterstate.TopologyView {
 		t.Fatalf("expected TopologyView after typing 'topology', got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 }
 
-func TestLensEdit_PrefixMatchTopology(t *testing.T) {
+func TestViewEdit_PrefixMatchTopology(t *testing.T) {
 	mc := clusterstate.NewMockGlobalCache()
 	snap := mc.Snapshot()
 	snap.TopologyViewData = sampleTopologyViewData()
@@ -2279,7 +2328,7 @@ func TestLensEdit_PrefixMatchTopology(t *testing.T) {
 	}
 }
 
-func TestLensEdit_PrefixMatchForest(t *testing.T) {
+func TestViewEdit_PrefixMatchForest(t *testing.T) {
 	m := newTopologyTestModel()
 
 	if m.viewState.ViewType != clusterstate.TopologyView {
@@ -2298,24 +2347,24 @@ func TestLensEdit_PrefixMatchForest(t *testing.T) {
 	}
 }
 
-func TestLensEdit_TabCompletion(t *testing.T) {
+func TestViewEdit_TabCompletion(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	m = sendRune(m, 'v')
 	for _, r := range "top" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	if m.lensInput.Value() != "top" {
-		t.Fatalf("expected lens input 'top', got %q", m.lensInput.Value())
+	if m.viewInput.Value() != "top" {
+		t.Fatalf("expected view input 'top', got %q", m.viewInput.Value())
 	}
 
 	m = sendKey(m, tea.KeyTab)
-	if m.lensInput.Value() != "topology" {
-		t.Fatalf("expected lens input 'topology' after Tab, got %q", m.lensInput.Value())
+	if m.viewInput.Value() != "topology" {
+		t.Fatalf("expected view input 'topology' after Tab, got %q", m.viewInput.Value())
 	}
 }
 
-func TestLensEdit_TabCompletionForest(t *testing.T) {
+func TestViewEdit_TabCompletionForest(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	m = sendRune(m, 'v')
@@ -2324,12 +2373,12 @@ func TestLensEdit_TabCompletionForest(t *testing.T) {
 	}
 
 	m = sendKey(m, tea.KeyTab)
-	if m.lensInput.Value() != "forest" {
-		t.Fatalf("expected lens input 'forest' after Tab, got %q", m.lensInput.Value())
+	if m.viewInput.Value() != "forest" {
+		t.Fatalf("expected view input 'forest' after Tab, got %q", m.viewInput.Value())
 	}
 }
 
-func TestLensEdit_NoMatchDoesNothing(t *testing.T) {
+func TestViewEdit_NoMatchDoesNothing(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	viewBefore := m.viewState.ViewType
@@ -2344,12 +2393,12 @@ func TestLensEdit_NoMatchDoesNothing(t *testing.T) {
 	if m.viewState.ViewType != viewBefore {
 		t.Fatalf("expected view unchanged after unmatched input, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
-	if m.lensEditActive {
-		t.Fatal("expected lens edit mode deactivated after Enter (even with no match)")
+	if m.viewEditActive {
+		t.Fatal("expected view edit mode deactivated after Enter (even with no match)")
 	}
 }
 
-func TestLensEdit_EmptyInputDoesNothing(t *testing.T) {
+func TestViewEdit_EmptyInputDoesNothing(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	viewBefore := m.viewState.ViewType
@@ -2362,16 +2411,16 @@ func TestLensEdit_EmptyInputDoesNothing(t *testing.T) {
 	}
 }
 
-func TestLensEdit_CtrlCQuitsFromLensEdit(t *testing.T) {
+func TestViewEdit_CtrlCQuitsFromViewEdit(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 	m = sendRune(m, 'v')
-	if !m.lensEditActive {
-		t.Fatal("expected lens edit active")
+	if !m.viewEditActive {
+		t.Fatal("expected view edit active")
 	}
 
 	_, cmd := applyMsg(m, tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd == nil {
-		t.Fatal("expected quit command even in lens edit mode")
+		t.Fatal("expected quit command even in view edit mode")
 	}
 	msg := cmd()
 	if _, ok := msg.(tea.QuitMsg); !ok {
@@ -2379,16 +2428,16 @@ func TestLensEdit_CtrlCQuitsFromLensEdit(t *testing.T) {
 	}
 }
 
-func TestLensEdit_HeaderShowsInlineInput(t *testing.T) {
+func TestViewEdit_HeaderShowsInlineInput(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
-	// Before activating, header should show the lens value
+	// Before activating, header should show the view value
 	header := m.renderHeaderFrame()
 	if !strings.Contains(header, "forest") {
-		t.Errorf("expected header to contain 'forest' lens value, got:\n%s", header)
+		t.Errorf("expected header to contain 'forest' view value, got:\n%s", header)
 	}
 
-	// Activate lens edit and type something
+	// Activate view edit and type something
 	m = sendRune(m, 'v')
 	for _, r := range "top" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -2397,23 +2446,23 @@ func TestLensEdit_HeaderShowsInlineInput(t *testing.T) {
 	header = m.renderHeaderFrame()
 	// The header should contain the typed text inline
 	if !strings.Contains(header, "top") {
-		t.Errorf("expected header to contain typed 'top' in lens input, got:\n%s", header)
+		t.Errorf("expected header to contain typed 'top' in view input, got:\n%s", header)
 	}
 }
 
-func TestLensEdit_HeaderShowsLensShortcut(t *testing.T) {
+func TestViewEdit_HeaderShowsViewLabel(t *testing.T) {
 	m := newTestModel(samplePCSResources())
 
 	header := m.renderHeaderFrame()
-	if !strings.Contains(header, "Lens") {
-		t.Errorf("expected header to contain 'Lens' shortcut, got:\n%s", header)
+	if !strings.Contains(header, "View") {
+		t.Errorf("expected header to contain 'View' label, got:\n%s", header)
 	}
 }
 
-func TestLensCommandNames(t *testing.T) {
-	names := LensCommandNames()
+func TestViewCommandNames(t *testing.T) {
+	names := ViewCommandNames()
 	if len(names) != 9 {
-		t.Fatalf("expected 9 lens commands, got %d", len(names))
+		t.Fatalf("expected 9 view commands, got %d", len(names))
 	}
 	expected := map[string]bool{
 		"forest": true, "topology": true,
@@ -2424,7 +2473,31 @@ func TestLensCommandNames(t *testing.T) {
 	}
 	for _, n := range names {
 		if !expected[n] {
-			t.Errorf("unexpected lens command name: %q", n)
+			t.Errorf("unexpected view command name: %q", n)
+		}
+	}
+}
+
+func TestCommandModeNames(t *testing.T) {
+	names := CommandModeNames()
+	if len(names) != 7 {
+		t.Fatalf("expected 7 command mode names, got %d", len(names))
+	}
+	expected := map[string]bool{
+		"pcs": true, "podcliqueset": true,
+		"pc": true, "podclique": true,
+		"pcsg": true, "podcliquescalinggroup": true,
+		"pod": true,
+	}
+	for _, n := range names {
+		if !expected[n] {
+			t.Errorf("unexpected command mode name: %q", n)
+		}
+	}
+	// Ensure forest and topology are NOT in command mode
+	for _, n := range names {
+		if n == "forest" || n == "topology" {
+			t.Errorf("command mode should not include %q", n)
 		}
 	}
 }
@@ -2804,7 +2877,7 @@ func TestTopologyView_ThreeWaySplit_MixedWorkloads(t *testing.T) {
 	}
 }
 
-func TestCommandMode_SwitchToForestFromDeepView(t *testing.T) {
+func TestViewEdit_SwitchToForestFromDeepView(t *testing.T) {
 	mc := buildFullMockCache()
 	m := newTestModelWithCache(mc)
 
@@ -2816,15 +2889,15 @@ func TestCommandMode_SwitchToForestFromDeepView(t *testing.T) {
 		SelectedPodClique:    "alpha-pcs-0-standalone-pc",
 	}
 
-	// Use command mode to go to forest
-	m = sendRune(m, ':')
+	// Use view edit mode to go to forest
+	m = sendRune(m, 'v')
 	for _, r := range "forest" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.viewState.ViewType != clusterstate.ForestView {
-		t.Fatalf("expected ForestView after :forest from deep view, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		t.Fatalf("expected ForestView after view:forest from deep view, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 	if m.viewState.SelectedPodCliqueSet != "" {
 		t.Fatalf("expected SelectedPodCliqueSet cleared, got %q", m.viewState.SelectedPodCliqueSet)
@@ -3868,7 +3941,7 @@ func TestExecuteCommand_ResourceType_PreservesFilter(t *testing.T) {
 	}
 }
 
-func TestExecuteCommand_Forest_StillWorks(t *testing.T) {
+func TestViewEdit_Forest_StillWorks(t *testing.T) {
 	mc := buildFullMockCache()
 	// Add topology data so 't' can switch to TopologyView
 	snap := mc.Snapshot()
@@ -3882,43 +3955,43 @@ func TestExecuteCommand_Forest_StillWorks(t *testing.T) {
 		t.Fatalf("expected TopologyView, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 
-	// :forest should go back to ForestView
-	m = sendRune(m, ':')
+	// v→forest should go back to ForestView
+	m = sendRune(m, 'v')
 	for _, r := range "forest" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.viewState.ViewType != clusterstate.ForestView {
-		t.Fatalf("expected ForestView after :forest, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		t.Fatalf("expected ForestView after v→forest, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 	if m.forestResourceType != "pcs" {
-		t.Fatalf("expected forestResourceType=pcs after :forest, got %q", m.forestResourceType)
+		t.Fatalf("expected forestResourceType=pcs after v→forest, got %q", m.forestResourceType)
 	}
 }
 
-func TestExecuteCommand_Topology_StillWorks(t *testing.T) {
+func TestViewEdit_Topology_StillWorks(t *testing.T) {
 	mc := buildFullMockCache()
 	snap := mc.Snapshot()
 	snap.TopologyViewData = sampleTopologyViewData()
 	mc.SetSnapshot(snap)
 	m := newTestModelWithCache(mc)
 
-	m = sendRune(m, ':')
+	m = sendRune(m, 'v')
 	for _, r := range "topology" {
 		m = mustApply(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 	m = sendKey(m, tea.KeyEnter)
 
 	if m.viewState.ViewType != clusterstate.TopologyView {
-		t.Fatalf("expected TopologyView after :topology, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
+		t.Fatalf("expected TopologyView after v→topology, got %s", clusterstate.ViewTypeName(m.viewState.ViewType))
 	}
 }
 
 // --- 11d. Autocomplete with expanded candidates ---
 
 func TestAutocompleter_UniqueMatch_WithResourceTypes(t *testing.T) {
-	ac := NewAutocompleter(LensCommandNames())
+	ac := NewAutocompleter(ViewCommandNames())
 
 	tests := []struct {
 		prefix      string

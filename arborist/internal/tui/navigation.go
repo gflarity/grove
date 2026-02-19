@@ -143,7 +143,10 @@ func (m *Model) navigateIntoPCS(selectedName, selectedNamespace string) {
 	}
 
 	// Check replica count for auto-skip
-	replicaIndexes := m.cachedSnapshot.ReplicaIndexesByPCS[selectedName]
+	var replicaIndexes []string
+	if m.cachedSnapshot != nil {
+		replicaIndexes = m.cachedSnapshot.ReplicaIndexesByPCS[selectedName]
+	}
 	if len(replicaIndexes) == 1 {
 		// Single replica — skip PodCliqueSetView, go directly to replica view
 		m.viewState.ViewType = clusterstate.PodCliqueSetReplicaView
@@ -193,7 +196,10 @@ func (m *Model) navigateIntoPCSG(selectedName, selectedNamespace string) {
 	m.viewState.SelectedPod = ""
 
 	// Check PCSG replica count for auto-skip
-	pcsgReplicaIndexes := m.cachedSnapshot.ReplicaIndexesByPCSG[selectedName]
+	var pcsgReplicaIndexes []string
+	if m.cachedSnapshot != nil {
+		pcsgReplicaIndexes = m.cachedSnapshot.ReplicaIndexesByPCSG[selectedName]
+	}
 	if len(pcsgReplicaIndexes) == 1 {
 		m.viewState.ViewType = clusterstate.PodCliqueScalingGroupReplicaView
 		m.viewState.SelectedPCSGReplicaIndex = pcsgReplicaIndexes[0]

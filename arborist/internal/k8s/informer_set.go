@@ -25,7 +25,6 @@ import (
 	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -59,9 +58,6 @@ var (
 )
 
 const (
-	// globalPcsLabelSelector limits the Pod informer to PCS-managed pods only.
-	globalPcsLabelSelector = "app.kubernetes.io/part-of"
-
 	// eventMaxAge bounds in-memory event storage to recent events only.
 	eventMaxAge = 1 * time.Hour
 )
@@ -111,13 +107,10 @@ func (s *informerSet) setup(clientset kubernetes.Interface, dynamicClient dynami
 		0, // no resync period — we rely on watch events
 	)
 
-	// Pod informer with label selector for PCS-managed pods.
+	// Pod informer watches all pods (no label selector) so that non-Grove GPU
+	// pods are included in topology view GPU accounting.
 	// When a namespace is set, scope to that namespace.
-	podFactoryOpts := []informers.SharedInformerOption{
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.LabelSelector = globalPcsLabelSelector
-		}),
-	}
+	var podFactoryOpts []informers.SharedInformerOption
 	if s.namespace != "" {
 		podFactoryOpts = append(podFactoryOpts, informers.WithNamespace(s.namespace))
 	}

@@ -90,15 +90,16 @@ type LayoutState struct {
 	ready  bool // true after first WindowSizeMsg
 }
 
-// InputModes groups all text-input mode fields (filter, command, lens).
+// InputModes groups all text-input mode fields (filter, command, view).
 type InputModes struct {
-	filterActive     bool
-	filterText       string
-	commandActive    bool
-	commandInput     textinput.Model
-	lensEditActive   bool
-	lensInput        textinput.Model
-	lensAutocomplete *Autocompleter
+	filterActive        bool
+	filterText          string
+	commandActive       bool
+	commandInput        textinput.Model
+	commandAutocomplete *Autocompleter
+	viewEditActive      bool
+	viewInput           textinput.Model
+	viewAutocomplete    *Autocompleter
 }
 
 // TopologyState groups topology view fields.
@@ -165,7 +166,7 @@ type Config struct {
 // Zero-value note: Model requires NewModel() for construction. The following
 // fields need explicit initialization and are NOT safe at their zero value:
 //   - allResources, podYAMLData (maps — nil map panics on write)
-//   - filterInput, commandInput, lensInput (textinput.Model — need New())
+//   - filterInput, commandInput, viewInput (textinput.Model — need New())
 //   - resourcesTable, eventsTable, topology tables (table.Model — need columns)
 //   - yamlOverlay, logsOverlay (contain nested OverlayModel with search input)
 //
@@ -315,18 +316,21 @@ func normalizeResourceType(rt string) string {
 func NewModel(cache clusterstate.GlobalCache, opts ...Option) Model {
 	ti := newSearchInput("/ ", 40, FilterBarStyle)
 	ci := newSearchInput(": ", 40, CommandBarStyle)
-	li := newSearchInput("", 30, lipgloss.NewStyle())
+	vi := newSearchInput("", 30, lipgloss.NewStyle())
 
-	// Initialize autocomplete for lens/command inputs
-	ac := NewAutocompleter(LensCommandNames())
-	ac.ConfigureInput(&ci, AutocompleteSuggestionStyle)
-	ac.ConfigureInput(&li, AutocompleteSuggestionStyle)
+	// Initialize separate autocompleters for command mode and view mode
+	cmdAC := NewAutocompleter(CommandModeNames())
+	cmdAC.ConfigureInput(&ci, AutocompleteSuggestionStyle)
+
+	viewAC := NewAutocompleter(ViewCommandNames())
+	viewAC.ConfigureInput(&vi, AutocompleteSuggestionStyle)
 
 	m := Model{
 		InputModes: InputModes{
-			commandInput:     ci,
-			lensInput:        li,
-			lensAutocomplete: ac,
+			commandInput:        ci,
+			commandAutocomplete: cmdAC,
+			viewInput:           vi,
+			viewAutocomplete:    viewAC,
 		},
 		DataState: DataState{
 			allResources: make(map[string][]clusterstate.Resource),
