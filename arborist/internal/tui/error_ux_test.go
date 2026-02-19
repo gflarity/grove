@@ -582,8 +582,8 @@ func TestHeader_HidesTopologyHint_WhenUnavailable(t *testing.T) {
 	m.topologyViewData = nil
 
 	shortcuts := m.buildShortcutsString()
-	if strings.Contains(shortcuts, "<t>Topology") {
-		t.Errorf("expected shortcuts NOT to contain '<t>Topology' when topology unavailable, got %q", shortcuts)
+	if strings.Contains(shortcuts, "<t>Toggle View") {
+		t.Errorf("expected shortcuts NOT to contain '<t>Toggle View' when topology unavailable, got %q", shortcuts)
 	}
 }
 
@@ -596,8 +596,8 @@ func TestHeader_ShowsTopologyHint_WhenAvailable(t *testing.T) {
 	}
 
 	shortcuts := m.buildShortcutsString()
-	if !strings.Contains(shortcuts, "<t>Topology") {
-		t.Errorf("expected shortcuts to contain '<t>Topology', got %q", shortcuts)
+	if !strings.Contains(shortcuts, "<t>Toggle View") {
+		t.Errorf("expected shortcuts to contain '<t>Toggle View', got %q", shortcuts)
 	}
 }
 

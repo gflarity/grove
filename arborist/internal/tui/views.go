@@ -139,7 +139,7 @@ func (m Model) buildMenuItems() []menuItem {
 		items = append(items, menuItem{"s", "Shell"})
 	}
 	if m.topologyAvailable() {
-		items = append(items, menuItem{"t", "Topology"})
+		items = append(items, menuItem{"t", "Toggle View"})
 	}
 	items = append(items, menuItem{"!", "Errors"})
 
