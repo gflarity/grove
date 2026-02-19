@@ -19,6 +19,7 @@ package diagnostics
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -198,25 +199,25 @@ func (fo *FileOutput) Flush() error {
 }
 
 // CollectToDirectory runs all collectors and writes output to the given directory.
-func CollectToDirectory(dc *DiagnosticContext, outputDir string) error {
+func CollectToDirectory(ctx context.Context, dc *DiagnosticContext, outputDir string) error {
 	output, err := NewFileOutput(outputDir)
 	if err != nil {
 		return fmt.Errorf("failed to create file output: %w", err)
 	}
 
-	return CollectAllDiagnostics(dc, output)
+	return CollectAllDiagnostics(ctx, dc, output)
 }
 
 // CollectAndBundle runs all collectors, writes to a timestamped directory,
 // and creates a .tgz archive. Returns the path to the tgz file.
-func CollectAndBundle(dc *DiagnosticContext, baseDir string) (string, error) {
+func CollectAndBundle(ctx context.Context, dc *DiagnosticContext, baseDir string) (string, error) {
 	// Create timestamped directory name
 	timestamp := time.Now().Format("2006-01-04-150405")
 	dirName := fmt.Sprintf("grove-diagnostics-%s", timestamp)
 	outputDir := filepath.Join(baseDir, dirName)
 
 	// Collect diagnostics to directory
-	if err := CollectToDirectory(dc, outputDir); err != nil {
+	if err := CollectToDirectory(ctx, dc, outputDir); err != nil {
 		return "", fmt.Errorf("failed to collect diagnostics: %w", err)
 	}
 

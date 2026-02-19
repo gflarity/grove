@@ -261,6 +261,6 @@ func (m *Model) navigateIntoPod(selectedName, selectedNamespace string) tea.Cmd 
 	m.rebuildResourcesTable()
 	m.rebuildEventsTable()
 
-	return loadPodContainersCmd(m.cache, m.ctx, selectedName, selectedNamespace)
+	return loadPodContainersCmd(m.ctx, m.cache, selectedName, selectedNamespace)
 }
 

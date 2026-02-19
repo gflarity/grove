@@ -17,6 +17,7 @@
 package diagnostics
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -25,7 +26,7 @@ import (
 )
 
 // CollectOperatorLogs captures logs from all containers in the operator pods.
-func CollectOperatorLogs(dc *DiagnosticContext, output DiagnosticOutput) error {
+func CollectOperatorLogs(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 	if dc.Clientset == nil {
 		return fmt.Errorf("clientset is nil, cannot collect operator logs")
 	}
@@ -35,7 +36,7 @@ func CollectOperatorLogs(dc *DiagnosticContext, output DiagnosticOutput) error {
 	}
 
 	// List pods in the operator namespace
-	pods, err := dc.Clientset.CoreV1().Pods(dc.OperatorNamespace).List(dc.Ctx, metav1.ListOptions{})
+	pods, err := dc.Clientset.CoreV1().Pods(dc.OperatorNamespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list pods in namespace %s: %w", dc.OperatorNamespace, err)
 	}
@@ -82,7 +83,7 @@ func CollectOperatorLogs(dc *DiagnosticContext, output DiagnosticOutput) error {
 				TailLines: &logLines,
 			})
 
-			logStream, err := req.Stream(dc.Ctx)
+			logStream, err := req.Stream(ctx)
 			if err != nil {
 				_ = output.WriteLinef("[ERROR] Failed to get logs for container %s: %v", container.Name, err)
 				continue

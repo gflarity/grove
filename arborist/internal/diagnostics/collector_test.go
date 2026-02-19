@@ -57,25 +57,25 @@ func TestCollectAll_AllSucceed(t *testing.T) {
 	callOrder := []string{}
 	c := &Collector{
 		collectors: []namedCollector{
-			{name: "A", fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+			{name: "A", fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 				callOrder = append(callOrder, "A")
 				return nil
 			}},
-			{name: "B", fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+			{name: "B", fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 				callOrder = append(callOrder, "B")
 				return nil
 			}},
 		},
 	}
 
+	ctx := context.Background()
 	dc := &DiagnosticContext{
-		Ctx:               context.Background(),
 		Namespace:         "test-ns",
 		OperatorNamespace: "grove-system",
 	}
 	out := &mockOutput{}
 
-	err := c.CollectAll(dc, out)
+	err := c.CollectAll(ctx, dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -97,23 +97,23 @@ func TestCollectAll_AllSucceed(t *testing.T) {
 func TestCollectAll_CollectorErrors(t *testing.T) {
 	c := &Collector{
 		collectors: []namedCollector{
-			{name: "Failing", fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+			{name: "Failing", fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 				return fmt.Errorf("something broke")
 			}},
-			{name: "Succeeding", fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+			{name: "Succeeding", fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 				return nil
 			}},
 		},
 	}
 
+	ctx := context.Background()
 	dc := &DiagnosticContext{
-		Ctx:               context.Background(),
 		Namespace:         "test-ns",
 		OperatorNamespace: "grove-system",
 	}
 	out := &mockOutput{}
 
-	err := c.CollectAll(dc, out)
+	err := c.CollectAll(ctx, dc, out)
 	if err != nil {
 		t.Fatalf("CollectAll should not return error for collector failures, got: %v", err)
 	}
@@ -138,23 +138,23 @@ func TestCollectAll_CollectorErrors(t *testing.T) {
 func TestCollectAll_PanicRecovery(t *testing.T) {
 	c := &Collector{
 		collectors: []namedCollector{
-			{name: "Panicker", fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+			{name: "Panicker", fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 				panic("unexpected nil pointer")
 			}},
-			{name: "AfterPanic", fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+			{name: "AfterPanic", fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 				return nil
 			}},
 		},
 	}
 
+	ctx := context.Background()
 	dc := &DiagnosticContext{
-		Ctx:               context.Background(),
 		Namespace:         "test-ns",
 		OperatorNamespace: "grove-system",
 	}
 	out := &mockOutput{}
 
-	err := c.CollectAll(dc, out)
+	err := c.CollectAll(ctx, dc, out)
 	if err != nil {
 		t.Fatalf("CollectAll should not propagate panics, got: %v", err)
 	}
@@ -177,14 +177,14 @@ func TestCollectAll_FlushError(t *testing.T) {
 		collectors: []namedCollector{},
 	}
 
+	ctx := context.Background()
 	dc := &DiagnosticContext{
-		Ctx:               context.Background(),
 		Namespace:         "test-ns",
 		OperatorNamespace: "grove-system",
 	}
 	out := &mockOutput{flushErr: fmt.Errorf("disk full")}
 
-	err := c.CollectAll(dc, out)
+	err := c.CollectAll(ctx, dc, out)
 	if err == nil {
 		t.Fatal("expected error from flush failure")
 	}
@@ -211,12 +211,12 @@ func TestSafeRunCollector_NormalReturn(t *testing.T) {
 	c := &Collector{}
 	nc := namedCollector{
 		name: "test",
-		fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+		fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 			return nil
 		},
 	}
 
-	err := c.safeRunCollector(nc, nil, &mockOutput{})
+	err := c.safeRunCollector(context.Background(), nc, nil, &mockOutput{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -226,12 +226,12 @@ func TestSafeRunCollector_ErrorReturn(t *testing.T) {
 	c := &Collector{}
 	nc := namedCollector{
 		name: "test",
-		fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+		fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 			return fmt.Errorf("test error")
 		},
 	}
 
-	err := c.safeRunCollector(nc, nil, &mockOutput{})
+	err := c.safeRunCollector(context.Background(), nc, nil, &mockOutput{})
 	if err == nil || err.Error() != "test error" {
 		t.Fatalf("expected 'test error', got: %v", err)
 	}
@@ -241,12 +241,12 @@ func TestSafeRunCollector_PanicRecovery(t *testing.T) {
 	c := &Collector{}
 	nc := namedCollector{
 		name: "test",
-		fn: func(dc *DiagnosticContext, output DiagnosticOutput) error {
+		fn: func(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 			panic("boom")
 		},
 	}
 
-	err := c.safeRunCollector(nc, nil, &mockOutput{})
+	err := c.safeRunCollector(context.Background(), nc, nil, &mockOutput{})
 	if err == nil {
 		t.Fatal("expected error from panic recovery")
 	}

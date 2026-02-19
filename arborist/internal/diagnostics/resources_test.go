@@ -43,7 +43,6 @@ func TestCollectGroveResources_WithResources(t *testing.T) {
 	pcs.SetNamespace("test-ns")
 
 	dc := &DiagnosticContext{
-		Ctx: context.Background(),
 		DynamicClient: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 			scheme,
 			map[schema.GroupVersionResource]string{
@@ -58,7 +57,7 @@ func TestCollectGroveResources_WithResources(t *testing.T) {
 	}
 	out := &mockOutput{}
 
-	err := CollectGroveResources(dc, out)
+	err := CollectGroveResources(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +81,6 @@ func TestCollectGroveResources_WithResources(t *testing.T) {
 func TestCollectGroveResources_NoResources(t *testing.T) {
 	scheme := newFakeDynamicScheme()
 	dc := &DiagnosticContext{
-		Ctx: context.Background(),
 		DynamicClient: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 			scheme,
 			map[schema.GroupVersionResource]string{
@@ -96,7 +94,7 @@ func TestCollectGroveResources_NoResources(t *testing.T) {
 	}
 	out := &mockOutput{}
 
-	err := CollectGroveResources(dc, out)
+	err := CollectGroveResources(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,13 +117,12 @@ func TestCollectGroveResources_NoResources(t *testing.T) {
 
 func TestCollectGroveResources_NilDynamicClient(t *testing.T) {
 	dc := &DiagnosticContext{
-		Ctx:           context.Background(),
 		DynamicClient: nil,
 		Namespace:     "test-ns",
 	}
 	out := &mockOutput{}
 
-	err := CollectGroveResources(dc, out)
+	err := CollectGroveResources(context.Background(), dc, out)
 	if err == nil {
 		t.Fatal("expected error for nil dynamic client")
 	}

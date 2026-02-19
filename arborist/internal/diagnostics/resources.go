@@ -17,6 +17,7 @@
 package diagnostics
 
 import (
+	"context"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,7 +25,7 @@ import (
 )
 
 // CollectGroveResources lists all Grove CRDs via the dynamic client and dumps them as YAML.
-func CollectGroveResources(dc *DiagnosticContext, output DiagnosticOutput) error {
+func CollectGroveResources(ctx context.Context, dc *DiagnosticContext, output DiagnosticOutput) error {
 	if dc.DynamicClient == nil {
 		return fmt.Errorf("dynamic client is nil, cannot list Grove resources")
 	}
@@ -35,7 +36,7 @@ func CollectGroveResources(dc *DiagnosticContext, output DiagnosticOutput) error
 
 	for _, rt := range GroveResourceTypes {
 		_ = output.WriteLinef("[INFO] Listing %s in namespace %s...", rt.Name, dc.Namespace)
-		resources, err := dc.DynamicClient.Resource(rt.GVR).Namespace(dc.Namespace).List(dc.Ctx, metav1.ListOptions{})
+		resources, err := dc.DynamicClient.Resource(rt.GVR).Namespace(dc.Namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			_ = output.WriteLinef("[ERROR] Failed to list %s: %v", rt.Name, err)
 			continue

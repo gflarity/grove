@@ -239,13 +239,12 @@ func TestCollectPodDetails_HealthyPods(t *testing.T) {
 	)
 
 	dc := &DiagnosticContext{
-		Ctx:       context.Background(),
 		Clientset: cs,
 		Namespace: "test-ns",
 	}
 	out := &mockOutput{}
 
-	err := CollectPodDetails(dc, out)
+	err := CollectPodDetails(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -289,13 +288,12 @@ func TestCollectPodDetails_UnhealthyPods(t *testing.T) {
 	)
 
 	dc := &DiagnosticContext{
-		Ctx:       context.Background(),
 		Clientset: cs,
 		Namespace: "test-ns",
 	}
 	out := &mockOutput{}
 
-	err := CollectPodDetails(dc, out)
+	err := CollectPodDetails(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -329,13 +327,12 @@ func TestCollectPodDetails_NoPods(t *testing.T) {
 	cs := kubefake.NewSimpleClientset()
 
 	dc := &DiagnosticContext{
-		Ctx:       context.Background(),
 		Clientset: cs,
 		Namespace: "empty-ns",
 	}
 	out := &mockOutput{}
 
-	err := CollectPodDetails(dc, out)
+	err := CollectPodDetails(context.Background(), dc, out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -357,13 +354,12 @@ func TestCollectPodDetails_NoPods(t *testing.T) {
 
 func TestCollectPodDetails_NilClientset(t *testing.T) {
 	dc := &DiagnosticContext{
-		Ctx:       context.Background(),
 		Clientset: nil,
 		Namespace: "test-ns",
 	}
 	out := &mockOutput{}
 
-	err := CollectPodDetails(dc, out)
+	err := CollectPodDetails(context.Background(), dc, out)
 	if err == nil {
 		t.Fatal("expected error for nil clientset")
 	}

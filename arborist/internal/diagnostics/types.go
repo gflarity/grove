@@ -17,7 +17,6 @@
 package diagnostics
 
 import (
-	"context"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -44,12 +43,12 @@ const (
 	DefaultOperatorDeploymentPrefix = "grove-operator"
 )
 
-// DiagnosticContext provides the context and clients needed for collecting diagnostics.
+// DiagnosticContext provides the clients and configuration needed for collecting diagnostics.
 // This is decoupled from the e2e TestContext to allow reuse in CLI tools.
+//
+// Context is passed as a parameter to collection functions rather than stored here,
+// per Go conventions: "Do not store Contexts inside a struct type."
 type DiagnosticContext struct {
-	// Ctx is the context for API calls
-	Ctx context.Context
-
 	// Clientset is the Kubernetes clientset for core API operations
 	Clientset kubernetes.Interface
 
@@ -68,13 +67,11 @@ type DiagnosticContext struct {
 
 // NewDiagnosticContext creates a new DiagnosticContext with sensible defaults
 func NewDiagnosticContext(
-	ctx context.Context,
 	clientset kubernetes.Interface,
 	dynamicClient dynamic.Interface,
 	namespace string,
 ) *DiagnosticContext {
 	return &DiagnosticContext{
-		Ctx:                      ctx,
 		Clientset:                clientset,
 		DynamicClient:            dynamicClient,
 		Namespace:                namespace,

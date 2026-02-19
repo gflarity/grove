@@ -142,7 +142,7 @@ func (m *Model) switchToForestResourceType(rt string) {
 // startGlobalCacheCmd starts the global cache and waits for initial sync.
 // Any non-fatal warnings from startup (e.g. missing CRDs) are collected
 // and delivered via CacheSyncedMsg.Warnings.
-func startGlobalCacheCmd(cache clusterstate.GlobalCache, ctx context.Context) tea.Cmd {
+func startGlobalCacheCmd(ctx context.Context, cache clusterstate.GlobalCache) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("startGlobalCache")
 
@@ -179,7 +179,7 @@ func waitForCacheUpdateCmd(cache clusterstate.GlobalCache) tea.Cmd {
 }
 
 // loadResourceYAMLCmd creates a command to load any resource's YAML for the YAML overlay.
-func loadResourceYAMLCmd(cache clusterstate.GlobalCache, ctx context.Context, resourceType, name, namespace string) tea.Cmd {
+func loadResourceYAMLCmd(ctx context.Context, cache clusterstate.GlobalCache, resourceType, name, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("loadResourceYAML", "type", resourceType, "name", name, "ns", namespace)
 		if cache == nil {
@@ -193,7 +193,7 @@ func loadResourceYAMLCmd(cache clusterstate.GlobalCache, ctx context.Context, re
 
 // loadPodYAMLCmd creates a command to load a Pod's YAML via direct API GET.
 // This is the one exception — Pod YAML is large and rarely accessed.
-func loadPodYAMLCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+func loadPodYAMLCmd(ctx context.Context, cache clusterstate.GlobalCache, podName, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("loadPodYAML", "pod", podName, "ns", namespace)
 		if cache == nil {
@@ -206,7 +206,7 @@ func loadPodYAMLCmd(cache clusterstate.GlobalCache, ctx context.Context, podName
 }
 
 // loadPodContainersCmd creates a command to load a Pod's container info.
-func loadPodContainersCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+func loadPodContainersCmd(ctx context.Context, cache clusterstate.GlobalCache, podName, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("loadPodContainers", "pod", podName, "ns", namespace)
 		if cache == nil {
@@ -219,7 +219,7 @@ func loadPodContainersCmd(cache clusterstate.GlobalCache, ctx context.Context, p
 }
 
 // loadPodLogsCmd creates a command to load a pod container's logs.
-func loadPodLogsCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace, container string, tailLines int64) tea.Cmd {
+func loadPodLogsCmd(ctx context.Context, cache clusterstate.GlobalCache, podName, namespace, container string, tailLines int64) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("loadPodLogs", "pod", podName, "ns", namespace, "container", container)
 		if cache == nil {
@@ -243,7 +243,7 @@ func logsAutoScrollTickCmd() tea.Cmd {
 
 // fetchFirstContainerForLogsCmd fetches containers for a pod and returns a LogsRequestMsg
 // for the first running container (or first container if none running), or an ErrorMsg.
-func fetchFirstContainerForLogsCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+func fetchFirstContainerForLogsCmd(ctx context.Context, cache clusterstate.GlobalCache, podName, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("fetchFirstContainerForLogs", "pod", podName, "ns", namespace)
 		if cache == nil {
@@ -270,7 +270,7 @@ func fetchFirstContainerForLogsCmd(cache clusterstate.GlobalCache, ctx context.C
 
 // fetchFirstRunningContainerCmd fetches containers for a pod and returns a ShellRequestMsg
 // for the first running container, or an ErrorMsg if none are found.
-func fetchFirstRunningContainerCmd(cache clusterstate.GlobalCache, ctx context.Context, podName, namespace string) tea.Cmd {
+func fetchFirstRunningContainerCmd(ctx context.Context, cache clusterstate.GlobalCache, podName, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		debugLogCmd("fetchFirstRunningContainer", "pod", podName, "ns", namespace)
 		if cache == nil {

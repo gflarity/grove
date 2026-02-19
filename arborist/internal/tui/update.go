@@ -143,7 +143,7 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 		if !m.cacheStarted && m.cache != nil {
 			m.cacheStarted = true
 			debugLogWithContext("starting global cache")
-			return m, startGlobalCacheCmd(m.cache, m.ctx)
+			return m, startGlobalCacheCmd(m.ctx, m.cache)
 		}
 	}
 
