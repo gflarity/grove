@@ -1,0 +1,140 @@
+# Gang Scheduling Blocked - Node Affinity with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when node affinity requires non-existent label
+# Expected: 
+# - PodClique 'compute' cannot be scheduled (part of scaling group)
+# - PodClique 'storage' is schedule-gated (part of scaling group)
+# - PodClique 'network' is schedule-gated (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows blocked status due to 'compute' scheduling failure
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-node-affinity-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs scheduling-error-node-affinity-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg scheduling-error-node-affinity-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq scheduling-error-node-affinity-sg-0-compute
+#    kubectl describe pclq scheduling-error-node-affinity-sg-0-monitoring
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=scheduling-error-node-affinity-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs scheduling-error-node-affinity-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows blocked children
+# - PodCliqueScalingGroup shows member 'compute' is blocked
+# - 'compute' PodClique shows pods in Pending state
+# - 'storage' and 'network' PodCliques show gang scheduling blocked
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: scheduling-error-node-affinity-sg
+  namespace: default
+  labels:
+    app: scheduling-error-node-affinity-sg
+    demo: group3-scheduling
+    scenario: 01-node-affinity-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing compute, storage, and network
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - compute
+          - storage
+          - network
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with node affinity constraint - blocks gang scheduling
+      # Part of the scaling group
+      - name: compute
+        spec:
+          roleName: compute
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: compute
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+            # Node affinity requiring a label that doesn't exist
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: demo-label-that-does-not-exist
+                          operator: In
+                          values:
+                            - demo-value-that-does-not-exist
+      
+      # Healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: storage
+        spec:
+          roleName: storage
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: storage
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: network
+        spec:
+          roleName: network
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: network
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone monitoring service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: prom/node-exporter:latest
+                ports:
+                  - containerPort: 9100
+                    name: metrics
+                args:
+                  - --path.sysfs=/host/sys
+                  - --path.rootfs=/rootfs
+                  - --no-collector.wifi
+                  - --no-collector.hwmon
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

@@ -1,0 +1,128 @@
+# Topology-Aware PodCliqueSet (Single-Level) - Base Template
+# This PodCliqueSet demonstrates topology-aware scheduling with a PCS-level
+# rack constraint and 2 PCS replicas. Each replica has its own set of pods
+# packed onto nodes within the same rack.
+# Uses kai-scheduler for topology-aware placement.
+#
+# PREREQUISITES:
+# - Cluster created via setup-cluster with topology enabled
+#   (provides topology labels, kai-scheduler, and topology-enabled Grove operator)
+# - At least 7 worker nodes with rack/block topology labels
+#
+# QUICK START:
+# 1. Apply this topology-aware example:
+#    kubectl apply -f topology-pcs.yaml
+#
+# 2. Check pods are running (should see 8 total: 2 replicas x (2 worker + 2 router)):
+#    kubectl get pods -l app.kubernetes.io/part-of=topology-pcs
+#
+# 3. Check PodCliqueSet is healthy:
+#    kubectl get pcs topology-pcs
+#
+# 4. Verify topology placement - pods in each replica should be on nodes in the same rack:
+#    kubectl get pods -l app.kubernetes.io/part-of=topology-pcs -o wide
+#
+# 5. Inspect topology labels on the nodes where pods are scheduled:
+#    kubectl get pods -l app.kubernetes.io/part-of=topology-pcs -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeName}{"\n"}{end}' | while read pod node; do echo "$pod -> $node (rack=$(kubectl get node $node -o jsonpath='{.metadata.labels.topology\.io/rack}'))"; done
+#
+# 6. View detailed status:
+#    kubectl get pcs topology-pcs -o yaml | grep -A 5 operationalSummary
+#
+# 7. (Optional) Use grovectl:
+#    grovectl describe pcs topology-pcs
+#
+# 8. Clean up:
+#    kubectl delete pcs topology-pcs
+#
+# EXPECTED BEHAVIOR:
+# - All 8 pods will be Running (2 replicas x 4 pods each)
+# - Pods in each replica are scheduled on nodes within the same rack (packDomain: rack)
+# - Each replica has a PCSG "workers" managing 2 worker replicas as a scaling group
+# - Each replica has a "router" clique running independently with 2 replicas
+# - PCS status.operationalSummary.phase will be "Healthy"
+# - No errors in status.lastErrors
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: topology-pcs
+  namespace: default
+  labels:
+    app: topology-pcs
+    demo: topology-single-level
+spec:
+  replicas: 2
+  template:
+    topologyConstraint:
+      packDomain: rack
+    podCliqueScalingGroups:
+      - name: workers
+        replicas: 2
+        minAvailable: 2
+        cliqueNames:
+          - worker
+    cliques:
+      - name: worker
+        labels:
+          kai.scheduler/queue: test
+        spec:
+          roleName: worker
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            schedulerName: kai-scheduler
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: worker
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 120Mi
+                    nvidia.com/gpu: "1"
+                  limits:
+                    nvidia.com/gpu: "1"
+      - name: router
+        labels:
+          kai.scheduler/queue: test
+        spec:
+          roleName: router
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            schedulerName: kai-scheduler
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: node_role.e2e.grove.nvidia.com
+                          operator: In
+                          values:
+                            - agent
+            tolerations:
+              - key: node_role.e2e.grove.nvidia.com
+                operator: Equal
+                value: agent
+                effect: NoSchedule
+            containers:
+              - name: router
+                image: registry:5001/nginx:alpine-slim
+                resources:
+                  requests:
+                    memory: 120Mi
+                    nvidia.com/gpu: "1"
+                  limits:
+                    nvidia.com/gpu: "1"

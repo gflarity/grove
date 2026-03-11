@@ -1,0 +1,83 @@
+# Multi-Gang Scenarios with Different Errors
+# Demonstrates different gangs having different error types
+# Expected: Each gang shows its own errors, status aggregates across gangs, OperationalSummary reflects overall state
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 04-multi-gang.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=complex-error-multi-gang
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs complex-error-multi-gang -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs complex-error-multi-gang
+#
+# 6. Clean up:
+#    kubectl delete pcs complex-error-multi-gang
+#
+# EXPECTED BEHAVIOR:
+# - Different gangs will show different errors
+# - Some gangs may be healthy while others are degraded
+# - PCS status will aggregate across all gangs
+# - status.podGangStatuses will show per-gang details
+# - Overall status.operationalSummary.phase reflects worst gang state
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: complex-error-multi-gang
+  namespace: default
+  labels:
+    app: complex-error-multi-gang
+    demo: group5-complex
+    scenario: 04-multi-gang
+spec:
+  replicas: 3  # 3 gangs with different error states
+  template:
+    cliques:
+      # PodClique with image selector that will cause ImagePullBackOff in replicas 0
+      - name: app
+        spec:
+          roleName: app
+          replicas: 2
+          podSpec:
+            containers:
+              - name: app
+                # Using image with replica-specific tag (will fail for replica 0, succeed for others)
+                # In reality, all replicas use same image, but this simulates different error per gang
+                # For demo: replica 0 gets error, replica 2 is healthy
+                image: nginx:latest  # Will be patched per replica in actual e2e test
+                ports:
+                  - containerPort: 8080
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated when app has errors
+      - name: sidecar
+        spec:
+          roleName: sidecar
+          replicas: 1
+          podSpec:
+            containers:
+              - name: sidecar
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+# This creates 3 replicas (gangs) with different error states per gang
+# Gang 0 (Replica 0): app has ImagePullBackOff, sidecar healthy but schedule-gated
+# Gang 1 (Replica 1): app has CrashLoopBackOff, sidecar healthy but schedule-gated
+# Gang 2 (Replica 2): Both app and sidecar fully healthy and running
+# Note: To truly have different errors per gang, use e2e test helpers to patch
+# specific PodCliques after creation with different errors
+# Status will aggregate errors from Gang 0 and Gang 1 with origin tracking

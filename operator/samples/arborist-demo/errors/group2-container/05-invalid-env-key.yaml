@@ -1,0 +1,99 @@
+# CreateContainerConfigError - Invalid Environment Variable Key
+# Demonstrates error when environment variable key contains invalid characters (equals sign)
+# Expected: One PodClique fails to create container while another works fine
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 05-invalid-env-key.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=container-error-invalid-env
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs container-error-invalid-env -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs container-error-invalid-env
+#
+# 6. Clean up:
+#    kubectl delete pcs container-error-invalid-env
+#
+# EXPECTED BEHAVIOR:
+# - Pods in the 'api' PodClique will fail to create container
+# - Error message will indicate environment variable configuration issue
+# - Pod status will show CreateContainerConfigError
+# - Pods in the 'web' PodClique will work fine
+# - PCS status.operationalSummary.phase will be 'Degraded'
+# - PCS status.lastErrors will show the error originating from the 'api' PodClique
+# - PCS status.conditions will show ChildrenHealthy=False
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-error-invalid-env
+  namespace: default
+  labels:
+    app: container-error-invalid-env
+    demo: group2-container
+    scenario: 05-invalid-env-key
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with INVALID environment variable key (will fail)
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          podSpec:
+            containers:
+              - name: api
+                image: nginx:latest
+                env:
+                  # Invalid: environment variable key contains '=' character
+                  # Kubernetes expects keys to be valid C identifiers (alphanumeric + underscore)
+                  - name: "KEY=1"
+                    value: "some-value"
+                  # This valid env var won't help - the invalid one causes the error
+                  - name: VALID_KEY
+                    value: "valid-value"
+      
+      # PodClique with VALID configuration (will work fine)
+      - name: web
+        spec:
+          roleName: web
+          replicas: 2
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                env:
+                  # Valid environment variables
+                  - name: APP_NAME
+                    value: "my-app"
+                  - name: ENVIRONMENT
+                    value: "demo"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique - schedule-gated waiting for gang
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 1
+          podSpec:
+            containers:
+              - name: worker
+                image: nginx:latest
+                env:
+                  - name: WORKER_TYPE
+                    value: "background"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

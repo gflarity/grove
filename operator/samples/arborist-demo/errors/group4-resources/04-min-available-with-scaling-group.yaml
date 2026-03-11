@@ -1,0 +1,135 @@
+# MinAvailable Violations with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when insufficient resources to meet MinAvailable requirement
+# Expected: 
+# - PodClique 'workers' cannot meet MinAvailable (part of scaling group)
+# - PodClique 'coordinator' is schedule-gated (part of scaling group)
+# - PodClique 'storage' is schedule-gated (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows degraded status due to 'workers' MinAvailable violation
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 04-min-available-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs resource-error-min-available-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg resource-error-min-available-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq resource-error-min-available-sg-0-workers
+#    kubectl describe pclq resource-error-min-available-sg-0-monitoring
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=resource-error-min-available-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs resource-error-min-available-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows degraded children
+# - PodCliqueScalingGroup shows member 'workers' is degraded
+# - 'workers' PodClique shows MinAvailableBreached condition
+# - Some 'workers' pods may schedule, but not enough for MinAvailable
+# - 'coordinator' and 'storage' PodCliques show gang scheduling blocked
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: resource-error-min-available-sg
+  namespace: default
+  labels:
+    app: resource-error-min-available-sg
+    demo: group4-resources
+    scenario: 04-min-available-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing workers, coordinator, and storage
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - workers
+          - coordinator
+          - storage
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with high replica count and MinAvailable - insufficient cluster resources
+      # Part of the scaling group
+      - name: workers
+        spec:
+          roleName: workers
+          replicas: 5
+          # Set MinAvailable to require all 5 replicas
+          # But request high resources so only some can be scheduled
+          minAvailable: 5
+          podSpec:
+            containers:
+              - name: workers
+                image: nginx:latest
+                resources:
+                  # Request high CPU so not all pods can be scheduled
+                  # With 5 pods needing 20 CPUs each (100 CPUs total),
+                  # most clusters won't be able to schedule all 5 pods
+                  requests:
+                    cpu: "20"
+                    memory: 4Gi
+      
+      # Healthy PodClique - schedule-gated waiting for workers to meet MinAvailable
+      # Part of the scaling group
+      - name: coordinator
+        spec:
+          roleName: coordinator
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: coordinator
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: storage
+        spec:
+          roleName: storage
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: storage
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone monitoring service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: prom/prometheus:latest
+                ports:
+                  - containerPort: 9090
+                    name: prometheus
+                args:
+                  - --config.file=/etc/prometheus/prometheus.yml
+                  - --storage.tsdb.path=/prometheus
+                  - --web.enable-lifecycle
+                resources:
+                  requests:
+                    cpu: 20m
+                    memory: 128Mi

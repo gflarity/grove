@@ -1,0 +1,86 @@
+# PodCliqueSet with PodCliqueScalingGroup - Base Template
+# This PodCliqueSet includes a PodCliqueScalingGroup to demonstrate the full resource hierarchy.
+# Shows how errors propagate through PodCliqueSet -> PodCliqueScalingGroup -> PodClique -> Pod.
+#
+# QUICK START:
+# 1. Apply this working example:
+#    kubectl apply -f pcs-with-pcsg.yaml
+#
+# 2. Check all resources are created:
+#    kubectl get pcs,pcsg,pc -l app=pcs-with-pcsg
+#
+# 3. Check pods are running (should see 6 total: 3 web + 3 worker):
+#    kubectl get pods -l app.kubernetes.io/part-of=pcs-with-pcsg
+#
+# 4. View the hierarchy:
+#    kubectl get pcs pcs-with-pcsg -o yaml | grep -A 5 scalingGroups
+#    kubectl get pcsg pcs-with-pcsg-main -o yaml | grep -A 5 cliques
+#
+# 5. (Optional) Use grovectl:
+#    grovectl describe pcs pcs-with-pcsg
+#
+# 6. Clean up:
+#    kubectl delete pcs pcs-with-pcsg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueScalingGroup "pcs-with-pcsg-main" created
+# - 2 PodCliques created under the PCSG
+# - All 6 pods will be Running
+# - Full hierarchy shows healthy status at each level
+# - PCS status.operationalSummary.phase will be "Healthy"
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: pcs-with-pcsg
+  namespace: default
+  labels:
+    app: pcs-with-pcsg
+    demo: pcsg-template
+spec:
+  replicas: 1
+  template:
+    cliques:
+      - name: frontend
+        spec:
+          roleName: frontend
+          replicas: 2
+          podSpec:
+            containers:
+              - name: frontend
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      - name: backend
+        spec:
+          roleName: backend
+          replicas: 2
+          podSpec:
+            containers:
+              - name: backend
+                image: nginx:latest
+                command: ["/bin/sh"]
+                args: ["-c", "echo 'Backend service' && sleep 3600"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+    podCliqueScalingGroups:
+      - name: frontend-backend-group
+        cliqueNames:
+          - frontend
+          - backend
+        scaleConfig:
+          maxReplicas: 5
+          metrics:
+            - type: Resource
+              resource:
+                name: cpu
+                target:
+                  type: Utilization
+                  averageUtilization: 80

@@ -1,0 +1,114 @@
+# Gang Scheduling Blocked - Cordoned Nodes
+# Demonstrates error when all schedulable nodes are cordoned
+# Expected: Pods cannot be scheduled to cordoned nodes, gang scheduling blocked
+#
+# CLUSTER REQUIREMENTS:
+# - This scenario requires ALL schedulable nodes to be cordoned
+# - In some clusters (e.g., k3d), control-plane nodes may be schedulable
+# - You may need to cordon control-plane nodes too, or add NoSchedule taints
+#
+# QUICK START:
+# 1. FIRST cordon all schedulable nodes:
+#    # Option A: Cordon all nodes (including control-plane)
+#    kubectl get nodes -o name | xargs -I {} kubectl cordon {}
+#
+#    # Option B: Cordon only worker nodes (if control-plane is tainted)
+#    kubectl get nodes --selector='!node-role.kubernetes.io/control-plane' -o name | xargs -I {} kubectl cordon {}
+#
+#    # Option C: For k3d clusters, you may need to taint control-plane nodes
+#    kubectl get nodes -l node-role.kubernetes.io/control-plane -o name | \
+#      xargs -I {} kubectl taint nodes {} node-role.kubernetes.io/control-plane=:NoSchedule --overwrite
+#    kubectl get nodes -o name | xargs -I {} kubectl cordon {}
+#
+# 2. Verify no nodes are schedulable:
+#    kubectl get nodes
+#    # All nodes should show "Ready,SchedulingDisabled" or have NoSchedule taint
+#
+# 3. Apply this scenario:
+#    kubectl apply -f 03-cordoned-nodes.yaml
+#
+# 4. Check pod status (should be Pending):
+#    kubectl get pods -l app=scheduling-error-cordoned-nodes
+#
+# 5. View the scheduling error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#    # Should show: "node(s) were unschedulable" or "node(s) had untolerated taint"
+#
+# 6. Check PodCliqueSet status for scheduling visibility:
+#    kubectl get pcs scheduling-error-cordoned-nodes -o jsonpath='{.status.podGangStatuses}' | jq
+#
+# 7. (Recommended) Use grovectl for better output:
+#    grovectl describe pcs scheduling-error-cordoned-nodes
+#    grovectl analyze scheduling pcs scheduling-error-cordoned-nodes
+#
+# 8. Clean up:
+#    kubectl delete pcs scheduling-error-cordoned-nodes
+#    # IMPORTANT: Uncordon your nodes!
+#    kubectl get nodes -o name | xargs -I {} kubectl uncordon {}
+#    # If you added taints, remove them
+#    kubectl get nodes -l node-role.kubernetes.io/control-plane -o name | \
+#      xargs -I {} kubectl taint nodes {} node-role.kubernetes.io/control-plane- || true
+#
+# EXPECTED BEHAVIOR:
+# - Pods will remain in Pending state (if all nodes are truly unschedulable)
+# - Error will show 'node(s) were unschedulable' or 'node(s) had untolerated taint'
+# - Gang scheduling will be blocked
+# - PCS status.operationalSummary.phase will be 'Degraded'
+# - PCS status.operationalSummary.reason will be 'SomeGangsBlocked'
+# - PCS status.podGangStatuses will show blocking info with 'NotScheduled' reason
+# - PCS status.conditions[GangSchedulingReady] will be 'False'
+# - PCS status.conditions[ChildrenHealthy] will be 'True' (unscheduled ≠ unhealthy)
+#
+# NOTES:
+# - In k3d clusters, control-plane nodes are schedulable by default (no NoSchedule taint)
+# - If pods schedule on control-plane, you'll need to taint them (see Option C above)
+# - This demonstrates environmental constraints, not workload errors
+# - Scheduling constraints are visible in schedulingSummary and podGangStatuses, NOT in lastErrors
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: scheduling-error-cordoned-nodes
+  namespace: default
+  labels:
+    app: scheduling-error-cordoned-nodes
+    demo: group3-scheduling
+    scenario: 03-cordoned-nodes
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique that cannot be scheduled due to cordoned nodes
+      - name: app
+        spec:
+          roleName: app
+          replicas: 2
+          podSpec:
+            containers:
+              - name: app
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: sidecar
+        spec:
+          roleName: sidecar
+          replicas: 1
+          podSpec:
+            containers:
+              - name: sidecar
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+# This scenario requires manual node cordoning:
+# Use CordonNode() helper from e2e/utils/k8s_client.go to cordon all nodes
+# Example:
+#   clientset, _ := kubernetes.NewForConfig(restConfig)
+#   nodes, _ := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+#   for _, node := range nodes.Items {
+#     CordonNode(ctx, clientset, node.Name, true)
+#   }

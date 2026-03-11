@@ -1,0 +1,89 @@
+# Resource Quota Exceeded
+# Demonstrates error when pod requests exceed namespace quota
+# Expected: Pods cannot be scheduled, error shows quota exceeded, status shows quota violation
+# Note: Requires applying setup-quota.yaml first to create the resource quota
+#
+# QUICK START:
+# 1. FIRST apply the quota setup:
+#    kubectl apply -f setup-quota.yaml
+#
+# 2. Apply this scenario:
+#    kubectl apply -f 03-quota-exceeded.yaml
+#
+# 3. Check pod status (should be Pending):
+#    kubectl get pods -n demo-quota -l app=resource-error-quota-exceeded
+#
+# 4. Check quota usage:
+#    kubectl describe quota demo-quota -n demo-quota
+#
+# 5. Check PodCliqueSet status:
+#    kubectl get pcs resource-error-quota-exceeded -n demo-quota -o yaml | grep -A 10 lastErrors
+#
+# 6. Clean up:
+#    kubectl delete pcs resource-error-quota-exceeded -n demo-quota
+#    kubectl delete -f setup-quota.yaml
+#
+# EXPECTED BEHAVIOR:
+# - Pods will remain in Pending state
+# - Error will show 'exceeded quota'
+# - PCS status.operationalSummary.phase will be 'Blocked'
+# - status.blockingReasons will contain quota violation details
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: resource-error-quota-exceeded
+  namespace: demo-quota
+  labels:
+    app: resource-error-quota-exceeded
+    demo: group4-resources
+    scenario: 03-quota-exceeded
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique that exceeds namespace quota
+      - name: batch
+        spec:
+          roleName: batch
+          replicas: 2
+          podSpec:
+            containers:
+              - name: batch
+                image: nginx:latest
+                resources:
+                  # Request more CPU than the quota allows (quota allows 100m total)
+                  # 2 pods * 200m = 400m total, but quota only allows 100m
+                  requests:
+                    cpu: "200m"
+                    memory: 100Mi
+                  limits:
+                    cpu: "200m"
+                    memory: 100Mi
+      # Healthy PodClique within quota - schedule-gated waiting for gang
+      - name: monitor
+        spec:
+          roleName: monitor
+          replicas: 1
+          podSpec:
+            containers:
+              - name: monitor
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Another healthy PodClique within quota - schedule-gated waiting for gang
+      - name: webhook
+        spec:
+          roleName: webhook
+          replicas: 1
+          podSpec:
+            containers:
+              - name: webhook
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

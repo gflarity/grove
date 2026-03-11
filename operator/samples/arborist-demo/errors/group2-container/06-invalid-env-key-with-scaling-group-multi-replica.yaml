@@ -1,0 +1,195 @@
+# CreateContainerConfigError - Invalid Environment Variable Key with Scaling Group (Multiple Replicas)
+# Demonstrates error propagation through PodCliqueScalingGroup with multiple replicas
+# Expected: 
+# - Two PodCliqueScalingGroup replicas created (main-0 and main-1)
+# - Each replica has 'api', 'web', and 'worker' PodCliques
+# - All 'api' PodCliques fail to create containers (invalid env key)
+# - All 'web' PodCliques are schedule-gated (waiting for gang)
+# - All 'worker' PodCliques are schedule-gated (waiting for gang)
+# - Two 'monitoring' PodCliques run successfully (standalone, not part of gang)
+# - Two 'database' PodCliques run successfully (standalone, not part of gang)
+# - Both PodCliqueScalingGroups show unhealthy status due to 'api' failures
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 06-invalid-env-key-with-scaling-group-multi-replica.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs env-err-sg-multi
+#
+# 3. Check PodCliqueScalingGroup status (both replicas):
+#    kubectl describe pcsg env-err-sg-multi-0-main-0
+#    kubectl describe pcsg env-err-sg-multi-0-main-1
+#    kubectl describe pcsg env-err-sg-multi-1-main-0
+#    kubectl describe pcsg env-err-sg-multi-1-main-1
+#
+# 4. Check individual PodCliques (examples):
+#    kubectl describe pclq env-err-sg-multi-0-api
+#    kubectl describe pclq env-err-sg-multi-1-api
+#    kubectl describe pclq env-err-sg-multi-0-monitoring
+#    kubectl describe pclq env-err-sg-multi-0-database
+#
+# 5. View all pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=env-err-sg-multi
+#
+# 6. View PodCliques:
+#    kubectl get pclq -l app.kubernetes.io/part-of=env-err-sg-multi
+#
+# 7. View PodCliqueScalingGroups:
+#    kubectl get pcsg -l app.kubernetes.io/part-of=env-err-sg-multi
+#
+# 8. Clean up:
+#    kubectl delete pcs env-err-sg-multi
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows unhealthy children across both replicas
+# - Both PodCliqueScalingGroup replicas show members 'api' are unhealthy
+# - All 'api' PodCliques show pod creation errors
+# - All 'web' and 'worker' PodCliques show gang scheduling blocked
+# - Both 'monitoring' and 'database' PodCliques run normally (not part of gang)
+# - Error should be visible at all levels: PodCliqueSet -> PodCliqueScalingGroup -> PodClique -> Pod
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: env-err-sg-multi
+  namespace: default
+  labels:
+    app: env-err-sg-multi
+    demo: group2-container
+    scenario: 06-invalid-env-key-scaling-group-multi-replica
+spec:
+  replicas: 2  # Changed from 1 to 2
+  template:
+    # Define a scaling group containing api, web, and worker
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - api
+          - web 
+          - worker
+        replicas: 2  # Changed from 1 to 2 - creates 2 scaling groups per PCS replica
+        minAvailable: 2  # Changed from 1 to 2 - both must be available
+    
+    cliques:
+      # PodClique with INVALID environment variable key (will fail)
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                image: nginx:latest
+                env:
+                  # Invalid: environment variable key contains '=' character
+                  # Kubernetes expects keys to be valid C identifiers (alphanumeric + underscore)
+                  - name: "KEY=1"
+                    value: "some-value"
+                  # This valid env var won't help - the invalid one causes the error
+                  - name: VALID_KEY
+                    value: "valid-value"
+      
+      # PodClique with VALID configuration (but will be schedule-gated due to gang)
+      # Part of the scaling group
+      - name: web
+        spec:
+          roleName: web
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: web
+                image: nginx:latest
+                env:
+                  # Valid environment variables
+                  - name: APP_NAME
+                    value: "my-app"
+                  - name: ENVIRONMENT
+                    value: "demo"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another PodClique in the scaling group - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: worker
+                image: nginx:latest
+                env:
+                  - name: WORKER_TYPE
+                    value: "background"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone healthy PodClique - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Monitoring service started"
+                    while true; do
+                      echo "$(date): System healthy"
+                      sleep 30
+                    done
+                env:
+                  - name: MONITOR_INTERVAL
+                    value: "30"
+                  - name: LOG_LEVEL
+                    value: "INFO"
+                resources:
+                  requests:
+                    cpu: 5m
+                    memory: 16Mi
+      
+      # Another standalone healthy PodClique - NOT part of scaling group
+      # This demonstrates that non-gang PodCliques work independently
+      - name: database
+        spec:
+          roleName: database
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: database
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Database service started"
+                    while true; do
+                      echo "$(date): Database ready for connections"
+                      sleep 60
+                    done
+                env:
+                  - name: DB_NAME
+                    value: "demo_db"
+                  - name: MAX_CONNECTIONS
+                    value: "100"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+

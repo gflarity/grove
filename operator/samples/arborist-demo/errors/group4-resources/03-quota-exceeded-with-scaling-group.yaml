@@ -1,0 +1,147 @@
+# Resource Quota Exceeded with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when pod requests exceed namespace quota
+# Expected: 
+# - PodClique 'batch' exceeds quota (part of scaling group)
+# - PodClique 'monitor' is schedule-gated (part of scaling group)
+# - PodClique 'webhook' is schedule-gated (part of scaling group)
+# - PodClique 'backup' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows blocked status due to 'batch' quota violation
+# Note: Requires applying setup-quota.yaml first to create the resource quota
+#
+# QUICK START:
+# 1. FIRST apply the quota setup:
+#    kubectl apply -f setup-quota.yaml
+#
+# 2. Apply this scenario:
+#    kubectl apply -f 03-quota-exceeded-with-scaling-group.yaml
+#
+# 3. Check PodCliqueSet status:
+#    kubectl describe pcs resource-error-quota-exceeded-sg -n demo-quota
+#
+# 4. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg resource-error-quota-exceeded-sg-0-main -n demo-quota
+#
+# 5. Check individual PodCliques:
+#    kubectl describe pclq resource-error-quota-exceeded-sg-0-batch -n demo-quota
+#    kubectl describe pclq resource-error-quota-exceeded-sg-0-backup -n demo-quota
+#
+# 6. Check quota usage:
+#    kubectl describe quota demo-quota -n demo-quota
+#
+# 7. View pods:
+#    kubectl get pods -n demo-quota -l app.kubernetes.io/part-of=resource-error-quota-exceeded-sg
+#
+# 8. Clean up:
+#    kubectl delete pcs resource-error-quota-exceeded-sg -n demo-quota
+#    kubectl delete -f setup-quota.yaml
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows blocked children
+# - PodCliqueScalingGroup shows member 'batch' is blocked
+# - 'batch' PodClique shows pods in Pending state with 'exceeded quota'
+# - 'monitor' and 'webhook' PodCliques show gang scheduling blocked
+# - 'backup' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: resource-error-quota-exceeded-sg
+  namespace: demo-quota
+  labels:
+    app: resource-error-quota-exceeded-sg
+    demo: group4-resources
+    scenario: 03-quota-exceeded-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing batch, monitor, and webhook
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - batch
+          - monitor
+          - webhook
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique that exceeds namespace quota
+      # Part of the scaling group
+      - name: batch
+        spec:
+          roleName: batch
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: batch
+                image: nginx:latest
+                resources:
+                  # Request more CPU than the quota allows (quota allows 100m total)
+                  # 2 pods * 200m = 400m total, but quota only allows 100m
+                  requests:
+                    cpu: "200m"
+                    memory: 100Mi
+                  limits:
+                    cpu: "200m"
+                    memory: 100Mi
+      
+      # Healthy PodClique within quota - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: monitor
+        spec:
+          roleName: monitor
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitor
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Another healthy PodClique within quota - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: webhook
+        spec:
+          roleName: webhook
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: webhook
+                image: nginx:latest
+                ports:
+                  - containerPort: 8443
+                    name: https
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone backup service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: backup
+        spec:
+          roleName: backup
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: backup
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Backup service started"
+                    while true; do
+                      echo "$(date): Running backup job..."
+                      sleep 3600  # Run every hour
+                    done
+                resources:
+                  requests:
+                    cpu: 5m
+                    memory: 16Mi

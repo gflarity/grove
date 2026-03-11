@@ -1,0 +1,130 @@
+# Cascading Failures with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when errors in one clique cause errors in dependent cliques
+# Expected: 
+# - PodClique 'database' has ImagePullBackOff (part of scaling group)
+# - PodClique 'app' is schedule-gated (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows degraded status with cascading failures
+# Note: This uses startup ordering to create dependencies
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 02-cascading-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs complex-error-cascading-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg complex-error-cascading-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq complex-error-cascading-sg-0-database
+#    kubectl describe pclq complex-error-cascading-sg-0-app
+#    kubectl describe pclq complex-error-cascading-sg-0-monitoring
+#
+# 5. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=complex-error-cascading-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs complex-error-cascading-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows cascading failures
+# - PodCliqueScalingGroup shows member 'database' is unhealthy
+# - 'database' PodClique shows image pull errors
+# - 'app' PodClique shows gang scheduling blocked
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: complex-error-cascading-sg
+  namespace: default
+  labels:
+    app: complex-error-cascading-sg
+    demo: group5-complex
+    scenario: 02-cascading-scaling-group
+spec:
+  replicas: 2  # Two gangs to demonstrate cascading
+  template:
+    # Define a scaling group containing database and app
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - database
+          - app
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # Gang 0 - PodClique with ImagePullBackOff error (blocks Gang 0)
+      # Part of the scaling group
+      - name: database
+        spec:
+          roleName: database
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: database
+                # Image pull error blocks Gang 0
+                image: postgres:does-not-exist
+                ports:
+                  - containerPort: 5432
+                    name: postgres
+                env:
+                  - name: POSTGRES_PASSWORD
+                    value: "demo"
+                  - name: POSTGRES_DB
+                    value: "appdb"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+      
+      # Gang 0 - Healthy PodClique, schedule-gated waiting for database
+      # Part of the scaling group
+      - name: app
+        spec:
+          roleName: app
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: app
+                image: nginx:latest
+                ports:
+                  - containerPort: 8080
+                    name: http
+                env:
+                  - name: DB_HOST
+                    value: "database"
+                  - name: DB_PORT
+                    value: "5432"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone monitoring service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: prom/prometheus:latest
+                ports:
+                  - containerPort: 9090
+                    name: prometheus
+                args:
+                  - --config.file=/etc/prometheus/prometheus.yml
+                  - --storage.tsdb.path=/prometheus
+                  - --web.enable-lifecycle
+                resources:
+                  requests:
+                    cpu: 20m
+                    memory: 128Mi

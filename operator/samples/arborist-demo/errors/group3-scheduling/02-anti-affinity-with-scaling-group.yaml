@@ -1,0 +1,136 @@
+# Gang Scheduling Blocked - Pod Anti-Affinity with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when pod anti-affinity conflicts with gang scheduling
+# Expected: 
+# - PodClique 'distributed' cannot be scheduled (part of scaling group)
+# - PodClique 'coordinator' is schedule-gated (part of scaling group)
+# - PodClique 'monitoring' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows blocked status due to 'distributed' scheduling failure
+#
+# CLUSTER REQUIREMENTS:
+# - This scenario requires a cluster with FEWER than 5 schedulable nodes
+# - In clusters with ≥5 nodes, the anti-affinity constraint will be satisfied
+# - To trigger the expected error, cordon nodes to leave < 5 schedulable:
+#   kubectl get nodes --no-headers | tail -n +6 | awk '{print $1}' | xargs -I {} kubectl cordon {}
+#
+# QUICK START:
+# 1. (Optional) Cordon nodes to ensure < 5 schedulable nodes:
+#    # Get total node count
+#    NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
+#    # Cordon all but 4 nodes
+#    kubectl get nodes --no-headers | tail -n +5 | awk '{print $1}' | xargs -I {} kubectl cordon {}
+#
+# 2. Apply this scenario:
+#    kubectl apply -f 02-anti-affinity-with-scaling-group.yaml
+#
+# 3. Check PodCliqueSet status:
+#    kubectl describe pcs scheduling-error-anti-affinity-sg
+#
+# 4. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg scheduling-error-anti-affinity-sg-0-main
+#
+# 5. Check individual PodCliques:
+#    kubectl describe pclq scheduling-error-anti-affinity-sg-0-distributed
+#    kubectl describe pclq scheduling-error-anti-affinity-sg-0-monitoring
+#
+# 6. View pods:
+#    kubectl get pods -l app.kubernetes.io/part-of=scheduling-error-anti-affinity-sg
+#
+# 7. Clean up:
+#    kubectl delete pcs scheduling-error-anti-affinity-sg
+#    # Uncordon nodes if you cordoned them
+#    kubectl get nodes --no-headers | awk '{print $1}' | xargs -I {} kubectl uncordon {}
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows blocked children
+# - PodCliqueScalingGroup shows member 'distributed' is blocked
+# - 'distributed' PodClique shows pods in Pending state
+# - 'coordinator' PodClique shows gang scheduling blocked
+# - 'monitoring' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: scheduling-error-anti-affinity-sg
+  namespace: default
+  labels:
+    app: scheduling-error-anti-affinity-sg
+    demo: group3-scheduling
+    scenario: 02-anti-affinity-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing distributed and coordinator
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - distributed
+          - coordinator
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique with anti-affinity constraint - requires more nodes than available
+      # Part of the scaling group
+      - name: distributed
+        spec:
+          roleName: distributed
+          replicas: 5  # Requires 5 separate nodes (likely more than available)
+          minAvailable: 3
+          podSpec:
+            containers:
+              - name: distributed
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+            # Pod anti-affinity requiring separate nodes for each pod
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: grove.io/role-name
+                          operator: In
+                          values:
+                            - distributed
+                    topologyKey: kubernetes.io/hostname
+      
+      # Healthy PodClique - schedule-gated waiting for gang
+      # Part of the scaling group
+      - name: coordinator
+        spec:
+          roleName: coordinator
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: coordinator
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Standalone monitoring service - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: monitoring
+        spec:
+          roleName: monitoring
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: monitoring
+                image: prom/prometheus:latest
+                ports:
+                  - containerPort: 9090
+                    name: prometheus
+                args:
+                  - --config.file=/etc/prometheus/prometheus.yml
+                  - --storage.tsdb.path=/prometheus
+                  - --web.enable-lifecycle
+                resources:
+                  requests:
+                    cpu: 20m
+                    memory: 128Mi

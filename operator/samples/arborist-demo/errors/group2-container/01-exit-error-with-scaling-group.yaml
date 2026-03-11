@@ -1,0 +1,165 @@
+# CrashLoopBackOff - Container Exit with Error Code with Scaling Group
+# Demonstrates error propagation through PodCliqueScalingGroup when container exits with non-zero code
+# Expected: 
+# - PodClique 'api' containers crash and restart (part of scaling group)
+# - PodClique 'frontend' is schedule-gated initially (part of scaling group)
+# - PodClique 'worker' is schedule-gated initially (part of scaling group)
+# - PodClique 'health-checker' runs successfully (standalone, not part of gang)
+# - PodCliqueScalingGroup shows degraded status due to 'api' crashes
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 01-exit-error-with-scaling-group.yaml
+#
+# 2. Check PodCliqueSet status:
+#    kubectl describe pcs container-exit-error-sg
+#
+# 3. Check PodCliqueScalingGroup status:
+#    kubectl describe pcsg container-exit-error-sg-0-main
+#
+# 4. Check individual PodCliques:
+#    kubectl describe pclq container-exit-error-sg-0-api
+#    kubectl describe pclq container-exit-error-sg-0-health-checker
+#
+# 5. View pods (should show CrashLoopBackOff):
+#    kubectl get pods -l app.kubernetes.io/part-of=container-exit-error-sg
+#
+# 6. Clean up:
+#    kubectl delete pcs container-exit-error-sg
+#
+# EXPECTED BEHAVIOR:
+# - PodCliqueSet status shows degraded children
+# - PodCliqueScalingGroup shows member 'api' is unhealthy
+# - 'api' PodClique shows pods in CrashLoopBackOff
+# - Gang members will schedule together but api keeps crashing
+# - 'health-checker' PodClique runs normally (not part of gang)
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-exit-error-sg
+  namespace: default
+  labels:
+    app: container-exit-error-sg
+    demo: group2-container
+    scenario: 01-exit-error-scaling-group
+spec:
+  replicas: 1
+  template:
+    # Define a scaling group containing api, frontend, and worker
+    podCliqueScalingGroups:
+      - name: main
+        cliqueNames:
+          - api
+          - frontend
+          - worker
+        replicas: 1
+        minAvailable: 1
+    
+    cliques:
+      # PodClique that exits with error code 1
+      # Part of the scaling group
+      - name: api
+        spec:
+          roleName: api
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: api
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Starting API server..."
+                    echo "ERROR: Database connection failed!"
+                    exit 1
+                env:
+                  - name: DB_HOST
+                    value: "postgres"
+                  - name: DB_PORT
+                    value: "5432"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 16Mi
+      
+      # Frontend service - part of scaling group
+      # Part of the scaling group
+      - name: frontend
+        spec:
+          roleName: frontend
+          replicas: 2
+          minAvailable: 2
+          podSpec:
+            containers:
+              - name: frontend
+                image: nginx:alpine
+                ports:
+                  - containerPort: 80
+                    name: http
+                env:
+                  - name: API_URL
+                    value: "http://api:8080"
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      
+      # Worker service in the scaling group
+      # Part of the scaling group
+      - name: worker
+        spec:
+          roleName: worker
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: worker
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Worker process started"
+                    while true; do
+                      echo "$(date): Processing jobs..."
+                      sleep 20
+                    done
+                env:
+                  - name: JOB_QUEUE
+                    value: "default"
+                resources:
+                  requests:
+                    cpu: 15m
+                    memory: 48Mi
+      
+      # Standalone health monitoring - NOT part of scaling group
+      # This will run successfully regardless of the scaling group issues
+      - name: health-checker
+        spec:
+          roleName: health-checker
+          replicas: 1
+          minAvailable: 1
+          podSpec:
+            containers:
+              - name: health-checker
+                image: busybox:latest
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Health checker started"
+                    while true; do
+                      echo "$(date): Performing health checks..."
+                      # Simulate health checks
+                      echo "API: UNHEALTHY (CrashLoopBackOff)"
+                      echo "Frontend: HEALTHY"
+                      echo "Worker: HEALTHY"
+                      sleep 10
+                    done
+                resources:
+                  requests:
+                    cpu: 5m
+                    memory: 16Mi

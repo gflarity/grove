@@ -1,0 +1,127 @@
+# Gang Scheduling Blocked - Schedule Gates
+# Demonstrates gang scheduling visibility when custom schedule gates block pod scheduling
+# Expected: Pods blocked by schedule gates, status shows gate information
+#
+# FEATURE STATUS: ADVANCED / CUSTOM SCHEDULER REQUIRED
+# - This scenario demonstrates schedule gates, a Kubernetes 1.27+ feature
+# - Requires a custom scheduler plugin or admission controller to add gates
+# - The Grove Operator can DETECT and REPORT schedule gates via schedulingSummary
+# - This YAML does not create schedule gates itself (requires external tooling)
+#
+# CLUSTER REQUIREMENTS:
+# - Kubernetes 1.27+ (for schedule gates feature)
+# - Custom scheduler or admission webhook that adds schedule gates to pods
+# - OR manual pod patching to add schedule gates for testing
+#
+# TESTING OPTIONS:
+#
+# Option A: Manual Schedule Gate Testing
+# 1. Apply this scenario:
+#    kubectl apply -f 04-schedule-gates.yaml
+#
+# 2. Wait for pods to be created:
+#    sleep 5
+#
+# 3. Manually add schedule gates to pods (for testing visibility):
+#    for pod in $(kubectl get pods -l app=scheduling-error-schedule-gates -o name); do
+#      kubectl patch $pod --type=json -p='[{"op":"add","path":"/spec/schedulingGates","value":[{"name":"custom-gate"}]}]'
+#    done
+#
+# 4. Check pod status (should remain Pending with SchedulingGated):
+#    kubectl get pods -l app=scheduling-error-schedule-gates
+#
+# 5. View the scheduling gate details:
+#    kubectl get pod <pod-name> -o jsonpath='{.spec.schedulingGates}'
+#
+# 6. Check PodCliqueSet status for gate visibility:
+#    kubectl get pcs scheduling-error-schedule-gates -o jsonpath='{.status.podGangStatuses}' | jq
+#    # Should show schedule-gated pods in blockingInfo
+#
+# 7. (Recommended) Use grovectl for better output:
+#    grovectl describe pcs scheduling-error-schedule-gates
+#    grovectl analyze scheduling pcs scheduling-error-schedule-gates
+#
+# 8. Clean up:
+#    kubectl delete pcs scheduling-error-schedule-gates
+#
+# Option B: Custom Scheduler/Admission Webhook
+# - Deploy a custom scheduler or admission webhook that adds schedule gates
+# - Configure it to gate pods matching specific labels or namespaces
+# - Apply this scenario and observe Grove's visibility into the gates
+#
+# EXPECTED BEHAVIOR (when schedule gates are present):
+# - Pods remain in Pending state with reason: SchedulingGated
+# - PCS status.operationalSummary.phase will be 'Degraded'
+# - PCS status.operationalSummary.reason will be 'SomeGangsBlocked'
+# - PCS status.operationalSummary.message will mention "PodCliques with schedule gates"
+# - PCS status.podGangStatuses[].blockingInfo will show:
+#   - blockingCliques with blockingReason (may include gate info)
+#   - scheduleGatedPods count
+# - PCS status.conditions[GangSchedulingReady] will be 'False'
+# - PCS status.conditions[ChildrenHealthy] will be 'True' (gated ≠ unhealthy)
+# - PodClique status.schedulingSummary.scheduleGates[] will list active gates
+#
+# NOTES:
+# - Schedule gates are a Kubernetes feature, not Grove-specific
+# - Grove detects and reports schedule gates but doesn't create them
+# - This demonstrates scheduling constraint visibility, not workload errors
+# - Schedule gate info is visible in schedulingSummary and podGangStatuses, NOT in lastErrors
+# - For production use, consider using scheduler plugins like:
+#   - Volcano scheduler (supports gang scheduling with gates)
+#   - Custom admission webhooks that add gates based on business logic
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: scheduling-error-schedule-gates
+  namespace: default
+  labels:
+    app: scheduling-error-schedule-gates
+    demo: group3-scheduling
+    scenario: 04-schedule-gates
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique that will be gated (requires manual patching or custom scheduler)
+      - name: service
+        spec:
+          roleName: service
+          replicas: 2
+          podSpec:
+            containers:
+              - name: service
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: client
+        spec:
+          roleName: client
+          replicas: 1
+          podSpec:
+            containers:
+              - name: client
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Another healthy PodClique - schedule-gated waiting for gang
+      - name: metrics
+        spec:
+          roleName: metrics
+          replicas: 1
+          podSpec:
+            containers:
+              - name: metrics
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+# Note: Schedule gates are a Kubernetes feature that may require custom scheduler plugins.
+# This scenario may need to be adapted based on the actual scheduler implementation.

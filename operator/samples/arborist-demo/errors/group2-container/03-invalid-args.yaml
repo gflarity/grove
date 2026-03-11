@@ -1,0 +1,74 @@
+# Error - Invalid Container Arguments
+# Demonstrates error when container receives invalid arguments
+# Expected: Container starts but exits with error, error message shows invalid argument
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 03-invalid-args.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=container-error-invalid-args
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs container-error-invalid-args -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs container-error-invalid-args
+#
+# 6. Clean up:
+#    kubectl delete pcs container-error-invalid-args
+#
+# EXPECTED BEHAVIOR:
+# - Pods will show CrashLoopBackOff state
+# - Container will exit with error about invalid arguments
+# - Error logs will show the invalid argument message
+# - PCS status.operationalSummary.phase will be 'Degraded'
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: container-error-invalid-args
+  namespace: default
+  labels:
+    app: container-error-invalid-args
+    demo: group2-container
+    scenario: 03-invalid-args
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with invalid arguments error
+      - name: app
+        spec:
+          roleName: app
+          replicas: 2
+          podSpec:
+            containers:
+              - name: app
+                image: nginx:latest
+                # Invalid arguments that nginx doesn't recognize
+                args: ["--invalid-flag", "--another-bad-flag"]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: proxy
+        spec:
+          roleName: proxy
+          replicas: 1
+          podSpec:
+            containers:
+              - name: proxy
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi

@@ -1,0 +1,92 @@
+# ImagePullBackOff - Non-existent Image Tag
+# Demonstrates error when image tag doesn't exist
+# Expected: Pods fail to pull image, error shows tag not found
+#
+# QUICK START:
+# 1. Apply this scenario:
+#    kubectl apply -f 02-wrong-tag.yaml
+#
+# 2. Check pod status:
+#    kubectl get pods -l app.kubernetes.io/part-of=image-error-wrong-tag
+#
+# 3. View the error details:
+#    kubectl describe pod <pod-name> | grep -A 5 Events
+#
+# 4. Check PodCliqueSet status:
+#    kubectl get pcs image-error-wrong-tag -o yaml | grep -A 10 lastErrors
+#
+# 5. (Optional) Use grovectl for better output:
+#    grovectl describe pcs image-error-wrong-tag
+#
+# 6. Clean up:
+#    kubectl delete pcs image-error-wrong-tag
+#
+# EXPECTED BEHAVIOR:
+# - Pods will show ImagePullBackOff state
+# - Error message will indicate 'tag does not exist'
+# - PCS status.operationalSummary.phase will be 'Degraded'
+# - status.lastErrors will contain image tag error details
+---
+---
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  name: image-error-wrong-tag
+  namespace: default
+  labels:
+    app: image-error-wrong-tag
+    demo: group1-image
+    scenario: 02-wrong-tag
+spec:
+  replicas: 1
+  template:
+    cliques:
+      # PodClique with image error - non-existent tag
+      - name: backend
+        spec:
+          roleName: backend
+          replicas: 2
+          podSpec:
+            containers:
+              - name: backend
+                # Non-existent tag
+                image: nginx:does-not-exist
+                ports:
+                  - containerPort: 8080
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Healthy PodClique - schedule-gated waiting for gang
+      - name: frontend
+        spec:
+          roleName: frontend
+          replicas: 2
+          podSpec:
+            containers:
+              - name: frontend
+                image: nginx:latest
+                ports:
+                  - containerPort: 80
+                    name: http
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+      # Another healthy PodClique - schedule-gated waiting for gang
+      - name: cache
+        spec:
+          roleName: cache
+          replicas: 1
+          podSpec:
+            containers:
+              - name: cache
+                image: redis:latest
+                ports:
+                  - containerPort: 6379
+                    name: redis
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
