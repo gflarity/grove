@@ -163,21 +163,21 @@ func (m Model) renderHeaderFrame() string {
 	}
 
 	// Use fixed-width labels so the values line up (longest label is "Arborist Rev:" = 13 chars)
-	contextLine := HeaderLabelStyle.Render("Context:     ") + " " + HeaderValueStyle.Render(orUnknown(m.contextName))
-	clusterLine := HeaderLabelStyle.Render("Cluster:     ") + " " + HeaderValueStyle.Render(orUnknown(m.clusterName))
-	userLine := HeaderLabelStyle.Render("User:        ") + " " + HeaderValueStyle.Render(orUnknown(m.userName))
-	arboristLine := HeaderLabelStyle.Render("Arborist Rev:") + " " + HeaderValueStyle.Render(orUnknown(m.arboristVersion))
-	k8sLine := HeaderLabelStyle.Render("K8s Rev:     ") + " " + HeaderValueStyle.Render(orUnknown(m.k8sVersion))
+	contextLine := HeaderLabelStyle.Render(" Context:     ") + " " + HeaderValueStyle.Render(orUnknown(m.contextName))
+	clusterLine := HeaderLabelStyle.Render(" Cluster:     ") + " " + HeaderValueStyle.Render(orUnknown(m.clusterName))
+	userLine := HeaderLabelStyle.Render(" User:        ") + " " + HeaderValueStyle.Render(orUnknown(m.userName))
+	arboristLine := HeaderLabelStyle.Render(" Arborist Rev:") + " " + HeaderValueStyle.Render(orUnknown(m.arboristVersion))
+	k8sLine := HeaderLabelStyle.Render(" K8s Rev:     ") + " " + HeaderValueStyle.Render(orUnknown(m.k8sVersion))
 	nsDisplay := "all"
 	if !m.allNamespaces && m.namespace != "" {
 		nsDisplay = m.namespace
 	}
-	namespaceLine := HeaderLabelStyle.Render("Namespace:   ") + " " + HeaderValueStyle.Render(nsDisplay)
+	namespaceLine := HeaderLabelStyle.Render(" Namespace:   ") + " " + HeaderValueStyle.Render(nsDisplay)
 	var viewLine string
 	if m.viewEditActive {
-		viewLine = HeaderLabelStyle.Render("View:        ") + " " + m.viewInput.View()
+		viewLine = HeaderLabelStyle.Render(" View:        ") + " " + m.viewInput.View()
 	} else {
-		viewLine = HeaderLabelStyle.Render("View:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
+		viewLine = HeaderLabelStyle.Render(" View:        ") + " " + HeaderValueStyle.Render(m.viewDisplayName())
 	}
 
 	leftCol := lipgloss.JoinVertical(lipgloss.Left, contextLine, clusterLine, userLine, arboristLine, k8sLine, namespaceLine, viewLine)
@@ -421,7 +421,7 @@ func (m Model) renderEventsFrame(height int) string {
 // renderTopologyDomainsFrame renders the topology domains section in a framed box.
 func (m Model) renderTopologyDomainsFrame(height int) string {
 	title := m.renderTopologyDomainsSectionHeader()
-	content := m.topologyDomainsTable.View()
+	content := TableFgStyle.Render(m.topologyDomainsTable.View())
 	return renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
 }
 
@@ -477,7 +477,7 @@ func (m Model) renderErrorLogFrame() string {
 // renderTopologyPodsFrame renders the topology pods section in a framed box.
 func (m Model) renderTopologyPodsFrame(height int) string {
 	title := m.renderTopologyPodsSectionHeader()
-	content := m.topologyPodsTable.View()
+	content := TableFgStyle.Render(m.topologyPodsTable.View())
 	return renderFrameWithTitle(title, content, m.width, ColorBorderFocused)
 }
 
@@ -494,7 +494,7 @@ func (m Model) renderTopologyDomainsSectionHeader() string {
 				m.topologyViewData.RawPods,
 			)
 			if gpuSuffix != "" {
-				header += "  " + gpuSuffix
+				header += "  " + SectionHeaderActiveStyle.Render(gpuSuffix)
 			}
 		}
 		return header
@@ -518,7 +518,7 @@ func (m Model) renderTopologyDomainsSectionHeader() string {
 			matchingNodes,
 		)
 		if gpuSuffix != "" {
-			header += "  " + gpuSuffix
+			header += "  " + SectionHeaderActiveStyle.Render(gpuSuffix)
 		}
 	}
 	return header
@@ -580,7 +580,7 @@ func (m Model) renderResourcesSectionHeader() string {
 
 	// Add filter indicator
 	if m.filterText != "" {
-		suffix += " " + SectionCountStyle.Render("|") + " " +
+		suffix += " " + SectionHeaderActiveStyle.Render("|") + " " +
 			FilterBarStyle.Render("filter:") + " " + m.filterText
 	}
 
@@ -596,12 +596,12 @@ func (m Model) renderEventsSectionHeader() string {
 
 // renderResourcesTable renders the resources table.
 func (m Model) renderResourcesTable() string {
-	return m.resourcesTable.View()
+	return TableFgStyle.Render(m.resourcesTable.View())
 }
 
 // renderEventsTable renders the events table.
 func (m Model) renderEventsTable() string {
-	return m.eventsTable.View()
+	return TableFgStyle.Render(m.eventsTable.View())
 }
 
 // renderPodViewport renders the Pod YAML viewport.
@@ -656,7 +656,7 @@ func (m Model) renderFullScreenOverlay(overlay OverlayModel, title, hints string
 // renderYAMLOverlay renders the full-screen YAML overlay with framed viewport.
 func (m Model) renderYAMLOverlay() string {
 	title := SectionHeaderActiveStyle.Render("YAML") + " " +
-		SectionCountStyle.Render(m.yamlOverlay.ResourceType+"/"+m.yamlOverlay.ResourceName)
+		SectionHeaderActiveStyle.Render(m.yamlOverlay.ResourceType+"/"+m.yamlOverlay.ResourceName)
 
 	scrollPct := ""
 	if m.yamlOverlay.Viewport.TotalLineCount() > 0 {
@@ -670,7 +670,7 @@ func (m Model) renderYAMLOverlay() string {
 	if m.yamlOverlay.SearchText != "" {
 		hints += "  " + MenuKeyStyle.Render("<n/N>") + MenuActionStyle.Render("Next/Prev")
 	}
-	hints += "  " + SectionCountStyle.Render(scrollPct)
+	hints += "  " + SectionHeaderActiveStyle.Render(scrollPct)
 
 	return m.renderFullScreenOverlay(m.yamlOverlay.OverlayModel, title, hints)
 }
@@ -678,7 +678,7 @@ func (m Model) renderYAMLOverlay() string {
 // renderLogsOverlay renders the full-screen logs overlay with framed viewport.
 func (m Model) renderLogsOverlay() string {
 	title := SectionHeaderActiveStyle.Render("Logs") + " " +
-		SectionCountStyle.Render(m.logsOverlay.PodName+"/"+m.logsOverlay.ContainerName)
+		SectionHeaderActiveStyle.Render(m.logsOverlay.PodName+"/"+m.logsOverlay.ContainerName)
 
 	wrapStatus := "OFF"
 	if m.logsOverlay.WrapEnabled {
@@ -708,7 +708,7 @@ func (m Model) renderLogsOverlay() string {
 	if m.logsOverlay.SearchText != "" {
 		hints += "  " + MenuKeyStyle.Render("<n/N>") + MenuActionStyle.Render("Next/Prev")
 	}
-	hints += "  " + SectionCountStyle.Render(scrollPct+colIndicator)
+	hints += "  " + SectionHeaderActiveStyle.Render(scrollPct+colIndicator)
 
 	return m.renderFullScreenOverlay(m.logsOverlay.OverlayModel, title, hints)
 }

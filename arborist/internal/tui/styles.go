@@ -29,7 +29,7 @@ var (
 	ColorDarkTurquoise = lipgloss.Color("#00ced1") // PodClique
 	ColorGreenYellow   = lipgloss.Color("#adff2f") // Pod, modified
 	ColorRed           = lipgloss.Color("#ff0000") // error border
-	ColorFuchsia       = lipgloss.Color("#ff00ff") // namespace in titles (future)
+	ColorPink       = lipgloss.Color("13") // ANSI color 13 (bright magenta) — matches k9s "fuchsia" which uses tcell ANSI palette
 	ColorPaleGreen     = lipgloss.Color("#98fb98") // marked rows (future)
 )
 
@@ -38,12 +38,9 @@ var (
 var (
 	// Table
 	ColorTableHeaderFg = ColorWhite        // k9s: white headers
-	ColorTableCellFg   = ColorLightSkyBlue // k9s: lightskyblue row text (see note below)
-	ColorCursorFg      = ColorBlack        // k9s: black text on cursor
-	ColorCursorBg      = ColorLightSkyBlue // k9s: cursor bg dynamically adapts to the
-	// row's text color. Since most rows are "Standard" (lightskyblue), the de facto
-	// cursor is black-on-lightskyblue. We use the static equivalent here because
-	// bubbles/table doesn't support per-row dynamic cursor colors.
+	ColorTableCellFg   = lipgloss.Color("#76B900") // soft green row text
+	ColorCursorFg      = ColorBlack               // black text on cursor
+	ColorCursorBg      = lipgloss.Color("#76B900") // soft green cursor bg
 	//
 	// NOTE on ColorTableCellFg: k9s renders normal row text in lightskyblue, but
 	// bubbles/table cannot set a Cell foreground without breaking the Selected row
@@ -52,8 +49,8 @@ var (
 	// default foreground (typically white — visually close to lightskyblue).
 
 	// Borders
-	ColorBorderFocused   = ColorLightSkyBlue // k9s: lightskyblue focused border
-	ColorBorderUnfocused = ColorDodgerBlue   // k9s: dodgerblue unfocused border
+	ColorBorderFocused   = lipgloss.Color("#76B900") // soft green focused border
+	ColorBorderUnfocused = lipgloss.Color("#4a7500") // deeper nvidia green unfocused border
 	ColorBorderError     = ColorRed          // k9s: red error border
 
 	// Section headers (title bar inside frames)
@@ -100,13 +97,14 @@ var (
 	HeaderInfoStyle = lipgloss.NewStyle().
 			Foreground(ColorCadetBlue)
 
-	// HeaderLabelStyle is for "Context:", "Cluster:", "Lens:" labels (k9s-style faint/muted).
+	// HeaderLabelStyle is for "Context:", "Cluster:", "Lens:" labels (k9s: orange).
 	HeaderLabelStyle = lipgloss.NewStyle().
-				Foreground(ColorCadetBlue)
+				Foreground(ColorOrange)
 
-	// HeaderValueStyle is for context/cluster/view values (k9s-style bright).
+	// HeaderValueStyle is for context/cluster/view values (k9s: white bold).
 	HeaderValueStyle = lipgloss.NewStyle().
-				Foreground(ColorLightSkyBlue)
+				Foreground(ColorWhite).
+				Bold(true)
 )
 
 // =============================================================================
@@ -115,15 +113,15 @@ var (
 
 var (
 	SectionHeaderActiveStyle = lipgloss.NewStyle().
-					Foreground(ColorSectionTitle).
+					Foreground(ColorTableCellFg).
 					Bold(true)
 
 	SectionHeaderInactiveStyle = lipgloss.NewStyle().
-					Foreground(ColorSectionMuted).
+					Foreground(ColorTableCellFg).
 					Bold(true)
 
 	SectionCountStyle = lipgloss.NewStyle().
-				Foreground(ColorSectionCount).
+				Foreground(ColorWhite).
 				Bold(true)
 )
 
@@ -168,7 +166,7 @@ var (
 
 var TypeColors = map[string]lipgloss.Color{
 	"PodCliqueSet":          ColorDodgerBlue,    // dodgerblue
-	"(PodCliqueSet replica)":   ColorLightSkyBlue,  // lightskyblue
+	"(PodCliqueSet replica)":   lipgloss.Color("#76B900"),  // soft green
 	"PodCliqueScalingGroup": ColorMediumPurple,   // mediumpurple
 	"PodClique":             ColorDarkTurquoise,  // darkturquoise
 	"Pod":                   ColorGreenYellow,    // greenyellow
@@ -179,7 +177,7 @@ var TypeColors = map[string]lipgloss.Color{
 // =============================================================================
 
 var EventTypeColors = map[string]lipgloss.Color{
-	"Normal":  ColorLightSkyBlue, // k9s: standard row = lightskyblue
+	"Normal":  lipgloss.Color("#76B900"), // soft green
 	"Warning": ColorDarkOrange,   // k9s: pending/warning = darkorange
 	"Error":   ColorOrangeRed,    // k9s: error = orangered
 }
@@ -190,8 +188,8 @@ var EventTypeColors = map[string]lipgloss.Color{
 // Follows k9s per-resource colorer pattern.
 
 var PodStatusColors = map[string]lipgloss.Color{
-	"Running":   ColorLightSkyBlue,  // k9s: default row color
-	"Healthy":   ColorLightSkyBlue,  // k9s: default row color
+	"Running":   lipgloss.Color("#76B900"),  // soft green
+	"Healthy":   lipgloss.Color("#76B900"),  // soft green
 	"Scaling":   ColorDarkOrange,    // k9s: pending = darkorange
 	"Pending":   ColorDarkOrange,    // k9s: pending = darkorange
 	"Failed":    ColorOrangeRed,     // k9s: error = orangered
@@ -237,6 +235,7 @@ var (
 	// "N/A" topology values — lightslategray (dimmed)
 	TopologyNAStyle = lipgloss.NewStyle().
 			Foreground(ColorLightSlateGray)
+
 )
 
 // =============================================================================
@@ -244,16 +243,16 @@ var (
 // =============================================================================
 
 var BreadcrumbSeparator = lipgloss.NewStyle().
-	Foreground(ColorSecondary).
+	Foreground(ColorPink).
 	SetString(" > ")
 
 var BreadcrumbStyles = map[string]lipgloss.Style{
-	"Forest":                lipgloss.NewStyle().Foreground(ColorWhite),
-	"PodCliqueSet":          lipgloss.NewStyle().Foreground(ColorAqua),
-	"(PodCliqueSet replica)":   lipgloss.NewStyle().Foreground(ColorAqua),
-	"PodCliqueScalingGroup": lipgloss.NewStyle().Foreground(ColorMediumPurple),
-	"PodClique":             lipgloss.NewStyle().Foreground(ColorDarkTurquoise),
-	"Pod":                   lipgloss.NewStyle().Foreground(ColorGreenYellow),
+	"Forest":                lipgloss.NewStyle().Foreground(ColorTableCellFg),
+	"PodCliqueSet":          lipgloss.NewStyle().Foreground(ColorPink),
+	"(PodCliqueSet replica)":   lipgloss.NewStyle().Foreground(ColorPink),
+	"PodCliqueScalingGroup": lipgloss.NewStyle().Foreground(ColorPink),
+	"PodClique":             lipgloss.NewStyle().Foreground(ColorPink),
+	"Pod":                   lipgloss.NewStyle().Foreground(ColorPink),
 }
 
 // =============================================================================
@@ -292,6 +291,13 @@ var YAMLSearchHighlightStyle = lipgloss.NewStyle().
 // Shared Table Styles
 // =============================================================================
 
+// TableFgStyle wraps an entire table View() to set the default foreground color
+// for cell text. We cannot set Cell.Foreground directly because each
+// Cell.Render() emits an ANSI reset that breaks the Selected row's background.
+// Wrapping the whole view inherits the foreground into unstyled cells while
+// Selected (which sets its own Foreground/Background) overrides it cleanly.
+var TableFgStyle = lipgloss.NewStyle().Foreground(ColorTableCellFg)
+
 // ArboristTableStyles returns the standard k9s-inspired table styles used
 // across all arborist table views. Call once per table at creation time.
 // The Selected style intentionally omits Padding — cells already have their
@@ -305,11 +311,9 @@ func ArboristTableStyles() table.Styles {
 		Bold(false).
 		Foreground(ColorTableHeaderFg).
 		Padding(0, 1)
-	// Cell intentionally has no Foreground. Each Cell.Render() emits an ANSI
-	// reset at the end, which would kill the Selected style's Background color
-	// between cells. Without a Cell foreground, the reset is harmless and the
-	// Selected background spans the full row. Normal row text uses the
-	// terminal's default foreground.
+	// Cell intentionally has no Foreground — see TableFgStyle.
+	// Setting Foreground here causes each Cell.Render() to emit an ANSI reset
+	// that kills the Selected style's background between cells.
 	s.Cell = s.Cell.
 		Padding(0, 1)
 	s.Selected = s.Selected.

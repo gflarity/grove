@@ -627,11 +627,15 @@ func (m *Model) rebuildTopologyDomainsTable() {
 			row := table.Row{v}
 			valueCounts := gpuSummary.ByValue[v]
 			for _, gpuType := range gpuSummary.GPUTypes {
+				var grove, other, total int64
 				if valueCounts != nil {
 					counts := valueCounts[gpuType]
-					row = append(row, clusterstate.FormatGPUBar(counts.Grove, counts.Other, counts.Total, 20))
+					grove, other, total = counts.Grove, counts.Other, counts.Total
+				}
+				if total == 0 && grove == 0 && other == 0 {
+					row = append(row, "N/A")
 				} else {
-					row = append(row, clusterstate.FormatGPUBar(0, 0, 0, 20))
+					row = append(row, clusterstate.FormatGPUBar(grove, other, total, 20))
 				}
 			}
 			row = append(row,

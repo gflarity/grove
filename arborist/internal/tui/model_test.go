@@ -2596,8 +2596,8 @@ func TestTopologyView_GPUColumnsAppearWhenDrilledIn(t *testing.T) {
 	if rows[0][0] != "block-01" {
 		t.Errorf("expected first value 'block-01', got %q", rows[0][0])
 	}
-	if rows[0][1] != "[                    ] (0/0/0)" {
-		t.Errorf("block-01 B200¹ = %q, want bar format with '(0/0/0)'", rows[0][1])
+	if rows[0][1] != "N/A" {
+		t.Errorf("block-01 B200¹ = %q, want 'N/A'", rows[0][1])
 	}
 	if rows[0][2] != "[░░░░░░░             ] (0/6/16)" {
 		t.Errorf("block-01 H200¹ = %q, want bar format with '(0/6/16)'", rows[0][2])
@@ -2617,8 +2617,8 @@ func TestTopologyView_GPUColumnsAppearWhenDrilledIn(t *testing.T) {
 	if rows[1][1] != "[░░░░░░░░░░          ] (0/8/16)" {
 		t.Errorf("block-02 B200¹ = %q, want bar format with '(0/8/16)'", rows[1][1])
 	}
-	if rows[1][2] != "[                    ] (0/0/0)" {
-		t.Errorf("block-02 H200¹ = %q, want bar format with '(0/0/0)'", rows[1][2])
+	if rows[1][2] != "N/A" {
+		t.Errorf("block-02 H200¹ = %q, want 'N/A'", rows[1][2])
 	}
 	if rows[1][3] != "1" {
 		t.Errorf("block-02 GPU PODS = %q, want '1'", rows[1][3])

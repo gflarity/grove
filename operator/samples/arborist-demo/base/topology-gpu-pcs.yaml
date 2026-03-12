@@ -50,7 +50,7 @@ metadata:
     app: topology-gpu-pcs
     demo: topology-gpu
 spec:
-  replicas: 1
+  replicas: 2
   template:
     topologyConstraint:
       packDomain: block  # All cliques land in the same block
@@ -89,10 +89,10 @@ spec:
                 image: registry:5001/nginx:alpine-slim
                 resources:
                   requests:
-                    memory: 80Mi
-                    nvidia.com/gpu: "1"
+                    memory: 20Mi
+                    nvidia.com/gpu: "8"
                   limits:
-                    nvidia.com/gpu: "1"
+                    nvidia.com/gpu: "8"
       - name: worker-b200
         labels:
           kai.scheduler/queue: test
@@ -127,7 +127,7 @@ spec:
                 image: registry:5001/nginx:alpine-slim
                 resources:
                   requests:
-                    memory: 80Mi
-                    nvidia.com/gpu: "1"
+                    memory: 20Mi
+                    nvidia.com/gpu: "8"
                   limits:
-                    nvidia.com/gpu: "1"
+                    nvidia.com/gpu: "8"

@@ -1,0 +1,117 @@
+# Non-Grove equivalent of topology-gpu-pcs.yaml (single PCS replica)
+# Deploys the same GPU footprint as one replica of the PCS:
+#   6 H200 pods (8 GPUs each) + 6 B200 pods (8 GPUs each) = 96 GPUs total
+#
+# NOTE: Without Grove, there is no gang scheduling or topology packing.
+# Pods are scheduled independently — no guarantee they land in the same
+# block or rack.
+#
+# QUICK START:
+# 1. Apply:
+#    kubectl apply -f topology-gpu-deployments.yaml
+#
+# 2. Check pods:
+#    kubectl get pods -l app=topology-gpu-non-grove -o wide
+#
+# 3. Clean up:
+#    kubectl delete -f topology-gpu-deployments.yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-h200
+  namespace: default
+  labels:
+    app: topology-gpu-non-grove
+    demo: topology-gpu
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: topology-gpu-non-grove
+      role: worker-h200
+  template:
+    metadata:
+      labels:
+        app: topology-gpu-non-grove
+        role: worker-h200
+        kai.scheduler/queue: test
+    spec:
+      schedulerName: kai-scheduler
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node_role.e2e.grove.nvidia.com
+                    operator: In
+                    values:
+                      - agent
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-H200-141GB-HBM3e
+      tolerations:
+        - key: node_role.e2e.grove.nvidia.com
+          operator: Equal
+          value: agent
+          effect: NoSchedule
+      containers:
+        - name: worker-h200
+          image: registry:5001/nginx:alpine-slim
+          resources:
+            requests:
+              memory: 20Mi
+              nvidia.com/gpu: "8"
+            limits:
+              nvidia.com/gpu: "8"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-b200
+  namespace: default
+  labels:
+    app: topology-gpu-non-grove
+    demo: topology-gpu
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: topology-gpu-non-grove
+      role: worker-b200
+  template:
+    metadata:
+      labels:
+        app: topology-gpu-non-grove
+        role: worker-b200
+        kai.scheduler/queue: test
+    spec:
+      schedulerName: kai-scheduler
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node_role.e2e.grove.nvidia.com
+                    operator: In
+                    values:
+                      - agent
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-B200-192GB-HBM3e
+      tolerations:
+        - key: node_role.e2e.grove.nvidia.com
+          operator: Equal
+          value: agent
+          effect: NoSchedule
+      containers:
+        - name: worker-b200
+          image: registry:5001/nginx:alpine-slim
+          resources:
+            requests:
+              memory: 20Mi
+              nvidia.com/gpu: "8"
+            limits:
+              nvidia.com/gpu: "8"
