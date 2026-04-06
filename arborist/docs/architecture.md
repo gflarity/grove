@@ -101,7 +101,7 @@ Package-level file-based debug logger (`Init`, `Close`, `Log`, `Enabled`). Prote
 2. CLI.AfterApply() → debug.Init(path) if -d flag
 3. ForestCmd.Run()  → resolve namespace
 4.                  → k8s.NewK8sClient() (REST config + clientset + dynamic client)
-5.                  → client.CheckGroveCRDs() (abort early if CRDs missing)
+5.                  → client.CheckGroveCRDs() (abort early if core CRDs missing; optional CRDs degrade gracefully)
 6.                  → client.NewGlobalCache(namespace, onWarning)
 7.                  → tui.NewModel(cache, ...options)
 8.                  → tea.NewProgram(model, tea.WithAltScreen())

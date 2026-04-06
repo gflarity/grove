@@ -120,7 +120,8 @@ Non-interactive tree output for topology inspection.
 | Error auto-show (visible on first error) | `tui/model.go` (`addError` sets `errorLogVisible = true`) |
 | Max 3 entries, newest first | `tui/model.go` (`addError` caps at `maxErrorLogEntries`) |
 | Connection errors (pre-seeded) | `cli/tui.go` (`WithConnectionError`), `tui/model.go` |
-| CRD pre-flight check | `k8s/client.go` (`CheckGroveCRDs`) |
+| CRD pre-flight check (core CRDs) | `k8s/client.go` (`CheckGroveCRDs`) |
+| CRD graceful degradation (optional CRDs) | `k8s/informer_set.go` (`checkGroveCRDsAvailable`, `onWarning`) |
 | Async error messages | `tui/messages.go` (`ErrorMsg`, `WarningMsg`), `tui/update.go` (handler) |
 | Error log styling | `tui/styles.go` (`ErrorLogTimestampStyle`, `ErrorLogMessageStyle`, orange border) |
 
