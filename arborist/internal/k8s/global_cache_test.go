@@ -502,7 +502,7 @@ func TestInformerGlobalCache_DebounceCoalesces(t *testing.T) {
 	// Trigger multiple rapid onChange calls
 	for i := 0; i < 10; i++ {
 		gc.onChange()
-		time.Sleep(10 * time.Millisecond) // well within the 500ms debounce window
+		time.Sleep(10 * time.Millisecond) // well within the 250ms quiet window
 	}
 
 	// Wait for the single debounced rebuild
@@ -520,6 +520,57 @@ func TestInformerGlobalCache_DebounceCoalesces(t *testing.T) {
 	case <-time.After(700 * time.Millisecond):
 		// Good — no extra notification
 	}
+}
+
+func TestInformerGlobalCache_DebounceMaxWait(t *testing.T) {
+	clientset := newFakeClientset()
+	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
+
+	gc := NewInformerGlobalCache(clientset, dynClient)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := gc.Start(ctx); err != nil {
+		t.Fatalf("Start() returned error: %v", err)
+	}
+	defer gc.Stop()
+
+	if !gc.WaitForSync(ctx) {
+		t.Fatal("WaitForSync() returned false")
+	}
+
+	// Drain the initial update from WaitForSync's rebuildSnapshot call
+	select {
+	case <-gc.Updates():
+	case <-time.After(2 * time.Second):
+	}
+
+	// Send events continuously every 50ms for 2s — the quiet timer (250ms)
+	// never gets a chance to fire, but the max-wait timer (500ms) should
+	// force a callback well before the burst ends.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 40; i++ { // 40 × 50ms = 2s
+			gc.onChange()
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	select {
+	case <-gc.Updates():
+		elapsed := time.Since(start)
+		// Should fire around 500ms (max wait), definitely not after the
+		// full 2s burst. Allow generous slack for CI.
+		if elapsed > 900*time.Millisecond {
+			t.Errorf("max-wait took too long: %v (expected ~500ms)", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for max-wait debounced update")
+	}
+
+	<-done
 }
 
 // ---------------------------------------------------------------------------

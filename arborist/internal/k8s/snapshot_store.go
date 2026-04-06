@@ -24,37 +24,74 @@ import (
 )
 
 const (
-	// globalDebounceInterval is how long to wait after the last change event
+	// debounceQuietWindow is how long to wait after the last change event
 	// before rebuilding the snapshot.
-	globalDebounceInterval = 500 * time.Millisecond
+	debounceQuietWindow = 250 * time.Millisecond
+	// debounceMaxWait is the maximum time from the first event in a burst
+	// before a rebuild is forced, even if events are still arriving.
+	debounceMaxWait = 500 * time.Millisecond
 )
 
-// debouncer coalesces rapid calls into a single delayed execution.
-// Each call to schedule() resets the timer; the callback fires only after
-// the configured interval of quiet (no new calls).
+// debouncer coalesces rapid calls into a single delayed execution using a
+// two-parameter strategy: a quiet timer that resets on each call, and a max
+// timer that caps how long a burst can delay the callback.
 type debouncer struct {
-	interval time.Duration
-	mu       sync.Mutex
-	timer    *time.Timer
+	quietInterval time.Duration
+	maxInterval   time.Duration
+	mu            sync.Mutex
+	quietTimer    *time.Timer
+	maxTimer      *time.Timer
 }
 
-// schedule resets the debounce timer. If a previous timer is pending, it is
-// cancelled. The callback fn will execute after d.interval of inactivity.
+// schedule resets the quiet timer on every call. On the first call in a burst
+// (no max timer running), it also starts the max timer. When either timer
+// fires, the callback executes and both timers are cancelled.
 func (d *debouncer) schedule(fn func()) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.timer != nil {
-		d.timer.Stop()
+
+	fire := func() {
+		d.mu.Lock()
+		// If both timers are already nil, another fire already ran — skip.
+		if d.quietTimer == nil && d.maxTimer == nil {
+			d.mu.Unlock()
+			return
+		}
+		// Cancel whichever timer didn't fire.
+		if d.quietTimer != nil {
+			d.quietTimer.Stop()
+			d.quietTimer = nil
+		}
+		if d.maxTimer != nil {
+			d.maxTimer.Stop()
+			d.maxTimer = nil
+		}
+		d.mu.Unlock()
+		fn()
 	}
-	d.timer = time.AfterFunc(d.interval, fn)
+
+	if d.quietTimer != nil {
+		d.quietTimer.Stop()
+	}
+	d.quietTimer = time.AfterFunc(d.quietInterval, fire)
+
+	// First event in a burst — start the max-wait timer.
+	if d.maxTimer == nil {
+		d.maxTimer = time.AfterFunc(d.maxInterval, fire)
+	}
 }
 
-// stop cancels any pending callback.
+// stop cancels any pending callbacks.
 func (d *debouncer) stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.timer != nil {
-		d.timer.Stop()
+	if d.quietTimer != nil {
+		d.quietTimer.Stop()
+		d.quietTimer = nil
+	}
+	if d.maxTimer != nil {
+		d.maxTimer.Stop()
+		d.maxTimer = nil
 	}
 }
 
@@ -82,7 +119,7 @@ type snapshotStore struct {
 func newSnapshotStore() snapshotStore {
 	return snapshotStore{
 		updatesCh: make(chan struct{}, 1),
-		debounce:  debouncer{interval: globalDebounceInterval},
+		debounce:  debouncer{quietInterval: debounceQuietWindow, maxInterval: debounceMaxWait},
 	}
 }
 
@@ -120,8 +157,9 @@ func (s *snapshotStore) storeAndNotify(snapshot *clusterstate.CacheSnapshot) {
 	s.mu.Unlock()
 }
 
-// scheduleRebuild debounces calls to rebuildFn. Each call resets the timer;
-// rebuildFn fires only after globalDebounceInterval of quiet.
+// scheduleRebuild debounces calls to rebuildFn using a two-parameter strategy:
+// the callback fires after debounceQuietWindow of inactivity, or after
+// debounceMaxWait from the first event in a burst, whichever comes first.
 func (s *snapshotStore) scheduleRebuild(rebuildFn func()) {
 	s.debounce.schedule(rebuildFn)
 }
