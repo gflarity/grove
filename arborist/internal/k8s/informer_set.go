@@ -102,15 +102,17 @@ type informerSet struct {
 // setup creates factories and informers, checks CRD availability.
 func (s *informerSet) setup(clientset kubernetes.Interface, dynamicClient dynamic.Interface) {
 	// Create core informer factory for Nodes — always cluster-wide.
+	// WithTransform strips unneeded fields before caching to reduce memory.
 	s.coreFactory = informers.NewSharedInformerFactoryWithOptions(
 		clientset,
 		0, // no resync period — we rely on watch events
+		informers.WithTransform(transformNode),
 	)
 
 	// Pod informer watches all pods (no label selector) so that non-Grove GPU
 	// pods are included in topology view GPU accounting.
 	// When a namespace is set, scope to that namespace.
-	var podFactoryOpts []informers.SharedInformerOption
+	podFactoryOpts := []informers.SharedInformerOption{informers.WithTransform(transformPod)}
 	if s.namespace != "" {
 		podFactoryOpts = append(podFactoryOpts, informers.WithNamespace(s.namespace))
 	}
@@ -121,7 +123,7 @@ func (s *informerSet) setup(clientset kubernetes.Interface, dynamicClient dynami
 	)
 
 	// Event informer — when a namespace is set, scope to that namespace.
-	var eventFactoryOpts []informers.SharedInformerOption
+	eventFactoryOpts := []informers.SharedInformerOption{informers.WithTransform(transformEvent)}
 	if s.namespace != "" {
 		eventFactoryOpts = append(eventFactoryOpts, informers.WithNamespace(s.namespace))
 	}
@@ -163,16 +165,25 @@ func (s *informerSet) setup(clientset kubernetes.Interface, dynamicClient dynami
 	// to avoid noisy reflector errors when CRDs aren't installed.
 	if s.pcsAvailable {
 		s.pcsInformer = s.dynamicFactory.ForResource(globalPcsGVR).Informer()
+		if err := s.pcsInformer.SetTransform(transformDynamicObject); err != nil {
+			panic(fmt.Sprintf("SetTransform on PCS informer: %v", err))
+		}
 	} else if s.onWarning != nil {
 		s.onWarning("PodCliqueSet CRD not found — PCS data unavailable")
 	}
 	if s.pcsgAvailable {
 		s.pcsgInformer = s.dynamicFactory.ForResource(globalPcsgGVR).Informer()
+		if err := s.pcsgInformer.SetTransform(transformDynamicObject); err != nil {
+			panic(fmt.Sprintf("SetTransform on PCSG informer: %v", err))
+		}
 	} else if s.onWarning != nil {
 		s.onWarning("PodCliqueScalingGroup CRD not found — PCSG data unavailable")
 	}
 	if s.pcAvailable {
 		s.pcInformer = s.dynamicFactory.ForResource(globalPcGVR).Informer()
+		if err := s.pcInformer.SetTransform(transformDynamicObject); err != nil {
+			panic(fmt.Sprintf("SetTransform on PC informer: %v", err))
+		}
 	} else if s.onWarning != nil {
 		s.onWarning("PodClique CRD not found — PC data unavailable")
 	}
@@ -184,6 +195,9 @@ func (s *informerSet) setup(clientset kubernetes.Interface, dynamicClient dynami
 			0,
 		)
 		s.ctInformer = s.clusterDynamicFactory.ForResource(globalClusterTopologyGVR).Informer()
+		if err := s.ctInformer.SetTransform(transformDynamicObject); err != nil {
+			panic(fmt.Sprintf("SetTransform on ClusterTopology informer: %v", err))
+		}
 	} else if s.onWarning != nil {
 		s.onWarning("ClusterTopology CRD not found — topology view unavailable")
 	}
