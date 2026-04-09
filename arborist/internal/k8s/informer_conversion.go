@@ -6,6 +6,7 @@ import (
 	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -125,8 +126,9 @@ func readPCSSpecsFromInformer(informer cache.SharedIndexInformer) map[string]*co
 }
 
 // readPodsFromInformer reads all pods from the given informer and converts them to TopologyPodInput.
+// When claims is non-nil, DRA GPU allocations are included in GPURequests.
 // Used by InformerGlobalCache.
-func readPodsFromInformer(informer cache.SharedIndexInformer) []clusterstate.TopologyPodInput {
+func readPodsFromInformer(informer cache.SharedIndexInformer, claims map[string]*resourcev1.ResourceClaim) []clusterstate.TopologyPodInput {
 	items := informer.GetStore().List()
 	result := make([]clusterstate.TopologyPodInput, 0, len(items))
 
@@ -136,13 +138,20 @@ func readPodsFromInformer(informer cache.SharedIndexInformer) []clusterstate.Top
 			continue
 		}
 
+		devicePluginGPUs := GPURequestsFromPod(pod)
+		draGPUs := DRAGPUCountForPod(pod, claims)
+		gpuRequests := devicePluginGPUs
+		if draGPUs > gpuRequests {
+			gpuRequests = draGPUs
+		}
+
 		result = append(result, clusterstate.TopologyPodInput{
 			Namespace:   pod.Namespace,
 			Name:        pod.Name,
 			NodeName:    pod.Spec.NodeName,
 			Phase:       string(pod.Status.Phase),
 			Labels:      pod.Labels,
-			GPURequests: GPURequestsFromPod(pod),
+			GPURequests: gpuRequests,
 		})
 	}
 
@@ -155,6 +164,59 @@ func GPURequestsFromPod(pod *corev1.Pod) int64 {
 	for i := range pod.Spec.Containers {
 		if qty, ok := pod.Spec.Containers[i].Resources.Requests[corev1.ResourceName("nvidia.com/gpu")]; ok {
 			total += qty.Value()
+		}
+	}
+	return total
+}
+
+// NVIDIADRADriver is the DRA driver name for NVIDIA GPUs.
+const NVIDIADRADriver = "gpu.nvidia.com"
+
+// DRAGPUCountForPod counts the number of NVIDIA GPUs allocated via DRA for a pod.
+// It resolves pod.Spec.ResourceClaims to actual ResourceClaim objects (via the claims
+// map keyed by "namespace/name"), then counts DeviceRequestAllocationResult entries
+// with the NVIDIA GPU driver.
+//
+// For template-based claims, it uses pod.Status.ResourceClaimStatuses to find the
+// generated ResourceClaim name. Returns 0 if claims is nil (DRA unavailable).
+func DRAGPUCountForPod(pod *corev1.Pod, claims map[string]*resourcev1.ResourceClaim) int64 {
+	if len(claims) == 0 || len(pod.Spec.ResourceClaims) == 0 {
+		return 0
+	}
+
+	// Build lookup for template-based claim name resolution.
+	statusByName := make(map[string]string, len(pod.Status.ResourceClaimStatuses))
+	for i := range pod.Status.ResourceClaimStatuses {
+		s := &pod.Status.ResourceClaimStatuses[i]
+		if s.ResourceClaimName != nil {
+			statusByName[s.Name] = *s.ResourceClaimName
+		}
+	}
+
+	var total int64
+	for i := range pod.Spec.ResourceClaims {
+		prc := &pod.Spec.ResourceClaims[i]
+
+		var claimName string
+		if prc.ResourceClaimName != nil {
+			claimName = *prc.ResourceClaimName
+		} else if prc.ResourceClaimTemplateName != nil {
+			claimName = statusByName[prc.Name]
+		}
+		if claimName == "" {
+			continue
+		}
+
+		key := pod.Namespace + "/" + claimName
+		claim, ok := claims[key]
+		if !ok || claim.Status.Allocation == nil {
+			continue
+		}
+
+		for j := range claim.Status.Allocation.Devices.Results {
+			if claim.Status.Allocation.Devices.Results[j].Driver == NVIDIADRADriver {
+				total++
+			}
 		}
 	}
 	return total

@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -54,7 +55,10 @@ func transformPod(obj interface{}) (interface{}, error) {
 		c.SecurityContext = nil
 	}
 
-	pod.Status = corev1.PodStatus{Phase: pod.Status.Phase}
+	pod.Status = corev1.PodStatus{
+		Phase:                 pod.Status.Phase,
+		ResourceClaimStatuses: pod.Status.ResourceClaimStatuses,
+	}
 
 	return pod, nil
 }
@@ -107,6 +111,26 @@ func transformEvent(obj interface{}) (interface{}, error) {
 	event.InvolvedObject.FieldPath = ""
 
 	return event, nil
+}
+
+// transformResourceClaim strips fields not needed by the informer cache to reduce memory.
+//
+// Kept: Name, Namespace, Status.Allocation.Devices.Results (Driver field only).
+// Stripped: ManagedFields, Annotations, Labels, Spec, Status.ReservedFor, Status.Devices.
+func transformResourceClaim(obj interface{}) (interface{}, error) {
+	claim, ok := obj.(*resourcev1.ResourceClaim)
+	if !ok {
+		return nil, fmt.Errorf("transformResourceClaim: expected *resourcev1.ResourceClaim, got %T", obj)
+	}
+
+	claim.ManagedFields = nil
+	claim.Annotations = nil
+	claim.Labels = nil
+	claim.Spec = resourcev1.ResourceClaimSpec{}
+	claim.Status.ReservedFor = nil
+	claim.Status.Devices = nil
+
+	return claim, nil
 }
 
 // transformDynamicObject strips metadata.managedFields and metadata.annotations

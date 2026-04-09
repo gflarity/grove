@@ -7,6 +7,7 @@ import (
 
 	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -1510,6 +1511,212 @@ func TestBuildCacheOptions_NamespacePassedToGlobalCache(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// DRA integration tests
+// ---------------------------------------------------------------------------
+
+// newFakeClientsetWithDRA creates a kubefake.Clientset with both Grove CRDs and
+// the resource.k8s.io/v1 API registered in fake discovery.
+func newFakeClientsetWithDRA(objects ...runtime.Object) *kubefake.Clientset {
+	cs := newFakeClientset(objects...)
+	cs.Resources = append(cs.Resources, &metav1.APIResourceList{
+		GroupVersion: "resource.k8s.io/v1",
+		APIResources: []metav1.APIResource{
+			{Name: "resourceclaims", Kind: "ResourceClaim", Namespaced: true},
+		},
+	})
+	return cs
+}
+
+func TestInformerGlobalCache_DRAGPUAccounting(t *testing.T) {
+	// Node with GPU capacity via device plugin.
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-node",
+			Labels: map[string]string{
+				"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3",
+			},
+		},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				"nvidia.com/gpu": *mustParseQuantity("8"),
+			},
+		},
+	}
+
+	// ResourceClaim with 2 NVIDIA GPU allocations.
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-gpu-claim",
+			Namespace: "default",
+		},
+		Status: resourcev1.ResourceClaimStatus{
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Request: "gpu", Driver: NVIDIADRADriver, Pool: "gpu-node", Device: "gpu-0"},
+						{Request: "gpu", Driver: NVIDIADRADriver, Pool: "gpu-node", Device: "gpu-1"},
+					},
+				},
+			},
+		},
+	}
+
+	// Pod referencing the DRA claim (no nvidia.com/gpu resource request).
+	claimName := "my-gpu-claim"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dra-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of": "my-pcs",
+				"grove.io/podclique":        "my-pcs-0-worker",
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "gpu-node",
+			ResourceClaims: []corev1.PodResourceClaim{
+				{Name: "gpu", ResourceClaimName: &claimName},
+			},
+			Containers: []corev1.Container{{Name: "main"}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	clientset := newFakeClientsetWithDRA(node, pod, claim)
+	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
+
+	gc := NewInformerGlobalCache(clientset, dynClient)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := gc.Start(ctx); err != nil {
+		t.Fatalf("Start() returned error: %v", err)
+	}
+	defer gc.Stop()
+
+	if !gc.WaitForSync(ctx) {
+		t.Fatal("WaitForSync() returned false")
+	}
+
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+
+	// Verify DRA availability was detected.
+	if !gc.draAvailable {
+		t.Error("draAvailable should be true")
+	}
+
+	// Verify GPU count in topology view — the pod should have 2 GPUs from DRA.
+	found := false
+	for _, p := range snap.TopologyViewData.RawPods {
+		if p.Name == "dra-pod" {
+			found = true
+			if p.GPURequests != 2 {
+				t.Errorf("dra-pod GPURequests = %d, want 2", p.GPURequests)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("dra-pod not found in RawPods")
+	}
+}
+
+func TestInformerGlobalCache_DRAGracefulDegradation(t *testing.T) {
+	// Node with GPU capacity.
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-node",
+			Labels: map[string]string{
+				"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3",
+			},
+		},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				"nvidia.com/gpu": *mustParseQuantity("8"),
+			},
+		},
+	}
+
+	// Pod with device-plugin GPU requests (no DRA).
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dp-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "gpu-node",
+			Containers: []corev1.Container{
+				{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							"nvidia.com/gpu": *mustParseQuantity("4"),
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	// Use standard fake clientset WITHOUT DRA API.
+	clientset := newFakeClientset(node, pod)
+	dynClient := dynamicfake.NewSimpleDynamicClient(newGlobalFakeScheme())
+
+	var warnings []string
+	gc := NewInformerGlobalCache(clientset, dynClient, WithOnWarning(func(msg string) {
+		warnings = append(warnings, msg)
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := gc.Start(ctx); err != nil {
+		t.Fatalf("Start() returned error: %v", err)
+	}
+	defer gc.Stop()
+
+	if !gc.WaitForSync(ctx) {
+		t.Fatal("WaitForSync() returned false")
+	}
+
+	// DRA should not be available.
+	if gc.draAvailable {
+		t.Error("draAvailable should be false without DRA API")
+	}
+
+	// A warning should have been emitted about DRA.
+	draWarningFound := false
+	for _, w := range warnings {
+		if w == "DRA API (resource.k8s.io/v1) not found — DRA GPU accounting unavailable" {
+			draWarningFound = true
+			break
+		}
+	}
+	if !draWarningFound {
+		t.Errorf("expected DRA warning, got warnings: %v", warnings)
+	}
+
+	// Device-plugin GPU counting should still work.
+	snap := gc.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() returned nil")
+	}
+	for _, p := range snap.TopologyViewData.RawPods {
+		if p.Name == "dp-pod" {
+			if p.GPURequests != 4 {
+				t.Errorf("dp-pod GPURequests = %d, want 4", p.GPURequests)
+			}
+			return
+		}
+	}
+	t.Error("dp-pod not found in RawPods")
 }
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -622,6 +623,342 @@ func TestTransformDynamicObject_WrongType(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for wrong type")
 	}
+}
+
+func TestTransformPod_PreservesResourceClaimStatuses(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "dra-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			ResourceClaims: []corev1.PodResourceClaim{
+				{Name: "gpu", ResourceClaimTemplateName: stringPtr("gpu-template")},
+			},
+			Containers: []corev1.Container{{Name: "main"}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ResourceClaimStatuses: []corev1.PodResourceClaimStatus{
+				{Name: "gpu", ResourceClaimName: stringPtr("dra-pod-gpu-abc12")},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "main", Ready: true}},
+		},
+	}
+
+	result, err := transformPod(pod)
+	if err != nil {
+		t.Fatalf("transformPod returned error: %v", err)
+	}
+	transformed := result.(*corev1.Pod)
+
+	// ResourceClaims in Spec should be preserved
+	if len(transformed.Spec.ResourceClaims) != 1 {
+		t.Fatalf("Spec.ResourceClaims length = %d, want 1", len(transformed.Spec.ResourceClaims))
+	}
+	if *transformed.Spec.ResourceClaims[0].ResourceClaimTemplateName != "gpu-template" {
+		t.Error("Spec.ResourceClaims[0].ResourceClaimTemplateName should be preserved")
+	}
+
+	// ResourceClaimStatuses in Status should be preserved
+	if len(transformed.Status.ResourceClaimStatuses) != 1 {
+		t.Fatalf("Status.ResourceClaimStatuses length = %d, want 1", len(transformed.Status.ResourceClaimStatuses))
+	}
+	if *transformed.Status.ResourceClaimStatuses[0].ResourceClaimName != "dra-pod-gpu-abc12" {
+		t.Error("Status.ResourceClaimStatuses[0].ResourceClaimName should be preserved")
+	}
+
+	// Other status fields should still be stripped
+	if transformed.Status.ContainerStatuses != nil {
+		t.Error("Status.ContainerStatuses should be nil")
+	}
+}
+
+func TestTransformResourceClaim(t *testing.T) {
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-claim",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+			Annotations: map[string]string{
+				"kubectl.kubernetes.io/last-applied-configuration": "big-json",
+			},
+			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubectl"}},
+		},
+		Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{
+				Requests: []resourcev1.DeviceRequest{{Name: "gpu"}},
+			},
+		},
+		Status: resourcev1.ResourceClaimStatus{
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Request: "gpu", Driver: "gpu.nvidia.com", Pool: "node-1", Device: "gpu-0"},
+						{Request: "gpu", Driver: "gpu.nvidia.com", Pool: "node-1", Device: "gpu-1"},
+					},
+				},
+			},
+			ReservedFor: []resourcev1.ResourceClaimConsumerReference{
+				{UID: "pod-uid"},
+			},
+		},
+	}
+
+	result, err := transformResourceClaim(claim)
+	if err != nil {
+		t.Fatalf("transformResourceClaim returned error: %v", err)
+	}
+	transformed := result.(*resourcev1.ResourceClaim)
+
+	// Kept: Name, Namespace, Allocation.Devices.Results
+	if transformed.Name != "my-claim" {
+		t.Errorf("Name = %q, want %q", transformed.Name, "my-claim")
+	}
+	if transformed.Namespace != "default" {
+		t.Errorf("Namespace = %q, want %q", transformed.Namespace, "default")
+	}
+	if transformed.Status.Allocation == nil {
+		t.Fatal("Status.Allocation should be preserved")
+	}
+	if len(transformed.Status.Allocation.Devices.Results) != 2 {
+		t.Fatalf("Allocation.Devices.Results length = %d, want 2", len(transformed.Status.Allocation.Devices.Results))
+	}
+	if transformed.Status.Allocation.Devices.Results[0].Driver != "gpu.nvidia.com" {
+		t.Error("Allocation result Driver should be preserved")
+	}
+
+	// Stripped fields
+	if transformed.ManagedFields != nil {
+		t.Error("ManagedFields should be nil")
+	}
+	if transformed.Annotations != nil {
+		t.Error("Annotations should be nil")
+	}
+	if transformed.Labels != nil {
+		t.Error("Labels should be nil")
+	}
+	if len(transformed.Spec.Devices.Requests) != 0 {
+		t.Error("Spec should be zeroed")
+	}
+	if transformed.Status.ReservedFor != nil {
+		t.Error("Status.ReservedFor should be nil")
+	}
+}
+
+func TestTransformResourceClaim_WrongType(t *testing.T) {
+	_, err := transformResourceClaim("not-a-claim")
+	if err == nil {
+		t.Error("expected error for wrong type")
+	}
+}
+
+func TestDRAGPUCountForPod(t *testing.T) {
+	tests := []struct {
+		name   string
+		pod    *corev1.Pod
+		claims map[string]*resourcev1.ResourceClaim
+		want   int64
+	}{
+		{
+			name:   "no resource claims",
+			pod:    &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}},
+			claims: map[string]*resourcev1.ResourceClaim{},
+			want:   0,
+		},
+		{
+			name:   "nil claims map",
+			pod:    &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}},
+			claims: nil,
+			want:   0,
+		},
+		{
+			name: "direct claim with 2 NVIDIA GPUs",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Spec: corev1.PodSpec{
+					ResourceClaims: []corev1.PodResourceClaim{
+						{Name: "gpu", ResourceClaimName: stringPtr("my-gpu-claim")},
+					},
+				},
+			},
+			claims: map[string]*resourcev1.ResourceClaim{
+				"default/my-gpu-claim": {
+					Status: resourcev1.ResourceClaimStatus{
+						Allocation: &resourcev1.AllocationResult{
+							Devices: resourcev1.DeviceAllocationResult{
+								Results: []resourcev1.DeviceRequestAllocationResult{
+									{Driver: NVIDIADRADriver, Pool: "node-1", Device: "gpu-0"},
+									{Driver: NVIDIADRADriver, Pool: "node-1", Device: "gpu-1"},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: 2,
+		},
+		{
+			name: "template-based claim resolved via status",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns1"},
+				Spec: corev1.PodSpec{
+					ResourceClaims: []corev1.PodResourceClaim{
+						{Name: "gpu", ResourceClaimTemplateName: stringPtr("gpu-template")},
+					},
+				},
+				Status: corev1.PodStatus{
+					ResourceClaimStatuses: []corev1.PodResourceClaimStatus{
+						{Name: "gpu", ResourceClaimName: stringPtr("pod-gpu-12345")},
+					},
+				},
+			},
+			claims: map[string]*resourcev1.ResourceClaim{
+				"ns1/pod-gpu-12345": {
+					Status: resourcev1.ResourceClaimStatus{
+						Allocation: &resourcev1.AllocationResult{
+							Devices: resourcev1.DeviceAllocationResult{
+								Results: []resourcev1.DeviceRequestAllocationResult{
+									{Driver: NVIDIADRADriver, Pool: "node-1", Device: "gpu-0"},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "non-NVIDIA driver results",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Spec: corev1.PodSpec{
+					ResourceClaims: []corev1.PodResourceClaim{
+						{Name: "net", ResourceClaimName: stringPtr("my-net-claim")},
+					},
+				},
+			},
+			claims: map[string]*resourcev1.ResourceClaim{
+				"default/my-net-claim": {
+					Status: resourcev1.ResourceClaimStatus{
+						Allocation: &resourcev1.AllocationResult{
+							Devices: resourcev1.DeviceAllocationResult{
+								Results: []resourcev1.DeviceRequestAllocationResult{
+									{Driver: "net.example.com", Pool: "node-1", Device: "nic-0"},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: 0,
+		},
+		{
+			name: "mixed drivers",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Spec: corev1.PodSpec{
+					ResourceClaims: []corev1.PodResourceClaim{
+						{Name: "gpu", ResourceClaimName: stringPtr("mixed-claim")},
+					},
+				},
+			},
+			claims: map[string]*resourcev1.ResourceClaim{
+				"default/mixed-claim": {
+					Status: resourcev1.ResourceClaimStatus{
+						Allocation: &resourcev1.AllocationResult{
+							Devices: resourcev1.DeviceAllocationResult{
+								Results: []resourcev1.DeviceRequestAllocationResult{
+									{Driver: NVIDIADRADriver, Pool: "node-1", Device: "gpu-0"},
+									{Driver: "net.example.com", Pool: "node-1", Device: "nic-0"},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "unallocated claim",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Spec: corev1.PodSpec{
+					ResourceClaims: []corev1.PodResourceClaim{
+						{Name: "gpu", ResourceClaimName: stringPtr("pending-claim")},
+					},
+				},
+			},
+			claims: map[string]*resourcev1.ResourceClaim{
+				"default/pending-claim": {
+					Status: resourcev1.ResourceClaimStatus{Allocation: nil},
+				},
+			},
+			want: 0,
+		},
+		{
+			name: "claim not found in map",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Spec: corev1.PodSpec{
+					ResourceClaims: []corev1.PodResourceClaim{
+						{Name: "gpu", ResourceClaimName: stringPtr("missing-claim")},
+					},
+				},
+			},
+			claims: map[string]*resourcev1.ResourceClaim{},
+			want:   0,
+		},
+		{
+			name: "multiple claims with GPUs",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Spec: corev1.PodSpec{
+					ResourceClaims: []corev1.PodResourceClaim{
+						{Name: "gpu1", ResourceClaimName: stringPtr("claim-a")},
+						{Name: "gpu2", ResourceClaimName: stringPtr("claim-b")},
+					},
+				},
+			},
+			claims: map[string]*resourcev1.ResourceClaim{
+				"default/claim-a": {
+					Status: resourcev1.ResourceClaimStatus{
+						Allocation: &resourcev1.AllocationResult{
+							Devices: resourcev1.DeviceAllocationResult{
+								Results: []resourcev1.DeviceRequestAllocationResult{
+									{Driver: NVIDIADRADriver, Pool: "node-1", Device: "gpu-0"},
+									{Driver: NVIDIADRADriver, Pool: "node-1", Device: "gpu-1"},
+								},
+							},
+						},
+					},
+				},
+				"default/claim-b": {
+					Status: resourcev1.ResourceClaimStatus{
+						Allocation: &resourcev1.AllocationResult{
+							Devices: resourcev1.DeviceAllocationResult{
+								Results: []resourcev1.DeviceRequestAllocationResult{
+									{Driver: NVIDIADRADriver, Pool: "node-1", Device: "gpu-2"},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DRAGPUCountForPod(tt.pod, tt.claims)
+			if got != tt.want {
+				t.Errorf("DRAGPUCountForPod() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func stringPtr(s string) *string {
+	return &s
 }
 
 func boolPtr(b bool) *bool {

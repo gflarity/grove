@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/grove/arborist/internal/clusterstate"
 	corev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -88,6 +89,10 @@ type informerSet struct {
 	pcInformer    cache.SharedIndexInformer
 	ctInformer    cache.SharedIndexInformer
 
+	// ResourceClaim informer for DRA GPU accounting
+	resourceClaimFactory  informers.SharedInformerFactory
+	resourceClaimInformer cache.SharedIndexInformer
+
 	// Optional warning callback for non-fatal startup issues.
 	onWarning func(string)
 
@@ -97,6 +102,7 @@ type informerSet struct {
 	pcsgAvailable        bool
 	pcAvailable          bool
 	topologyCRDAvailable bool
+	draAvailable         bool
 }
 
 // setup creates factories and informers, checks CRD availability.
@@ -201,6 +207,24 @@ func (s *informerSet) setup(clientset kubernetes.Interface, dynamicClient dynami
 	} else if s.onWarning != nil {
 		s.onWarning("ClusterTopology CRD not found — topology view unavailable")
 	}
+
+	// ResourceClaim informer for DRA GPU accounting — only create if the
+	// resource.k8s.io/v1 API is available (Kubernetes 1.32+).
+	s.draAvailable = s.checkDRAAvailable(clientset)
+	if s.draAvailable {
+		rcFactoryOpts := []informers.SharedInformerOption{informers.WithTransform(transformResourceClaim)}
+		if s.namespace != "" {
+			rcFactoryOpts = append(rcFactoryOpts, informers.WithNamespace(s.namespace))
+		}
+		s.resourceClaimFactory = informers.NewSharedInformerFactoryWithOptions(
+			clientset,
+			0,
+			rcFactoryOpts...,
+		)
+		s.resourceClaimInformer = s.resourceClaimFactory.Resource().V1().ResourceClaims().Informer()
+	} else if s.onWarning != nil {
+		s.onWarning("DRA API (resource.k8s.io/v1) not found — DRA GPU accounting unavailable")
+	}
 }
 
 // startFactories registers event handlers on all informers and starts all factories.
@@ -234,6 +258,10 @@ func (s *informerSet) startFactories(ctx context.Context, onChange func()) {
 		//nolint:errcheck
 		s.ctInformer.AddEventHandler(handler)
 	}
+	if s.resourceClaimInformer != nil {
+		//nolint:errcheck
+		s.resourceClaimInformer.AddEventHandler(handler)
+	}
 
 	// Start informers
 	s.coreFactory.Start(ctx.Done())
@@ -242,6 +270,9 @@ func (s *informerSet) startFactories(ctx context.Context, onChange func()) {
 	s.dynamicFactory.Start(ctx.Done())
 	if s.clusterDynamicFactory != nil {
 		s.clusterDynamicFactory.Start(ctx.Done())
+	}
+	if s.resourceClaimFactory != nil {
+		s.resourceClaimFactory.Start(ctx.Done())
 	}
 }
 
@@ -265,6 +296,9 @@ func (s *informerSet) waitForSync(ctx context.Context) bool {
 	if s.ctInformer != nil {
 		syncFuncs = append(syncFuncs, s.ctInformer.HasSynced)
 	}
+	if s.resourceClaimInformer != nil {
+		syncFuncs = append(syncFuncs, s.resourceClaimInformer.HasSynced)
+	}
 	return cache.WaitForCacheSync(ctx.Done(), syncFuncs...)
 }
 
@@ -273,6 +307,13 @@ func (s *informerSet) warnf(format string, args ...interface{}) {
 	if s.onWarning != nil {
 		s.onWarning(fmt.Sprintf(format, args...))
 	}
+}
+
+// checkDRAAvailable checks whether the resource.k8s.io/v1 API group is available,
+// indicating DRA support (Kubernetes 1.32+).
+func (s *informerSet) checkDRAAvailable(clientset kubernetes.Interface) bool {
+	_, err := clientset.Discovery().ServerResourcesForGroupVersion("resource.k8s.io/v1")
+	return err == nil
 }
 
 // checkGroveCRDsAvailable makes a single Discovery call for the grove.io/v1alpha1
@@ -412,9 +453,30 @@ func (s *informerSet) readPodCliques(scheduledByPodClique map[string]int32) podC
 	return result
 }
 
+// readResourceClaims reads all ResourceClaims from the informer cache and returns
+// them keyed by "namespace/name". Returns nil if DRA is not available.
+func (s *informerSet) readResourceClaims() map[string]*resourcev1.ResourceClaim {
+	if s.resourceClaimInformer == nil {
+		return nil
+	}
+	items := s.resourceClaimInformer.GetStore().List()
+	result := make(map[string]*resourcev1.ResourceClaim, len(items))
+	for _, item := range items {
+		claim, ok := item.(*resourcev1.ResourceClaim)
+		if !ok {
+			continue
+		}
+		key := claim.Namespace + "/" + claim.Name
+		result[key] = claim
+	}
+	return result
+}
+
 // readPods reads all pods from the informer cache and converts them to TopologyPodInput.
+// When DRA is available, ResourceClaim data is included in GPU accounting.
 func (s *informerSet) readPods() []clusterstate.TopologyPodInput {
-	return readPodsFromInformer(s.podInformer)
+	claims := s.readResourceClaims()
+	return readPodsFromInformer(s.podInformer, claims)
 }
 
 // readEvents reads all events from the informer cache and indexes by involved object.
