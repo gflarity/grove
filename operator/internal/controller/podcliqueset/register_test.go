@@ -19,6 +19,7 @@ package podcliqueset
 import (
 	"testing"
 
+	"github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovecorev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	testutils "github.com/ai-dynamo/grove/operator/test/utils"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -83,4 +85,84 @@ func TestMapClusterTopologyToPodCliqueSets(t *testing.T) {
 		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pcs-a"}},
 		{NamespacedName: types.NamespacedName{Namespace: "team-b", Name: "pcs-b"}},
 	}, requests)
+}
+
+func TestPodCliqueSetPredicateUpdate(t *testing.T) {
+	pred := podCliqueSetPredicate()
+
+	tests := []struct {
+		name string
+		old  *grovecorev1alpha1.PodCliqueSet
+		new  *grovecorev1alpha1.PodCliqueSet
+		want bool
+	}{
+		{
+			name: "generation change enqueues",
+			old:  podCliqueSetWithGenerationAndAnnotations(1, nil),
+			new:  podCliqueSetWithGenerationAndAnnotations(2, nil),
+			want: true,
+		},
+		{
+			name: "reconcile trigger annotation add enqueues",
+			old:  podCliqueSetWithGenerationAndAnnotations(1, nil),
+			new: podCliqueSetWithGenerationAndAnnotations(1, map[string]string{
+				constants.AnnotationReconcileTrigger: "new",
+			}),
+			want: true,
+		},
+		{
+			name: "reconcile trigger annotation change enqueues",
+			old: podCliqueSetWithGenerationAndAnnotations(1, map[string]string{
+				constants.AnnotationReconcileTrigger: "old",
+			}),
+			new: podCliqueSetWithGenerationAndAnnotations(1, map[string]string{
+				constants.AnnotationReconcileTrigger: "new",
+			}),
+			want: true,
+		},
+		{
+			name: "reconcile trigger annotation delete enqueues",
+			old: podCliqueSetWithGenerationAndAnnotations(1, map[string]string{
+				constants.AnnotationReconcileTrigger: "old",
+			}),
+			new:  podCliqueSetWithGenerationAndAnnotations(1, nil),
+			want: true,
+		},
+		{
+			name: "unrelated annotation change does not enqueue",
+			old: podCliqueSetWithGenerationAndAnnotations(1, map[string]string{
+				"example.com/other": "old",
+			}),
+			new: podCliqueSetWithGenerationAndAnnotations(1, map[string]string{
+				"example.com/other": "new",
+			}),
+			want: false,
+		},
+		{
+			name: "same generation and same trigger value does not enqueue",
+			old: podCliqueSetWithGenerationAndAnnotations(1, map[string]string{
+				constants.AnnotationReconcileTrigger: "same",
+			}),
+			new: podCliqueSetWithGenerationAndAnnotations(1, map[string]string{
+				constants.AnnotationReconcileTrigger: "same",
+			}),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pred.Update(event.UpdateEvent{ObjectOld: tt.old, ObjectNew: tt.new})
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func podCliqueSetWithGenerationAndAnnotations(generation int64, annotations map[string]string) *grovecorev1alpha1.PodCliqueSet {
+	return &grovecorev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Generation:  generation,
+			Annotations: annotations,
+		},
+	}
 }
